@@ -729,7 +729,8 @@ where
             // query expands.
             // A database's audience is exactly its `entity_access` rows, so it
             // resolves the same way a document's does.
-            EntityType::Document
+            EntityType::ForeignEntity
+            | EntityType::Document
             | EntityType::Chat
             | EntityType::Project
             | EntityType::EmailThread
