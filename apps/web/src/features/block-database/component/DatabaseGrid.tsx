@@ -73,6 +73,7 @@ import type {
 
 export type DatabaseGridProps = {
   databaseId: string;
+  primaryColumnId?: string;
   table: TableDetail;
   canEdit: boolean;
   /** The view on screen: a stored one, or the table's own All records. */
@@ -185,7 +186,7 @@ function TableAdapter(props: DatabaseGridProps & { tableId: string }) {
     onTableChanged: (listener) =>
       useDatabaseTableChanges((change) => listener(change.tableId)),
   });
-  const source = withRelationLabels(
+  const baseSource = withRelationLabels(
     createDatabaseRowsSource({
       databaseId,
       table,
@@ -232,6 +233,17 @@ function TableAdapter(props: DatabaseGridProps & { tableId: string }) {
     }),
     relations
   );
+  const source: DatabaseRowsSource = {
+    ...baseSource,
+    columns: () =>
+      baseSource
+        .columns()
+        .map((column) =>
+          column.id === props.primaryColumnId
+            ? { ...column, primary: true }
+            : column
+        ),
+  };
   const boardViewId = () =>
     props.stored && props.view.layout.kind === 'board'
       ? props.view.id

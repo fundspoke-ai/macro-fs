@@ -44,6 +44,21 @@ PostHog unless the variable was set when it was built. With the flag off:
 
 `showDatabaseSql` (`VITE_SHOW_DATABASE_SQL`) is separate and only hides SQL.
 
+## CRM pipelines
+
+Pipelines are created from the CRM sidebar's **New pipeline** action. Their
+backing database and rows inherit the pipeline's access; use **Share → Team access**
+in the CRM to switch between **None** (private) and **Edit** (team). A pipeline's primary
+company/contact reference is required and unique within that pipeline. Its
+column and table are protected against removal or type changes. See
+[Customers (CRM)](surfaces.md#customers-crm--appcomponentcompanies) for the flow.
+
+Teams migrated from the legacy CRM have a team-shared **Sales** pipeline with
+their visible companies and copied Stage, Owner and Revenue values, including
+closed and unstaged companies. Hidden companies are excluded. The migration is
+a one-time copy: later edits to a company’s legacy properties do not synchronize
+with its pipeline row. The pipeline can be renamed, customized or trashed normally.
+
 ## Properties and records
 
 Use **Add column** immediately after the table’s headers. It creates an **Unnamed**

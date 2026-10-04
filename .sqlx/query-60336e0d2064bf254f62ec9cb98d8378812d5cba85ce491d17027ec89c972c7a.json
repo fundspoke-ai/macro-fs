@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM crm_companies WHERE team_id = $1 AND NOT hidden AND ($2::uuid IS NULL OR id > $2) ORDER BY id LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "60336e0d2064bf254f62ec9cb98d8378812d5cba85ce491d17027ec89c972c7a"
+}

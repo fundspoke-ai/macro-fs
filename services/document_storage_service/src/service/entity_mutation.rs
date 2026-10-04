@@ -418,6 +418,7 @@ where
             | EntityType::StaticFile
             | EntityType::CrmCompany
             | EntityType::CrmContact
+            | EntityType::CrmPipeline
             | EntityType::CalendarEvent
             | EntityType::Reminder
             | EntityType::Skill
@@ -467,6 +468,7 @@ where
             | EntityType::StaticFile
             | EntityType::CrmCompany
             | EntityType::CrmContact
+            | EntityType::CrmPipeline
             | EntityType::CalendarEvent
             | EntityType::Reminder
             | EntityType::Skill
@@ -476,7 +478,7 @@ where
             // A database is not filed into a project, so there is nowhere to
             // move it to (`EntityType::is_valid_entity_access_entity`).
             | EntityType::Database
-            | EntityType::DatabaseRow => {
+        | EntityType::DatabaseRow => {
                 return unsupported(requested, "move");
             }
         };
@@ -521,6 +523,7 @@ where
             | EntityType::StaticFile
             | EntityType::CrmCompany
             | EntityType::CrmContact
+            | EntityType::CrmPipeline
             | EntityType::CalendarEvent
             | EntityType::Reminder
             | EntityType::Skill
@@ -530,7 +533,7 @@ where
             // Databases are shared by granting access directly; they carry no
             // public/channel share policy.
             | EntityType::Database
-            | EntityType::DatabaseRow => {
+        | EntityType::DatabaseRow => {
                 return unsupported(requested, "share policy updates");
             }
         };
@@ -579,6 +582,7 @@ where
             | EntityType::StaticFile
             | EntityType::CrmCompany
             | EntityType::CrmContact
+            | EntityType::CrmPipeline
             | EntityType::CalendarEvent
             | EntityType::Reminder
             | EntityType::Skill
@@ -613,6 +617,7 @@ where
             | EntityType::StaticFile
             | EntityType::CrmCompany
             | EntityType::CrmContact
+            | EntityType::CrmPipeline
             | EntityType::CalendarEvent
             | EntityType::Reminder
             | EntityType::Skill
@@ -667,6 +672,7 @@ where
             | EntityType::StaticFile
             | EntityType::CrmCompany
             | EntityType::CrmContact
+            | EntityType::CrmPipeline
             | EntityType::CalendarEvent
             | EntityType::Reminder
             | EntityType::Skill
@@ -730,6 +736,7 @@ where
             | EntityType::StaticFile
             | EntityType::CrmCompany
             | EntityType::CrmContact
+            | EntityType::CrmPipeline
             | EntityType::CalendarEvent
             | EntityType::Reminder
             | EntityType::Skill
@@ -738,7 +745,7 @@ where
             | EntityType::Initiative
             // Duplicating a database is unsupported.
             | EntityType::Database
-            | EntityType::DatabaseRow => {
+        | EntityType::DatabaseRow => {
                 return unsupported(requested, "duplication");
             }
         };

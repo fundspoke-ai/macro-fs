@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET CONSTRAINTS database_row_requires_primary, database_primary_value_required, database_primary_columns_column_id_fkey, crm_pipelines_table_id_fkey IMMEDIATE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "4ad94ab91d9367e866db7efc86840b81fe12477c14828eabf426ffeef732c5c3"
+}

@@ -24,6 +24,7 @@ export type CreateReminderRequestEntityType =
   | 'static_file'
   | 'crm_company'
   | 'crm_contact'
+  | 'crm_pipeline'
   | 'reminder'
   | 'skill'
   | 'agent_session'

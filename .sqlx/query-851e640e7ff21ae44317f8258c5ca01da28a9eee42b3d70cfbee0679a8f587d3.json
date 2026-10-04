@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE databases SET name = 'Renamed by user', trashed_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "851e640e7ff21ae44317f8258c5ca01da28a9eee42b3d70cfbee0679a8f587d3"
+}

@@ -33,3 +33,11 @@ pub mod search_repo;
 /// The CRM search service trait and implementation
 #[cfg(feature = "search")]
 pub mod search_service;
+
+/// CRM pipelines and their lifecycle.
+#[cfg(feature = "ports")]
+pub mod pipelines;
+
+/// Operator-only migration of the legacy CRM into Sales pipelines.
+#[cfg(feature = "outbound")]
+pub mod sales_backfill;

@@ -558,6 +558,9 @@ fn applied(
             column_of(write),
             SchemaError::ColumnRenamedElsewhere.to_string(),
         )),
+        WritesOutcome::ConstraintRefused { write, message } => {
+            Err(refuse(write, None, column_of(write), message))
+        }
         WritesOutcome::OptionInUse => Err(DatabaseError::OptionInUse),
         WritesOutcome::RowInUse => Err(DatabaseError::RowInUse),
         WritesOutcome::MissingOption { write } => Err(refuse(

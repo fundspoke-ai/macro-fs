@@ -3543,6 +3543,7 @@ export const getCollabSurfaceResponse = zod
         'static_file',
         'crm_company',
         'crm_contact',
+        'crm_pipeline',
         'reminder',
         'skill',
         'agent_session',
@@ -3597,6 +3598,7 @@ export const ensureCollabSurfaceBody = zod
         'static_file',
         'crm_company',
         'crm_contact',
+        'crm_pipeline',
         'reminder',
         'skill',
         'agent_session',
@@ -3632,6 +3634,7 @@ export const ensureCollabSurfaceResponse = zod
         'static_file',
         'crm_company',
         'crm_contact',
+        'crm_pipeline',
         'reminder',
         'skill',
         'agent_session',
@@ -4419,6 +4422,202 @@ export const setCrmContactNameBody = zod
       ),
   })
   .describe('Request body for `PUT \/contacts\/{contact_id}\/name`.');
+
+/**
+ * @summary List the caller's live pipelines in their CRM.
+ */
+export const listCrmPipelinesResponseItem = zod
+  .object({
+    createdAt: zod.iso.datetime({}).describe('Creation time.'),
+    databaseId: zod.uuid().describe('Dedicated backing database.'),
+    id: zod
+      .uuid()
+      .describe('Entity identity, used with `CrmPipeline` access receipts.'),
+    name: zod
+      .string()
+      .describe('Display name, stored by the backing database.'),
+    primaryColumnId: zod.uuid().describe('Protected primary column.'),
+    recordType: zod
+      .enum(['company', 'contact'])
+      .describe(
+        'Which CRM entity each row references. Fixed when a pipeline is created.'
+      ),
+    sharing: zod
+      .enum(['private', 'team'])
+      .describe(
+        'Initial sharing, or the desired team grant. Individual ownership is preserved.'
+      ),
+    tableId: zod.uuid().describe('Table of entries.'),
+    teamId: zod.uuid().describe('CRM data boundary; independent of sharing.'),
+    trashedAt: zod.iso
+      .datetime({})
+      .nullable()
+      .describe('Trashed pipelines are omitted from navigation.'),
+  })
+  .describe(
+    'Pipeline metadata; table schema and data are read through the database service.'
+  )
+  .and(
+    zod.object({
+      grant: zod
+        .enum(['view', 'comment', 'edit', 'owner'])
+        .describe('Ordered from least to most access top -> bottom'),
+    })
+  )
+  .describe("Metadata together with the caller's effective grant.");
+export const listCrmPipelinesResponse = zod.array(listCrmPipelinesResponseItem);
+
+/**
+ * @summary Create a private or team-shared pipeline.
+ */
+export const createCrmPipelineBody = zod
+  .object({
+    name: zod.string().describe('Pipeline name.'),
+    recordType: zod
+      .enum(['company', 'contact'])
+      .describe(
+        'Which CRM entity each row references. Fixed when a pipeline is created.'
+      ),
+    sharing: zod
+      .enum(['private', 'team'])
+      .optional()
+      .describe(
+        'Initial sharing, or the desired team grant. Individual ownership is preserved.'
+      ),
+  })
+  .describe(
+    'Request to create an empty pipeline with the standard CRM columns.'
+  );
+
+export const createCrmPipelineResponse = zod
+  .object({
+    createdAt: zod.iso.datetime({}).describe('Creation time.'),
+    databaseId: zod.uuid().describe('Dedicated backing database.'),
+    id: zod
+      .uuid()
+      .describe('Entity identity, used with `CrmPipeline` access receipts.'),
+    name: zod
+      .string()
+      .describe('Display name, stored by the backing database.'),
+    primaryColumnId: zod.uuid().describe('Protected primary column.'),
+    recordType: zod
+      .enum(['company', 'contact'])
+      .describe(
+        'Which CRM entity each row references. Fixed when a pipeline is created.'
+      ),
+    sharing: zod
+      .enum(['private', 'team'])
+      .describe(
+        'Initial sharing, or the desired team grant. Individual ownership is preserved.'
+      ),
+    tableId: zod.uuid().describe('Table of entries.'),
+    teamId: zod.uuid().describe('CRM data boundary; independent of sharing.'),
+    trashedAt: zod.iso
+      .datetime({})
+      .nullable()
+      .describe('Trashed pipelines are omitted from navigation.'),
+  })
+  .describe(
+    'Pipeline metadata; table schema and data are read through the database service.'
+  )
+  .and(
+    zod.object({
+      grant: zod
+        .enum(['view', 'comment', 'edit', 'owner'])
+        .describe('Ordered from least to most access top -> bottom'),
+    })
+  )
+  .describe("Metadata together with the caller's effective grant.");
+
+/**
+ * @summary Read one pipeline by its entity identity.
+ */
+export const getCrmPipelineParams = zod.object({
+  id: zod.uuid(),
+});
+
+export const getCrmPipelineResponse = zod
+  .object({
+    createdAt: zod.iso.datetime({}).describe('Creation time.'),
+    databaseId: zod.uuid().describe('Dedicated backing database.'),
+    id: zod
+      .uuid()
+      .describe('Entity identity, used with `CrmPipeline` access receipts.'),
+    name: zod
+      .string()
+      .describe('Display name, stored by the backing database.'),
+    primaryColumnId: zod.uuid().describe('Protected primary column.'),
+    recordType: zod
+      .enum(['company', 'contact'])
+      .describe(
+        'Which CRM entity each row references. Fixed when a pipeline is created.'
+      ),
+    sharing: zod
+      .enum(['private', 'team'])
+      .describe(
+        'Initial sharing, or the desired team grant. Individual ownership is preserved.'
+      ),
+    tableId: zod.uuid().describe('Table of entries.'),
+    teamId: zod.uuid().describe('CRM data boundary; independent of sharing.'),
+    trashedAt: zod.iso
+      .datetime({})
+      .nullable()
+      .describe('Trashed pipelines are omitted from navigation.'),
+  })
+  .describe(
+    'Pipeline metadata; table schema and data are read through the database service.'
+  )
+  .and(
+    zod.object({
+      grant: zod
+        .enum(['view', 'comment', 'edit', 'owner'])
+        .describe('Ordered from least to most access top -> bottom'),
+    })
+  )
+  .describe("Metadata together with the caller's effective grant.");
+
+/**
+ * @summary Rename a pipeline.
+ */
+export const renameCrmPipelineParams = zod.object({
+  id: zod.uuid(),
+});
+
+export const renameCrmPipelineBody = zod
+  .object({
+    name: zod.string().describe('New display name.'),
+  })
+  .describe('Rename input.');
+
+/**
+ * @summary Update sharing.
+ */
+export const shareCrmPipelineParams = zod.object({
+  id: zod.uuid(),
+});
+
+export const shareCrmPipelineBody = zod
+  .object({
+    sharing: zod
+      .enum(['private', 'team'])
+      .describe(
+        'Initial sharing, or the desired team grant. Individual ownership is preserved.'
+      ),
+  })
+  .describe('Sharing input.');
+
+/**
+ * @summary Trash or restore a pipeline.
+ */
+export const trashCrmPipelineParams = zod.object({
+  id: zod.uuid(),
+});
+
+export const trashCrmPipelineBody = zod
+  .object({
+    trashed: zod.boolean().describe('True to trash; false to restore.'),
+  })
+  .describe('Trash\/restore input.');
 
 /**
  * @summary Read the caller's team CRM configuration. Any team member may read;
@@ -12981,6 +13180,7 @@ export const listFavoritesQueryParams = zod.object({
           'static_file',
           'crm_company',
           'crm_contact',
+          'crm_pipeline',
           'reminder',
           'skill',
           'agent_session',
@@ -13043,6 +13243,7 @@ export const listFavoritesResponse = zod
                 'static_file',
                 'crm_company',
                 'crm_contact',
+                'crm_pipeline',
                 'reminder',
                 'skill',
                 'agent_session',
@@ -13093,6 +13294,7 @@ export const addFavoriteBody = zod
         'static_file',
         'crm_company',
         'crm_contact',
+        'crm_pipeline',
         'reminder',
         'skill',
         'agent_session',
@@ -13144,6 +13346,7 @@ export const addFavoriteResponse = zod
         'static_file',
         'crm_company',
         'crm_contact',
+        'crm_pipeline',
         'reminder',
         'skill',
         'agent_session',
@@ -13192,6 +13395,7 @@ export const reorderFavoritesBody = zod
                 'static_file',
                 'crm_company',
                 'crm_contact',
+                'crm_pipeline',
                 'reminder',
                 'skill',
                 'agent_session',
@@ -13233,6 +13437,7 @@ export const removeFavoriteByEntityParams = zod.object({
       'static_file',
       'crm_company',
       'crm_contact',
+      'crm_pipeline',
       'reminder',
       'skill',
       'agent_session',
@@ -17809,6 +18014,7 @@ export const getItemsSoupResponse = zod
                                 'static_file',
                                 'crm_company',
                                 'crm_contact',
+                                'crm_pipeline',
                                 'reminder',
                                 'skill',
                                 'agent_session',
@@ -22570,6 +22776,7 @@ export const postItemsSoupResponse = zod
                                 'static_file',
                                 'crm_company',
                                 'crm_contact',
+                                'crm_pipeline',
                                 'reminder',
                                 'skill',
                                 'agent_session',
@@ -26739,6 +26946,7 @@ export const postItemsSoupAstResponse = zod
                                 'static_file',
                                 'crm_company',
                                 'crm_contact',
+                                'crm_pipeline',
                                 'reminder',
                                 'skill',
                                 'agent_session',
@@ -31282,6 +31490,7 @@ export const postItemsSoupAstGroupedResponse = zod
                                       'static_file',
                                       'crm_company',
                                       'crm_contact',
+                                      'crm_pipeline',
                                       'reminder',
                                       'skill',
                                       'agent_session',
@@ -35455,6 +35664,7 @@ export const postItemsSoupAstGroupedResponse = zod
                                       'static_file',
                                       'crm_company',
                                       'crm_contact',
+                                      'crm_pipeline',
                                       'reminder',
                                       'skill',
                                       'agent_session',
@@ -40600,6 +40810,7 @@ export const listRemindersQueryParams = zod.object({
           'static_file',
           'crm_company',
           'crm_contact',
+          'crm_pipeline',
           'reminder',
           'skill',
           'agent_session',
@@ -40685,6 +40896,7 @@ export const listRemindersResponse = zod
                     'static_file',
                     'crm_company',
                     'crm_contact',
+                    'crm_pipeline',
                     'reminder',
                     'skill',
                     'agent_session',
@@ -40775,6 +40987,7 @@ export const createReminderBody = zod
             'static_file',
             'crm_company',
             'crm_contact',
+            'crm_pipeline',
             'reminder',
             'skill',
             'agent_session',
@@ -40952,6 +41165,7 @@ export const listReminderCollectionResponse = zod
                         'static_file',
                         'crm_company',
                         'crm_contact',
+                        'crm_pipeline',
                         'reminder',
                         'skill',
                         'agent_session',
@@ -41205,6 +41419,7 @@ export const getReminderResponse = zod
             'static_file',
             'crm_company',
             'crm_contact',
+            'crm_pipeline',
             'reminder',
             'skill',
             'agent_session',
@@ -41352,6 +41567,7 @@ export const updateReminderResponse = zod
             'static_file',
             'crm_company',
             'crm_contact',
+            'crm_pipeline',
             'reminder',
             'skill',
             'agent_session',

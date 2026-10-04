@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, data_type::text AS data_type, is_multi_select FROM property_definitions WHERE team_id = $1 AND display_name = $2 ORDER BY id LIMIT 2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "data_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "is_multi_select",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "93196596f6ea6921c7b3422081e0a33b7b55eda8cb8b9c77d7acc50c994dcca4"
+}

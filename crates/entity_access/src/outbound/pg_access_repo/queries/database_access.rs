@@ -6,6 +6,25 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use uuid::Uuid;
 
+/// The grant-bearing owner of a database; standalone databases own themselves.
+pub async fn access_owner(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<(Uuid, model_entity::EntityType)>, sqlx::Error> {
+    let row = sqlx::query!(
+        "SELECT COALESCE(access_entity_id, id) AS id, COALESCE(access_entity_type, 'database') AS kind FROM databases WHERE id = $1", id
+    ).fetch_optional(pool).await?;
+    row.map(|row| {
+        let kind = row
+            .kind
+            .unwrap_or_else(|| "database".into())
+            .parse()
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+        Ok((row.id.unwrap_or(id), kind))
+    })
+    .transpose()
+}
+
 #[cfg(test)]
 mod test;
 
@@ -23,11 +42,11 @@ pub async fn get_database_access(
 
     let all_level_strings: Vec<Option<String>> = sqlx::query_scalar!(
         r#"
-        SELECT access_level::text
-        FROM entity_access
-        WHERE entity_id = $1
-        AND entity_type = 'database'
-        AND source_id = ANY($2)
+        SELECT ea.access_level::text
+        FROM databases d JOIN entity_access ea
+          ON ea.entity_id = COALESCE(d.access_entity_id, d.id)
+         AND ea.entity_type = COALESCE(d.access_entity_type, 'database')
+        WHERE d.id = $1 AND ea.source_id = ANY($2)
         "#,
         database_id,
         &source_ids.0,
@@ -67,10 +86,11 @@ pub async fn list_database_access(
 
     let rows = sqlx::query!(
         r#"
-        SELECT entity_id AS "entity_id!", access_level AS "access_level!: AccessLevel"
-        FROM entity_access
-        WHERE entity_type = 'database'
-        AND source_id = ANY($1)
+        SELECT d.id AS "entity_id!", ea.access_level AS "access_level!: AccessLevel"
+        FROM databases d JOIN entity_access ea
+          ON ea.entity_id = COALESCE(d.access_entity_id, d.id)
+         AND ea.entity_type = COALESCE(d.access_entity_type, 'database')
+        WHERE ea.source_id = ANY($1)
         "#,
         &source_ids.0,
     )

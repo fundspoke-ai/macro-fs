@@ -19,6 +19,8 @@ export type DatabaseViewColumn = {
   isMultiSelect: boolean;
   options: DatabaseOption[];
   writable: boolean;
+  /** A required, unique reference whose schema is protected. */
+  primary?: boolean;
   specificEntityType?: DatabaseEntityType | null;
   /** A new, empty Text column may adopt the type of its first entry. */
   inferType?: boolean;

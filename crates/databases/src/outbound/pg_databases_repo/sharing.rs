@@ -8,6 +8,17 @@ use models_permissions::share_permission::channel_share_permission::{
 impl<Properties: Send + Sync + 'static> DatabaseSharingRepo for PgDatabasesRepo<Properties> {
     type Error = PgDatabasesRepoError;
 
+    async fn inherits_access(&self, database_id: DatabaseId) -> Result<bool, Self::Error> {
+        Ok(sqlx::query_scalar!(
+            "SELECT access_entity_id IS NOT NULL FROM databases WHERE id = $1",
+            database_id.into_uuid(),
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten()
+        .unwrap_or(false))
+    }
+
     #[tracing::instrument(err, skip(self))]
     async fn channel_grants(
         &self,

@@ -32,3 +32,5 @@ pub mod database_cell_writer;
 
 /// Transactional database option writer.
 pub mod database_option_writer;
+
+mod property_snapshot_reader;

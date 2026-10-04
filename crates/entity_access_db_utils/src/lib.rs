@@ -436,7 +436,8 @@ pub async fn update_entity_access_channel_share_permissions(
                 .execute(transaction.as_mut())
                 .await?;
             }
-            EntityType::Database
+            EntityType::CrmPipeline
+            | EntityType::Database
             | EntityType::AgentSession
             | EntityType::Chat
             | EntityType::Document
@@ -554,7 +555,8 @@ pub async fn update_entity_access_channel_share_permissions(
                     qb.build().execute(transaction.as_mut()).await?;
                 }
             }
-            EntityType::Database
+            EntityType::CrmPipeline
+            | EntityType::Database
             | EntityType::AgentSession
             | EntityType::Chat
             | EntityType::Document

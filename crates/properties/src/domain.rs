@@ -18,3 +18,6 @@ pub mod database_cell_writer;
 
 /// Atomic option writes for database select and tag properties.
 pub mod database_option_writer;
+
+/// Strict transactional snapshots for data migrations.
+pub mod property_snapshot_reader;

@@ -27,6 +27,14 @@ where
         if database.trashed_at.is_some() {
             return Err(DatabaseError::NotFound);
         }
+        if self
+            .repository
+            .inherits_access(database.id)
+            .await
+            .map_err(repository_error)?
+        {
+            return Err(SharingError::InheritedAccess.into());
+        }
         let channel_share_permissions = self
             .repository
             .channel_grants(database.id)
@@ -76,6 +84,14 @@ where
         let database = self.database_by_receipt(&receipt).await?;
         if database.trashed_at.is_some() {
             return Err(DatabaseError::NotFound);
+        }
+        if self
+            .repository
+            .inherits_access(database.id)
+            .await
+            .map_err(repository_error)?
+        {
+            return Err(SharingError::InheritedAccess.into());
         }
         if !self
             .repository

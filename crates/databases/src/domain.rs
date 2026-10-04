@@ -28,3 +28,7 @@ pub mod transfer;
 /// Retry-safe first database provisioning.
 #[cfg(feature = "ports")]
 pub mod starter;
+
+/// Atomic provisioning for an entity that owns a database.
+#[cfg(feature = "ports")]
+pub mod provisioning;

@@ -603,6 +603,13 @@ impl Writes {
 /// What applying [`Writes`] did. Anything but `Applied` wrote nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WritesOutcome {
+    /// A database constraint refused the batch; no changes committed.
+    ConstraintRefused {
+        /// The operation responsible for the refused write.
+        write: usize,
+        /// A safe, actionable explanation supplied by the adapter.
+        message: String,
+    },
     /// A row the undo would remove has a surviving incoming relation.
     RowInUse,
     /// An option the batch must leave unused is selected by an entity.

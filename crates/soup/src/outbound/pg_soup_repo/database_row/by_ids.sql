@@ -12,6 +12,6 @@ JOIN databases row_database ON row_database.id = row_table.database_id
 WHERE r.id = ANY($2)
     AND row_database.trashed_at IS NULL
     AND EXISTS (SELECT 1 FROM entity_access ea
-        WHERE ea.entity_id = row_database.id AND ea.entity_type = 'database'
+        WHERE ea.entity_id = COALESCE(row_database.access_entity_id, row_database.id) AND ea.entity_type = COALESCE(row_database.access_entity_type, 'database')
         AND ea.source_id IN (SELECT source_id FROM user_source_ids))
 ORDER BY r.created_at DESC, r.id DESC

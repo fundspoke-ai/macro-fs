@@ -8,7 +8,10 @@ use crate::domain::{
         ChannelRoleResult, CrmEntityAccess, Entity, EntityAccessAuth, EntityAccessReceipt,
         EntityPermission, EntityType, RequiredPermission, TeamRole, UserTeamInfo, ViewAccessLevel,
     },
-    ports::{AccessRepository, AccessibleDatabases, EntityAccessService, ScheduledActionGrants},
+    ports::{
+        AccessRepository, AccessibleDatabases, AccessiblePipelines, EntityAccessService,
+        ScheduledActionGrants,
+    },
 };
 use futures::{StreamExt, stream};
 use macro_user_id::{
@@ -71,6 +74,7 @@ where
                 Ok(direct.max(parent_access.map(session_permission_from_parent)))
             }
             EntityType::Initiative => self.repo.get_initiative_access(entity_id, user_id).await,
+            EntityType::CrmPipeline => self.repo.get_pipeline_access(entity_id, user_id).await,
             EntityType::Database => self.repo.get_database_access(entity_id, user_id).await,
             EntityType::DatabaseRow => self.repo.get_database_row_access(entity_id, user_id).await,
             EntityType::ScheduledAction => {
@@ -214,6 +218,7 @@ where
             | EntityType::EmailThread
             | EntityType::Call
             | EntityType::Initiative
+            | EntityType::CrmPipeline
             | EntityType::Database
             | EntityType::DatabaseRow => {
                 let access_level = self
@@ -539,6 +544,7 @@ where
             | EntityType::CalendarEvent
             | EntityType::AgentSession
             | EntityType::Initiative
+            | EntityType::CrmPipeline
             | EntityType::Database
             | EntityType::DatabaseRow
             | EntityType::ScheduledAction => {
@@ -622,6 +628,7 @@ where
             | EntityType::CalendarEvent
             | EntityType::AgentSession
             | EntityType::Initiative
+            | EntityType::CrmPipeline
             | EntityType::Database
             | EntityType::DatabaseRow
             | EntityType::ScheduledAction => {
@@ -737,6 +744,7 @@ where
             | EntityType::Initiative
             | EntityType::CrmCompany
             | EntityType::CrmContact
+            | EntityType::CrmPipeline
             | EntityType::Database => {
                 let entity_id = Uuid::parse_str(entity_id).map_err(|_| {
                     AccessError::BadRequest("invalid entity_id for get_users_by_entity")
@@ -836,5 +844,14 @@ fn session_permission_from_parent(level: AccessLevel) -> AccessLevel {
         AccessLevel::Edit
     } else {
         AccessLevel::View
+    }
+}
+
+impl<R: AccessRepository> AccessiblePipelines for EntityAccessServiceImpl<R> {
+    async fn accessible_pipelines(
+        &self,
+        user_id: &MacroUserId<Lowercase<'_>>,
+    ) -> Result<Vec<(Uuid, AccessLevel)>, AccessError> {
+        self.repo.list_pipeline_access(user_id).await
     }
 }

@@ -15,6 +15,8 @@ mod test;
 /// View and card-place statements, shared with the cell store's batches.
 pub(crate) mod views;
 
+mod provisioning;
+
 use std::collections::HashMap;
 
 use models_databases::position::{Position, PositionError, key_between};

@@ -129,7 +129,13 @@ export function DatabaseColumnHeader(props: DatabaseColumnHeaderProps) {
   };
   props.registerRename?.(rename);
   async function changeType(change: DatabaseColumnTypeChange) {
-    if (!canRename() || !props.onChangeType || pending()) return;
+    if (
+      !canRename() ||
+      props.column.primary ||
+      !props.onChangeType ||
+      pending()
+    )
+      return;
     setMenuOpen(false);
     setError('');
     setOperating(true);
@@ -153,7 +159,8 @@ export function DatabaseColumnHeader(props: DatabaseColumnHeaderProps) {
     if (converted.isErr()) setError(columnSchemaMessage(converted.error));
   }
   async function remove() {
-    if (!canRename() || !props.onDelete || pending()) return;
+    if (!canRename() || props.column.primary || !props.onDelete || pending())
+      return;
     setError('');
     setOperating(true);
     const deleted = await props.onDelete(props.column.id);
@@ -243,7 +250,7 @@ export function DatabaseColumnHeader(props: DatabaseColumnHeaderProps) {
           },
         ]
       : []),
-    ...(canRename() && props.onDelete
+    ...(canRename() && !props.column.primary && props.onDelete
       ? [
           {
             label: 'Delete column',
@@ -367,6 +374,7 @@ export function DatabaseColumnHeader(props: DatabaseColumnHeaderProps) {
                               (action) => action.group === group
                             ) ||
                             (group === 'edit' &&
+                              !props.column.primary &&
                               props.onChangeType &&
                               canRename())
                           }
@@ -398,6 +406,7 @@ export function DatabaseColumnHeader(props: DatabaseColumnHeaderProps) {
                             <Show
                               when={
                                 group === 'edit' &&
+                                !props.column.primary &&
                                 props.onChangeType &&
                                 canRename()
                               }

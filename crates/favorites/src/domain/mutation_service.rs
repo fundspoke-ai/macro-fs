@@ -110,6 +110,7 @@ fn validate_favoritable(entity_type: EntityType) -> Result<(), FavoritesError> {
         | EntityType::Initiative
         // Databases are not favoritable yet, and rows never are.
         | EntityType::Database
+        | EntityType::CrmPipeline
         | EntityType::DatabaseRow => Err(FavoritesError::UnsupportedEntityType(entity_type)),
     }
 }

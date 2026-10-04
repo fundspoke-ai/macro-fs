@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT entity_id AS \"entity_id!\", access_level AS \"access_level!: AccessLevel\"\n        FROM entity_access\n        WHERE entity_type = 'database'\n        AND source_id = ANY($1)\n        ",
+  "query": "\n        SELECT r.id, ea.access_level AS \"access_level!: AccessLevel\"\n        FROM database_rows r\n        JOIN database_tables t ON t.id = r.table_id\n        JOIN databases d ON d.id = t.database_id\n        JOIN entity_access ea ON ea.entity_id = COALESCE(d.access_entity_id, d.id)\n        WHERE r.id = ANY($1)\n        AND ea.entity_type = COALESCE(d.access_entity_type, 'database')\n        AND ea.source_id = ANY($2)\n        ",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "entity_id!",
+        "name": "id",
         "type_info": "Uuid"
       },
       {
@@ -28,6 +28,7 @@
     ],
     "parameters": {
       "Left": [
+        "UuidArray",
         "TextArray"
       ]
     },
@@ -36,5 +37,5 @@
       false
     ]
   },
-  "hash": "0b013d1968d94ff4e2e3105ec19541b5794bbfc1ec5fee7bdffada0b64270f10"
+  "hash": "24d1f3563afa44b98c6fec9f64cd46ddb5188f8273fe4f0493521006bda2c7b1"
 }

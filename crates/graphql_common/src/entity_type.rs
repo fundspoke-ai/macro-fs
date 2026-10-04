@@ -37,6 +37,8 @@ pub enum GraphqlSoupEntityType {
 /// Canonical entity types accepted by cross-entity APIs.
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum GraphqlEntityType {
+    /// CRM pipeline entity.
+    CrmPipeline,
     /// Document entity.
     Document,
     /// Chat entity.
@@ -113,6 +115,7 @@ impl GraphqlSoupEntityType {
             | EntityType::CrmContact
             | EntityType::Skill
             | EntityType::ScheduledAction
+            | EntityType::CrmPipeline
             | EntityType::Database => return None,
         })
     }
@@ -161,6 +164,7 @@ impl GraphqlEntityType {
             EntityType::AgentSession => Self::AgentSession,
             EntityType::ScheduledAction => Self::ScheduledAction,
             EntityType::Initiative => Self::Initiative,
+            EntityType::CrmPipeline => Self::CrmPipeline,
             EntityType::Database => Self::Database,
             EntityType::DatabaseRow => Self::DatabaseRow,
         }
@@ -193,6 +197,7 @@ impl GraphqlEntityType {
             Self::AgentSession => EntityType::AgentSession,
             Self::ScheduledAction => EntityType::ScheduledAction,
             Self::Initiative => EntityType::Initiative,
+            Self::CrmPipeline => EntityType::CrmPipeline,
             Self::Database => EntityType::Database,
             Self::DatabaseRow => EntityType::DatabaseRow,
         }

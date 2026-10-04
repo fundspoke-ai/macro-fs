@@ -1,0 +1,57 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT entity_id, property_definition_id, values AS \"value!: sqlx::types::Json<PropertyValue>\"\n               FROM entity_properties WHERE entity_type = $1 AND entity_id = ANY($2)\n               AND property_definition_id = ANY($3) AND values IS NOT NULL AND values <> 'null'::jsonb",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "entity_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "property_definition_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "value!: sqlx::types::Json<PropertyValue>",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        {
+          "Custom": {
+            "name": "property_entity_type",
+            "kind": {
+              "Enum": [
+                "CHANNEL",
+                "CHAT",
+                "DOCUMENT",
+                "PROJECT",
+                "THREAD",
+                "USER",
+                "COMPANY",
+                "TASK",
+                "CALL_RECORD",
+                "CALENDAR_EVENT",
+                "INITIATIVE",
+                "CONTACT",
+                "DATABASE_ROW"
+              ]
+            }
+          }
+        },
+        "TextArray",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "0dd93d0f21e1323e0847003f3680a62cc3ca6819fb9edfdb97a95fe1ce9e1b83"
+}

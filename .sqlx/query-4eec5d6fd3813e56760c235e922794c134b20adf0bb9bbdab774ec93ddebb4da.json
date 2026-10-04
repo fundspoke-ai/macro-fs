@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.id, p.team_id, p.record_type, p.database_id, p.table_id,\n                      EXISTS (SELECT 1 FROM entity_access ea WHERE ea.entity_id = p.id\n                        AND ea.entity_type = 'crm_pipeline' AND ea.source_type = 'team'\n                        AND ea.source_id = p.team_id::text) AS \"team_shared!\"\n               FROM crm_pipelines p WHERE p.id = ANY($1) ORDER BY p.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "team_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "record_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "database_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "table_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "team_shared!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "4eec5d6fd3813e56760c235e922794c134b20adf0bb9bbdab774ec93ddebb4da"
+}

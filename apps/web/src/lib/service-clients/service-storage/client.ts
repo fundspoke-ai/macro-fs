@@ -28,6 +28,7 @@ import type { IDocumentStorageServiceFile } from '@filesystem/file';
 import type { SerializedEditorState } from 'lexical';
 import { err, ok, type Result } from 'neverthrow';
 import type { ApiChannelListPage } from './channel-list-types';
+import type { AccessiblePipeline as PipelineResponse } from './generated/schemas/accessiblePipeline';
 import type { AccessLevel } from './generated/schemas/accessLevel';
 import type { AddFavoriteRequest } from './generated/schemas/addFavoriteRequest';
 import type { AddParticipantsRequest } from './generated/schemas/addParticipantsRequest';
@@ -396,6 +397,32 @@ export const DOCUMENT_NAME_TOO_LONG_CODE = 'DOCUMENT_NAME_TOO_LONG' as const;
 type SlackImportJobArgs = { jobId: JobId; signal?: AbortSignal };
 
 export const storageServiceClient = {
+  listCrmPipelines: () =>
+    dssFetch<PipelineResponse[]>('/crm/pipelines', { method: 'GET' }),
+  getCrmPipeline: (id: string) =>
+    dssFetch<PipelineResponse>(`/crm/pipelines/${id}`, { method: 'GET' }),
+  createCrmPipeline: (
+    input: Pick<PipelineResponse, 'name' | 'recordType' | 'sharing'>
+  ) =>
+    dssFetch<PipelineResponse>('/crm/pipelines', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  renameCrmPipeline: (id: string, name: string) =>
+    dssFetch(`/crm/pipelines/${id}/name`, {
+      method: 'PUT',
+      body: JSON.stringify({ name }),
+    }),
+  shareCrmPipeline: (id: string, sharing: PipelineResponse['sharing']) =>
+    dssFetch(`/crm/pipelines/${id}/sharing`, {
+      method: 'PUT',
+      body: JSON.stringify({ sharing }),
+    }),
+  trashCrmPipeline: (id: string) =>
+    dssFetch(`/crm/pipelines/${id}/trash`, {
+      method: 'PUT',
+      body: JSON.stringify({ trashed: true }),
+    }),
   /** Macro Databases — see `./databases.ts`. */
   databases: databasesClient,
 

@@ -77,6 +77,47 @@ pub enum PgCellStoreError {
     MissingImportFingerprint(TableId),
 }
 
+/// Map only known constraints; never expose arbitrary database errors to clients.
+fn primary_constraint_message(
+    mut error: &(dyn std::error::Error + 'static),
+) -> Option<&'static str> {
+    loop {
+        // Transparent adapter errors expose SQLx's boxed database cause,
+        // skipping the outer sqlx::Error in their source chain.
+        let constraint = if let Some(sqlx::Error::Database(database)) =
+            error.downcast_ref::<sqlx::Error>()
+        {
+            database.constraint()
+        } else if let Some(database) = error.downcast_ref::<Box<dyn sqlx::error::DatabaseError>>() {
+            database.constraint()
+        } else if let Some(database) = error.downcast_ref::<sqlx::postgres::PgDatabaseError>() {
+            database.constraint()
+        } else {
+            None
+        };
+        if let Some(constraint) = constraint {
+            return match constraint {
+                "database_primary_record_required" => Some(
+                    "Choose a record before adding this entry. The primary record cannot be cleared.",
+                ),
+                "database_primary_values_table_id_entity_type_entity_id_key" => {
+                    Some("This record is already in this table.")
+                }
+                "database_primary_column_protected"
+                | "database_primary_columns_column_id_fkey"
+                | "crm_pipelines_table_id_fkey" => Some(
+                    "The primary record column and its table cannot be removed or have their type changed.",
+                ),
+                "database_primary_record_invalid" => {
+                    Some("Choose a valid record of the required type.")
+                }
+                _ => None,
+            };
+        }
+        error = error.source()?;
+    }
+}
+
 /// The unique index on a table's view names.
 const VIEW_NAME_CONSTRAINT: &str = "database_views_table_name_key";
 /// The primary key of `database_views`.
@@ -301,9 +342,21 @@ where
 
         let mut inserted = Vec::with_capacity(writes.writes.len());
         for (index, write) in writes.writes.iter().enumerate() {
-            let outcome = self
+            let outcome = match self
                 .apply_write(&mut transaction, writes, index, write)
-                .await?;
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => match primary_constraint_message(&error) {
+                    Some(message) => {
+                        return Ok(WritesOutcome::ConstraintRefused {
+                            write: index,
+                            message: message.into(),
+                        });
+                    }
+                    None => return Err(error),
+                },
+            };
             match outcome {
                 Applied::Rows(rows) => inserted.push(rows),
                 Applied::Refused(outcome) => return Ok(outcome),
@@ -354,6 +407,13 @@ where
         stamped.sort();
         stamped.dedup();
         journal::stamp_rows(&mut *transaction, &stamped, writes.created_by.as_ref()).await?;
+        if let Err(error) = sqlx::query!("SET CONSTRAINTS database_row_requires_primary, database_primary_value_required, database_primary_columns_column_id_fkey, crm_pipelines_table_id_fkey IMMEDIATE")
+            .execute(&mut *transaction).await {
+            match primary_constraint_message(&error) {
+                Some(message) => return Ok(WritesOutcome::ConstraintRefused { write: writes.writes.len().saturating_sub(1), message: message.into() }),
+                None => return Err(error.into()),
+            }
+        }
         let entries = crate::domain::journal::entries(writes, &before, &inserted, &table_versions);
         let changes = journal::record(
             &mut transaction,

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO database_rows (id, table_id, position, created_by) SELECT id, $1, position, $2 FROM UNNEST($3::uuid[], $4::text[]) AS input(id, position)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "UuidArray",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e3ccf36725b02e12685c4dc95c0b4a244d522aa5f550737d79fa789b35a61707"
+}

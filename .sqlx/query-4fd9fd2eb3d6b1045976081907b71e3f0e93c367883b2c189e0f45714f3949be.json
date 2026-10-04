@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO crm_sales_backfills (team_id, pipeline_id, company_count) VALUES ($1, $2, $3) ON CONFLICT (team_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4fd9fd2eb3d6b1045976081907b71e3f0e93c367883b2c189e0f45714f3949be"
+}

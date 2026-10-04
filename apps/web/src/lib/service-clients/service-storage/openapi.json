@@ -5997,6 +5997,184 @@
         }
       }
     },
+    "/crm/pipelines": {
+      "get": {
+        "tags": ["crm::inbound::pipelines"],
+        "summary": "List the caller's live pipelines in their CRM.",
+        "operationId": "list_crm_pipelines",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AccessiblePipeline"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["crm::inbound::pipelines"],
+        "summary": "Create a private or team-shared pipeline.",
+        "operationId": "create_crm_pipeline",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePipeline"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessiblePipeline"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/crm/pipelines/{id}": {
+      "get": {
+        "tags": ["crm::inbound::pipelines"],
+        "summary": "Read one pipeline by its entity identity.",
+        "operationId": "get_crm_pipeline",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessiblePipeline"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/crm/pipelines/{id}/name": {
+      "put": {
+        "tags": ["crm::inbound::pipelines"],
+        "summary": "Rename a pipeline.",
+        "operationId": "rename_crm_pipeline",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenamePipeline"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/crm/pipelines/{id}/sharing": {
+      "put": {
+        "tags": ["crm::inbound::pipelines"],
+        "summary": "Update sharing.",
+        "operationId": "share_crm_pipeline",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SharePipeline"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/crm/pipelines/{id}/trash": {
+      "put": {
+        "tags": ["crm::inbound::pipelines"],
+        "summary": "Trash or restore a pipeline.",
+        "operationId": "trash_crm_pipeline",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrashPipeline"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/crm/settings": {
       "get": {
         "tags": ["crm::inbound::axum_router::team_settings"],
@@ -10211,6 +10389,7 @@
                   "static_file",
                   "crm_company",
                   "crm_contact",
+                  "crm_pipeline",
                   "reminder",
                   "skill",
                   "agent_session",
@@ -10428,6 +10607,7 @@
                 "static_file",
                 "crm_company",
                 "crm_contact",
+                "crm_pipeline",
                 "reminder",
                 "skill",
                 "agent_session",
@@ -13979,6 +14159,7 @@
                   "static_file",
                   "crm_company",
                   "crm_contact",
+                  "crm_pipeline",
                   "reminder",
                   "skill",
                   "agent_session",
@@ -16002,6 +16183,25 @@
         "description": "Ordered from least to most access top -> bottom",
         "enum": ["view", "comment", "edit", "owner"]
       },
+      "AccessiblePipeline": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Pipeline",
+            "description": "Pipeline metadata."
+          },
+          {
+            "type": "object",
+            "required": ["grant"],
+            "properties": {
+              "grant": {
+                "$ref": "#/components/schemas/AccessLevel",
+                "description": "Highest effective access."
+              }
+            }
+          }
+        ],
+        "description": "Metadata together with the caller's effective grant."
+      },
       "ActiveCallSummary": {
         "type": "object",
         "description": "A currently active call, as returned by the batch active-calls listing.",
@@ -16120,6 +16320,7 @@
                   "static_file",
                   "crm_company",
                   "crm_contact",
+                  "crm_pipeline",
                   "reminder",
                   "skill",
                   "agent_session",
@@ -19996,6 +20197,7 @@
                   "static_file",
                   "crm_company",
                   "crm_contact",
+                  "crm_pipeline",
                   "reminder",
                   "skill",
                   "agent_session",
@@ -21687,6 +21889,26 @@
           }
         }
       },
+      "CreatePipeline": {
+        "type": "object",
+        "description": "Request to create an empty pipeline with the standard CRM columns.",
+        "required": ["name", "recordType"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Pipeline name."
+          },
+          "recordType": {
+            "$ref": "#/components/schemas/PipelineRecordType",
+            "description": "Company or contact entries."
+          },
+          "sharing": {
+            "$ref": "#/components/schemas/PipelineSharing",
+            "description": "Defaults to private."
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateProjectRequest": {
         "type": "object",
         "required": ["name"],
@@ -21752,6 +21974,7 @@
                   "static_file",
                   "crm_company",
                   "crm_contact",
+                  "crm_pipeline",
                   "reminder",
                   "skill",
                   "agent_session",
@@ -24353,6 +24576,7 @@
                   "static_file",
                   "crm_company",
                   "crm_contact",
+                  "crm_pipeline",
                   "reminder",
                   "skill",
                   "agent_session",
@@ -24812,6 +25036,7 @@
                   "static_file",
                   "crm_company",
                   "crm_contact",
+                  "crm_pipeline",
                   "reminder",
                   "skill",
                   "agent_session",
@@ -24864,6 +25089,7 @@
                   "static_file",
                   "crm_company",
                   "crm_contact",
+                  "crm_pipeline",
                   "reminder",
                   "skill",
                   "agent_session",
@@ -29934,6 +30160,81 @@
           }
         }
       },
+      "Pipeline": {
+        "type": "object",
+        "description": "Pipeline metadata; table schema and data are read through the database service.",
+        "required": [
+          "id",
+          "teamId",
+          "name",
+          "recordType",
+          "databaseId",
+          "tableId",
+          "primaryColumnId",
+          "sharing",
+          "createdAt",
+          "trashedAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time."
+          },
+          "databaseId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Dedicated backing database."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Entity identity, used with `CrmPipeline` access receipts."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, stored by the backing database."
+          },
+          "primaryColumnId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Protected primary column."
+          },
+          "recordType": {
+            "$ref": "#/components/schemas/PipelineRecordType",
+            "description": "Kind of the primary reference."
+          },
+          "sharing": {
+            "$ref": "#/components/schemas/PipelineSharing",
+            "description": "Whether the pipeline has a team grant."
+          },
+          "tableId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Table of entries."
+          },
+          "teamId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "CRM data boundary; independent of sharing."
+          },
+          "trashedAt": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "Trashed pipelines are omitted from navigation."
+          }
+        }
+      },
+      "PipelineRecordType": {
+        "type": "string",
+        "description": "Which CRM entity each row references. Fixed when a pipeline is created.",
+        "enum": ["company", "contact"]
+      },
+      "PipelineSharing": {
+        "type": "string",
+        "description": "Initial sharing, or the desired team grant. Individual ownership is preserved.",
+        "enum": ["private", "team"]
+      },
       "PostActivityRequest": {
         "type": "object",
         "description": "Request body for `POST /channels/activity`.",
@@ -30860,6 +31161,7 @@
                   "static_file",
                   "crm_company",
                   "crm_contact",
+                  "crm_pipeline",
                   "reminder",
                   "skill",
                   "agent_session",
@@ -31083,6 +31385,18 @@
             ]
           }
         }
+      },
+      "RenamePipeline": {
+        "type": "object",
+        "description": "Rename input.",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "New display name."
+          }
+        },
+        "additionalProperties": false
       },
       "ReorderFavoritesRequest": {
         "type": "object",
@@ -32189,6 +32503,18 @@
             ]
           }
         }
+      },
+      "SharePipeline": {
+        "type": "object",
+        "description": "Sharing input.",
+        "required": ["sharing"],
+        "properties": {
+          "sharing": {
+            "$ref": "#/components/schemas/PipelineSharing",
+            "description": "Desired team grant."
+          }
+        },
+        "additionalProperties": false
       },
       "SharedEmailFilter": {
         "type": "string",
@@ -34154,6 +34480,7 @@
                   "static_file",
                   "crm_company",
                   "crm_contact",
+                  "crm_pipeline",
                   "reminder",
                   "skill",
                   "agent_session",
@@ -35245,6 +35572,18 @@
             "description": "Wall-clock when the transcriber's STT stream first received audio\nfor this participant. The server takes the earliest non-null value\nacross all participants and uses it to overwrite the\n`egress_started`-derived `recording_started_at`, which is too early\n(it stamps egress bootstrap, not first audio frame)."
           }
         }
+      },
+      "TrashPipeline": {
+        "type": "object",
+        "description": "Trash/restore input.",
+        "required": ["trashed"],
+        "properties": {
+          "trashed": {
+            "type": "boolean",
+            "description": "True to trash; false to restore."
+          }
+        },
+        "additionalProperties": false
       },
       "TurnEndedMetadata": {
         "type": "object",
