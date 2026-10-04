@@ -309,6 +309,11 @@ arrow-key browsing keeps it open. Preview headers start with **Home >**. Clickin
 sidebar visibility. Use the hamburger to reopen the feed. Mobile continues to
 show the activity list alone.
 
+Document previews opened from Home expose **Share** and **Copy Share Link** before
+the details toggle, including tasks, snippets, skills, canvases, PDFs, images,
+code, and videos. Share uses the selected item's permissions and updates when
+switching items; copied links point to the entity rather than the Home feed.
+
 AI chat, agent, and channel message bodies use 15px text, including thread replies.
 Desktop AI chats, agents, and channel composers share Home's rounded composer
 surface: a muted dark fill or a white light-mode surface with a soft shadow,
@@ -952,6 +957,19 @@ viewer identity is available, document inserts into Shared are rejected.
 Files opens **Drive** using the same shell as Tasks, on desktop and touch
 devices alike.
 
+With `enable-databases` enabled, **My Files** includes owned databases and
+**Shared with me** includes databases shared by other owners. **All files**
+also includes accessible databases owned by others. **Search Drive** matches
+database names and **Filter → Type → Database** narrows the list. **New →
+Database** creates and opens a database from file tabs or the folder overview;
+it is absent inside a folder because databases have no folder membership yet.
+Database rows open their database block, including Enter and Open in new split.
+Use the database block's own actions to rename, share or trash it. The list
+omits unsupported duplicate, delete and move-to-folder actions for databases.
+Databases have no view history and do not appear in **Recent**, folder contents,
+or **Email attachments**. Creation time orders them when the selected sort has
+no corresponding database timestamp.
+
 On touch devices (phones and tablets), the Drive header is a scrollable pill
 strip — **Recent**, **My Files**, **Shared with me**, and **Folders** — with a
 leading filter-drawer button, like Tasks. Touch opens on **Recent** (the first
@@ -1101,6 +1119,63 @@ On phones, event details use inset round action buttons and a transparent RSVP
 footer. Answering a recurring invitation opens a rounded glass sheet: choose
 `This event` or `All events`, then `Save response`. Cancel or Close returns to
 the event details without sending a response.
+
+Calendar scheduling is on by default in dev. Production uses the PostHog flag
+`enable-calendar-scheduling` and stays off unless enabled remotely. Set
+`VITE_ENABLE_CALENDAR_SCHEDULING=false` to test the disabled state locally.
+While off, the Calendar settings tab and calendar booking shortcuts are hidden;
+public booking and receipt links show an unavailable page without fetching
+scheduling data. When enabling a production rollout, include anonymous visitors
+so invitees can open those links.
+
+When enabled, calendar scheduling lives in **Settings → Calendar** (`/app/settings/calendar`).
+The scheduling sidebar opens Event types, Bookings, Availability, Teams, Insights,
+and Booking page. Event editors have a grouped settings sidebar; booking status
+filters use the same segmented control as the CRM sidebar.
+In Availability, each weekday has an enable switch, time ranges, an add button,
+and a copy-hours menu; select target days and Apply before saving the schedule.
+Date overrides and the searchable timezone picker sit below the weekly hours.
+Choose Personal or your Macro team in `Calendar owner`. Team owners/admins can
+edit team links; ordinary members can view them. `Event types` creates, edits,
+pauses, duplicates, previews, and copies booking links. Event settings include
+weekly availability, collective/all-host or round-robin/one-host assignment,
+notice, buffers, booking horizon, daily limits, and custom questions. New event
+types stay paused until `Accept bookings` is selected and changes are saved.
+`Availability` manages named weekly schedules and date overrides in an IANA time
+zone. Set a default schedule for new event types; a schedule cannot be deleted
+until its event types use another one. Collective and round-robin team meetings
+respect each host’s personal default hours when configured, plus busy calendars.
+`Teams` uses existing Macro team membership and links to team settings.
+`Booking page` edits the public name and description. `Bookings` shows
+upcoming, unconfirmed, past, and cancelled meetings; admins can confirm requests,
+reschedule, or cancel them. Choose From/Through dates to load bookings (initially 30 days before and after today), then search by guest/title/email and filter by event type. Dates use your browser time zone; shorten the range if more than 5,000 bookings match.
+Cancellation asks for confirmation. After a confirmed meeting ends, an assigned
+host or team admin can mark attendance or a host/guest no-show. Pending requests
+from older configurations appear under Unconfirmed. New approval-only links are disabled;
+new links use automatic confirmation and provider calendar invitations. Existing approval
+links must switch to automatic confirmation before accepting new bookings.
+
+`Insights` reports the selected personal/team owner with 7/30/90-day or custom
+ranges, event/host filters, previous-period comparisons, event trends, meeting
+hours, no-shows, popular events, and host counts. Download exports the filtered
+bookings to CSV. Metrics use booking start dates in the default schedule’s time
+zone; failed/processing requests are excluded. Completed means ended confirmed
+bookings excluding recorded no-shows. Rescheduled counts bookings with recorded
+reschedule history. Ratings/CSAT are not shown because no survey data is collected.
+Oversized result sets return an error instead of silently truncating insights.
+
+The calendar header includes `Copy booking link` and `Open calendar scheduling
+settings`. Copy opens settings when no active personal link exists. Public
+`/app/book/:profile/:slug?` pages accept bookings without Macro sign-in. Uncertain
+calendar writes retain the booking and show its private receipt while automatic recovery runs.
+After a network response cannot be verified, `Check booking status` retries the original request;
+do not create a replacement booking. Receipt pages poll while the calendar update is pending. Visitors
+choose their time zone, date, time, and required details. The private
+`/app/booking/:id#token` receipt supports cancellation and rescheduling; preserve
+that private link. Rescheduling dates are labelled in the availability schedule's
+time zone. Calendar provider failures show an error; they never report a
+confirmed booking. Current integrations check hosts' connected calendars and
+write invitations/Google Meet through the existing calendar service.
 
 The standalone Calendar view has a left navigation sidebar. The `New` menu
 above the mini calendar offers `Event`, feature-gated `Call`, and feature-gated
@@ -1515,6 +1590,9 @@ the company; click the first breadcrumb to return directly to the originating
 view. Shift-click still opens a contact in a separate split. Direct contact links
 use the standalone contact page.
 Company and contact headers have `Copy link` beside the side-panel toggle.
+Their information panel starts closed and opens as a floating bubble at every
+width, without shrinking the record content. Click outside the bubble or use
+the toggle to dismiss it; the open state is not restored on a later visit.
 It copies the record's direct URL and shows a confirmation toast; this is also
 available in the embedded company and contact breadcrumb header.
 
@@ -2066,6 +2144,36 @@ New conversations confirm selected model and effort settings before sending the
 first message. If startup reports a rejected setting or timeout, the first prompt
 has not been sent. See [effort capabilities](../AGENT_EFFORT.md) for the harness
 contracts and test coverage.
+
+### Floating block information panels
+
+Actions live in the top bar immediately before Share, with consistent compact
+buttons (labels collapse on narrow headers). There are no Actions sections in
+information panels. Markdown/tasks include Ask Macro and document/task dispatch; email
+includes Ask Macro and Create task; PDF and calls include Ask Macro; native
+projects expose Delete project with its existing confirmation dialog.
+
+Standard metadata is quiet, non-collapsible text at the bottom of each panel,
+separated by a muted divider. Owner and available timestamps share one format;
+Markdown adds word/character counts. There is no standard Details or Stats
+disclosure. Agent runtime information remains in its dedicated Session section.
+
+Block information panels float over the right side of the block without changing
+the content width or its centered position. A single rounded bubble fits its
+contents, with `edge-muted` dividers between sections. Its height is capped at
+the block height with internal scrolling. At every width it starts closed and
+acts as a split-local overlay menu on desktop. The top-right sidebar icon, rotated
+180 degrees, opens it, and clicking outside dismisses it. On touch devices the
+control uses the Phosphor info-circle icon and opens the standard bottom drawer
+with a drag handle, scrollable sections, and safe-area/keyboard-aware spacing.
+Dismiss the drawer by swiping down or tapping its backdrop. Opening is never
+restored from saved preferences or triggered by the global chrome shortcut. The 320px bubble enters
+with a slight slide from the right and a 120ms fade;
+closing fades it out in 70ms.
+This applies across Markdown/tasks,
+snippets, email, calls, agents, pull requests, projects, and all file blocks
+including PDFs, images, code, video, canvas, unknown file types, and CRM company
+and contact views (both inside the CRM workspace and in standalone blocks).
 
 ### Email reminders
 

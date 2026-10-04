@@ -51,13 +51,6 @@ import type { ObjectLike, ResultError } from './util/result';
 
 export { BlockAliasRegistry, BlockRegistry } from '../constants/block-registry';
 
-/** Block names that resolve through another concrete block implementation. */
-export const VirtualBlockRegistry = ['write'] as const;
-const virtualBlockNames = new Set<string>(VirtualBlockRegistry);
-export const ConcreteBlockRegistry = BlockRegistry.filter(
-  (name) => !virtualBlockNames.has(name)
-);
-
 type BlockNameKeys = keyof typeof BlockRegistry & number;
 
 /**
@@ -138,6 +131,7 @@ const _ValidBlockCombinations: BlockCombinationRules = {
   email: allBlockNames,
   canvas: allBlockNames,
   spreadsheet: allBlockNames,
+  pptx: allBlockNames,
   project: allBlockNames,
   unknown: allBlockNames,
   video: allBlockNames,
@@ -159,6 +153,7 @@ export const ValidNestingCombinations: BlockCombinationRules = {
   calendar: new Set([]),
   canvas: new Set(['md']),
   spreadsheet: new Set([]),
+  pptx: new Set([]),
   database: new Set([]),
   chat: new Set([]),
   pdf: new Set(['md']),

@@ -233,12 +233,12 @@ dependencies = [
  "chrono",
  "dashmap",
  "entity_access",
- "github",
+ "git_patch",
+ "github_pull_requests",
  "macro_authorization",
  "macro_db_migrator",
  "macro_user_id",
  "macro_uuid",
- "reqwest 0.13.4",
  "rootcause",
  "serde",
  "serde_json",
@@ -247,7 +247,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "url",
  "utoipa",
  "uuid",
  "workspace-hack",
@@ -429,6 +428,7 @@ dependencies = [
  "entity_registry_db_utils",
  "futures",
  "github",
+ "github_pull_requests",
  "harness_id",
  "harnesses",
  "initiative",
@@ -464,6 +464,7 @@ dependencies = [
  "sqlx",
  "static_file",
  "static_file_service_client",
+ "system_properties",
  "teams",
  "tokio",
  "tokio-retry",
@@ -679,6 +680,7 @@ dependencies = [
  "model_owner",
  "models_properties",
  "properties",
+ "rootcause",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -726,6 +728,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "static_file",
+ "system_properties",
  "teams",
  "tokio",
  "tracing",
@@ -871,6 +874,7 @@ dependencies = [
  "channels",
  "chat",
  "chrono",
+ "collab_surface",
  "connection",
  "connection_gateway_client",
  "contacts",
@@ -889,10 +893,11 @@ dependencies = [
  "foreign_entity",
  "frecency",
  "futures",
+ "github_pull_requests",
  "image_generation",
  "import",
  "initiative",
- "initiative_documents",
+ "initiative_description",
  "item_filters",
  "lazy_static",
  "lexical_client",
@@ -1316,6 +1321,12 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
+
+[[package]]
+name = "arrayref"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
 
 [[package]]
 name = "arrayvec"
@@ -1866,6 +1877,7 @@ dependencies = [
  "fusionauth",
  "futures",
  "github",
+ "github_pull_requests",
  "gtm_invite",
  "http-body-util",
  "initiative",
@@ -3455,6 +3467,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "calendar_scheduling"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "calendar_events",
+ "chrono",
+ "chrono-tz",
+ "email_validator",
+ "macro_authorization",
+ "macro_user_id",
+ "model_user",
+ "reqwest 0.13.4",
+ "rootcause",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "teams",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "calendar_service"
 version = "0.1.0"
 dependencies = [
@@ -3464,6 +3501,7 @@ dependencies = [
  "aws-sdk-sqs",
  "axum",
  "calendar_events",
+ "calendar_scheduling",
  "chrono",
  "connection_gateway_client",
  "email_db_client",
@@ -3491,6 +3529,7 @@ dependencies = [
  "sqlx",
  "sqs_worker",
  "subtle",
+ "teams",
  "tokio",
  "tokio-util",
  "tower 0.5.3",
@@ -4198,6 +4237,7 @@ dependencies = [
  "entity_access",
  "lexical_client",
  "macro_authorization",
+ "macro_db_client",
  "macro_db_migrator",
  "macro_sync_service_jwt",
  "macro_user_id",
@@ -5937,6 +5977,7 @@ dependencies = [
  "foreign_entity",
  "frecency",
  "futures",
+ "github_pull_requests",
  "http 1.4.0",
  "http-body-util",
  "import",
@@ -6075,6 +6116,7 @@ dependencies = [
  "frecency",
  "futures",
  "github",
+ "github_pull_requests",
  "graphql_initiative",
  "graphql_scheduled_action",
  "graphql_soup",
@@ -6083,7 +6125,7 @@ dependencies = [
  "http-body-util",
  "import",
  "initiative",
- "initiative_documents",
+ "initiative_description",
  "jsonwebtoken 10.3.0",
  "last_online_tracker",
  "lazy_static",
@@ -6295,6 +6337,7 @@ dependencies = [
  "entity_registry_db_utils",
  "foreign_entity",
  "futures",
+ "github_pull_requests",
  "hex",
  "http-body-util",
  "jsonwebtoken 10.3.0",
@@ -6324,6 +6367,7 @@ dependencies = [
  "models_permissions",
  "models_properties",
  "non_empty",
+ "pptx_engine",
  "rdkafka",
  "redis",
  "reqwest 0.13.4",
@@ -8057,6 +8101,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "git_patch"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "strum 0.27.2",
+ "utoipa",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "github"
 version = "0.1.0"
 dependencies = [
@@ -8073,6 +8129,7 @@ dependencies = [
  "entity_access",
  "foreign_entity",
  "fusionauth",
+ "github_pull_requests",
  "hex",
  "hmac 0.12.1",
  "http-body-util",
@@ -8109,6 +8166,36 @@ dependencies = [
  "tracing",
  "url",
  "urlencoding",
+ "utoipa",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "github_pull_requests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-sdk-s3",
+ "axum",
+ "chrono",
+ "entity_access",
+ "filter_ast",
+ "foreign_entity",
+ "git_patch",
+ "item_filters",
+ "macro_authorization",
+ "macro_db_migrator",
+ "macro_user_id",
+ "model-error-response",
+ "models_pagination",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
  "utoipa",
  "uuid",
  "workspace-hack",
@@ -9572,11 +9659,14 @@ name = "image_generation"
 version = "0.1.0"
 dependencies = [
  "ai_toolset",
+ "ai_usage",
  "anyhow",
  "async-trait",
  "attachment",
  "base64 0.22.1",
  "bot_id",
+ "image",
+ "lexical_client",
  "macro_user_id",
  "model",
  "model-entity",
@@ -9832,14 +9922,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "initiative_documents"
+name = "initiative_description"
 version = "0.1.0"
 dependencies = [
- "documents",
+ "chrono",
+ "collab_surface",
  "initiative",
- "model_owner",
+ "model-entity",
  "rootcause",
+ "tokio",
  "tracing",
+ "uuid",
  "workspace-hack",
 ]
 
@@ -11596,6 +11689,7 @@ dependencies = [
  "frecency",
  "fusionauth",
  "futures",
+ "github_pull_requests",
  "http 1.4.0",
  "lexical_client",
  "macro_auth",
@@ -11720,6 +11814,7 @@ dependencies = [
  "foreign_entity",
  "frecency",
  "futures",
+ "github_pull_requests",
  "lexical_client",
  "macro_authorization",
  "macro_aws_config",
@@ -14230,6 +14325,28 @@ name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+
+[[package]]
+name = "pptx_engine"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "clap",
+ "console_error_panic_hook",
+ "gif",
+ "js-sys",
+ "miniz_oxide",
+ "png",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tiny-skia",
+ "ttf-parser",
+ "wasm-bindgen",
+ "zune-core",
+ "zune-jpeg",
+]
 
 [[package]]
 name = "ppv-lite86"
@@ -17423,6 +17540,7 @@ dependencies = [
  "foreign_entity",
  "frecency",
  "futures",
+ "github_pull_requests",
  "http-body-util",
  "indexmap 2.14.0",
  "item_filters",
@@ -17524,6 +17642,7 @@ dependencies = [
  "rootcause",
  "serde",
  "serde_json",
+ "system_properties",
  "tokio",
  "tokio-retry",
  "tracing",
@@ -18040,6 +18159,12 @@ dependencies = [
  "utoipa",
  "workspace-hack",
 ]
+
+[[package]]
+name = "strict-num"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
 
 [[package]]
 name = "string_cache"
@@ -18734,6 +18859,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiny-skia"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83d13394d44dae3207b52a326c0c85a8bf87f1541f23b0d143811088497b09ab"
+dependencies = [
+ "arrayref",
+ "arrayvec 0.7.6",
+ "bytemuck",
+ "cfg-if",
+ "log",
+ "tiny-skia-path",
+]
+
+[[package]]
+name = "tiny-skia-path"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c9e7fc0c2e86a30b117d0462aa261b72b7a99b7ebd7deb3a14ceda95c5bdc93"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "strict-num",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -19261,6 +19411,12 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "ttf-parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "tui-input"
