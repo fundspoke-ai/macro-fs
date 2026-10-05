@@ -120,7 +120,10 @@ fn checkout() -> Step<Use> {
             "checkout",
             "df4cb1c069e1874edd31b4311f1884172cec0e10",
         ) // v6
-        .add_with(("ref", "${{ github.ref_name }}"))
+        // The pushed commit, not the branch tip: a merge that lands while this
+        // run's backend deploys must not ship its frontend against the older
+        // backend.
+        .add_with(("ref", "${{ github.sha }}"))
 }
 
 /// Build identical across dev/prod up to `MODE` (`just build-<env>`).
