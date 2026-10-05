@@ -382,6 +382,13 @@ export const storageBacklog = [
   'getEmailFollowup',
   'setEmailFollowup',
   'listEmailReminders',
+  // CRM pipelines fit the crm namespace but are not wrapped yet.
+  'createCrmPipeline',
+  'getCrmPipeline',
+  'listCrmPipelines',
+  'renameCrmPipeline',
+  'shareCrmPipeline',
+  'trashCrmPipeline',
   'approveHarnessPairing',
   'claimHarnessPairing',
   'createAgent',
