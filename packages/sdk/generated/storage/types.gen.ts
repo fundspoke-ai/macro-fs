@@ -10,6 +10,16 @@ export type ClientOptions = {
 export type AccessLevel = 'view' | 'comment' | 'edit' | 'owner';
 
 /**
+ * Metadata together with the caller's effective grant.
+ */
+export type AccessiblePipeline = Pipeline & {
+    /**
+     * Highest effective access.
+     */
+    grant: AccessLevel;
+};
+
+/**
  * A currently active call, as returned by the batch active-calls listing.
  */
 export type ActiveCallSummary = {
@@ -82,7 +92,7 @@ export type AddFavoriteRequest = {
     /**
      * The type of the entity to favorite.
      */
-    entityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
+    entityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'crm_pipeline' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
 };
 
 /**
@@ -2824,7 +2834,7 @@ export type CollabSurfaceResponse = {
     /**
      * Type of the parent entity.
      */
-    parentEntityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
+    parentEntityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'crm_pipeline' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
     /**
      * Lifecycle state (`ready` for every surface visible via the API).
      */
@@ -3943,6 +3953,24 @@ export type CreatePairingRequest = {
     scope?: null | RequestedHarnessScope;
 };
 
+/**
+ * Request to create an empty pipeline with the standard CRM columns.
+ */
+export type CreatePipeline = {
+    /**
+     * Pipeline name.
+     */
+    name: string;
+    /**
+     * Company or contact entries.
+     */
+    recordType: PipelineRecordType;
+    /**
+     * Defaults to private.
+     */
+    sharing?: PipelineSharing;
+};
+
 export type CreateProjectRequest = {
     /**
      * The name of the project.
@@ -3980,7 +4008,7 @@ export type CreateReminderRequest = {
     /**
      * Type of the entity to attach the reminder to. Requires `entityId`.
      */
-    entityType?: null | 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
+    entityType?: null | 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'crm_pipeline' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
     /**
      * When and how often the reminder fires.
      */
@@ -5708,7 +5736,7 @@ export type EnsureCollabSurfaceRequest = {
     /**
      * Type of the parent entity access derives from.
      */
-    parentEntityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
+    parentEntityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'crm_pipeline' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
 };
 
 /**
@@ -6018,7 +6046,7 @@ export type Favorite = {
     /**
      * The type of the favorited entity.
      */
-    entityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
+    entityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'crm_pipeline' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
     /**
      * File type of the favorited document, when applicable.
      */
@@ -6040,7 +6068,7 @@ export type FavoriteEntityRef = {
     /**
      * The type of the favorited entity.
      */
-    entityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
+    entityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'crm_pipeline' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
 };
 
 /**
@@ -9107,6 +9135,62 @@ export type PinnedItem = {
 };
 
 /**
+ * Pipeline metadata; table schema and data are read through the database service.
+ */
+export type Pipeline = {
+    /**
+     * Creation time.
+     */
+    createdAt: string;
+    /**
+     * Dedicated backing database.
+     */
+    databaseId: string;
+    /**
+     * Entity identity, used with `CrmPipeline` access receipts.
+     */
+    id: string;
+    /**
+     * Display name, stored by the backing database.
+     */
+    name: string;
+    /**
+     * Protected primary column.
+     */
+    primaryColumnId: string;
+    /**
+     * Kind of the primary reference.
+     */
+    recordType: PipelineRecordType;
+    /**
+     * Whether the pipeline has a team grant.
+     */
+    sharing: PipelineSharing;
+    /**
+     * Table of entries.
+     */
+    tableId: string;
+    /**
+     * CRM data boundary; independent of sharing.
+     */
+    teamId: string;
+    /**
+     * Trashed pipelines are omitted from navigation.
+     */
+    trashedAt: string | null;
+};
+
+/**
+ * Which CRM entity each row references. Fixed when a pipeline is created.
+ */
+export type PipelineRecordType = 'company' | 'contact';
+
+/**
+ * Initial sharing, or the desired team grant. Individual ownership is preserved.
+ */
+export type PipelineSharing = 'private' | 'team';
+
+/**
  * Request body for `POST /channels/activity`.
  */
 export type PostActivityRequest = {
@@ -9591,7 +9675,7 @@ export type Reminder = {
     /**
      * Type of the associated entity, when the reminder is attached to one.
      */
-    entityType?: null | 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
+    entityType?: null | 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'crm_pipeline' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
     /**
      * Reminder id.
      */
@@ -9752,6 +9836,16 @@ export type RenameChannelLabelRequest = {
      */
     name: string;
     rule?: null | ChannelLabelRule;
+};
+
+/**
+ * Rename input.
+ */
+export type RenamePipeline = {
+    /**
+     * New display name.
+     */
+    name: string;
 };
 
 /**
@@ -10412,6 +10506,16 @@ export type SharePermissionV2 = {
      */
     owner: string;
     teamShareAccessLevel?: null | AccessLevel;
+};
+
+/**
+ * Sharing input.
+ */
+export type SharePipeline = {
+    /**
+     * Desired team grant.
+     */
+    sharing: PipelineSharing;
 };
 
 /**
@@ -11768,7 +11872,7 @@ export type SoupReminderReference = {
     /**
      * The referenced entity's type.
      */
-    entityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
+    entityType: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'crm_pipeline' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
     /**
      * File type, when the reference is a document — `md`, `pdf`, and so on.
      */
@@ -12584,6 +12688,16 @@ export type TranscriptSegmentRequest = {
      * (it stamps egress bootstrap, not first audio frame).
      */
     streamStartedAt?: string | null;
+};
+
+/**
+ * Trash/restore input.
+ */
+export type TrashPipeline = {
+    /**
+     * True to trash; false to restore.
+     */
+    trashed: boolean;
 };
 
 /**
@@ -15958,6 +16072,92 @@ export type SetCrmContactNameResponses = {
 
 export type SetCrmContactNameResponse = SetCrmContactNameResponses[keyof SetCrmContactNameResponses];
 
+export type ListCrmPipelinesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/crm/pipelines';
+};
+
+export type ListCrmPipelinesResponses = {
+    200: Array<AccessiblePipeline>;
+};
+
+export type ListCrmPipelinesResponse = ListCrmPipelinesResponses[keyof ListCrmPipelinesResponses];
+
+export type CreateCrmPipelineData = {
+    body: CreatePipeline;
+    path?: never;
+    query?: never;
+    url: '/crm/pipelines';
+};
+
+export type CreateCrmPipelineResponses = {
+    200: AccessiblePipeline;
+};
+
+export type CreateCrmPipelineResponse = CreateCrmPipelineResponses[keyof CreateCrmPipelineResponses];
+
+export type GetCrmPipelineData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/crm/pipelines/{id}';
+};
+
+export type GetCrmPipelineResponses = {
+    200: AccessiblePipeline;
+};
+
+export type GetCrmPipelineResponse = GetCrmPipelineResponses[keyof GetCrmPipelineResponses];
+
+export type RenameCrmPipelineData = {
+    body: RenamePipeline;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/crm/pipelines/{id}/name';
+};
+
+export type RenameCrmPipelineResponses = {
+    204: void;
+};
+
+export type RenameCrmPipelineResponse = RenameCrmPipelineResponses[keyof RenameCrmPipelineResponses];
+
+export type ShareCrmPipelineData = {
+    body: SharePipeline;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/crm/pipelines/{id}/sharing';
+};
+
+export type ShareCrmPipelineResponses = {
+    204: void;
+};
+
+export type ShareCrmPipelineResponse = ShareCrmPipelineResponses[keyof ShareCrmPipelineResponses];
+
+export type TrashCrmPipelineData = {
+    body: TrashPipeline;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/crm/pipelines/{id}/trash';
+};
+
+export type TrashCrmPipelineResponses = {
+    204: void;
+};
+
+export type TrashCrmPipelineResponse = TrashCrmPipelineResponses[keyof TrashCrmPipelineResponses];
+
 export type GetCrmTeamSettingsData = {
     body?: never;
     path?: never;
@@ -17719,7 +17919,7 @@ export type ListFavoritesData = {
         /**
          * Restrict to favorites whose entity is one of these types.
          */
-        entityType?: Array<'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row'>;
+        entityType?: Array<'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'crm_pipeline' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row'>;
         /**
          * Restrict to favorites whose entity is one of these ids.
          */
@@ -17788,7 +17988,7 @@ export type RemoveFavoriteByEntityData = {
         /**
          * The type of an entity in Macro
          */
-        entity_type: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
+        entity_type: 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'crm_pipeline' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
         /**
          * The id of the favorited entity.
          */
@@ -19337,7 +19537,7 @@ export type ListRemindersData = {
         /**
          * Restrict to reminders attached to an entity of these types.
          */
-        entityType?: Array<'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row'>;
+        entityType?: Array<'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'crm_pipeline' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row'>;
         /**
          * Restrict to reminders attached to these entity ids.
          */
