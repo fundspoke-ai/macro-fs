@@ -11940,6 +11940,7 @@ export const editDocumentBody = zod
                     'ps',
                     'dxf',
                     'dwg',
+                    'fig',
                     'stl',
                     'obj',
                     'fbx',
@@ -37183,6 +37184,32 @@ export const messageTimelineResponse = zod
                             .describe(
                               'A cell or rectangular range in a native spreadsheet.'
                             ),
+                          zod
+                            .object({
+                              nodeId: zod
+                                .string()
+                                .nullish()
+                                .describe(
+                                  'Layer the pin follows; absent for a pin on the bare canvas.'
+                                ),
+                              pageId: zod
+                                .string()
+                                .describe('Page (canvas) the pin is on.'),
+                              type: zod.enum(['fig']),
+                              x: zod
+                                .number()
+                                .describe(
+                                  "Horizontal offset from the layer's origin, or the page's when\nthe pin is on no layer, in design units."
+                                ),
+                              y: zod
+                                .number()
+                                .describe(
+                                  'Vertical offset, measured like `x`.'
+                                ),
+                            })
+                            .describe(
+                              'A point pinned on a design (`.fig`): on a layer, or on the page\ncanvas when no layer was under it.'
+                            ),
                         ])
                         .describe(
                           "A thread's location within its document. PDF geometry remains annotation-owned."
@@ -37556,6 +37583,26 @@ export const entityMessageCreateBody = zod
                 type: zod.enum(['spreadsheet']),
               })
               .describe('A cell or rectangular range in a native spreadsheet.'),
+            zod
+              .object({
+                nodeId: zod
+                  .string()
+                  .nullish()
+                  .describe(
+                    'Layer the pin follows; absent or null for a pin on the bare canvas.'
+                  ),
+                pageId: zod.string().describe('Page (canvas) the pin is on.'),
+                type: zod.enum(['fig']),
+                x: zod
+                  .number()
+                  .describe(
+                    "Horizontal offset from the layer's origin, or the page's when\nthe pin is on no layer, in design units."
+                  ),
+                y: zod.number().describe('Vertical offset, measured like `x`.'),
+              })
+              .describe(
+                'A point pinned on a design (`.fig`): on a layer, or on the page\ncanvas when no layer was under it.'
+              ),
           ])
           .describe('Location supplied when creating a document discussion.'),
       ])
@@ -39054,6 +39101,30 @@ export const entityMessageGetThreadResponse = zod
                   .describe(
                     'A cell or rectangular range in a native spreadsheet.'
                   ),
+                zod
+                  .object({
+                    nodeId: zod
+                      .string()
+                      .nullish()
+                      .describe(
+                        'Layer the pin follows; absent for a pin on the bare canvas.'
+                      ),
+                    pageId: zod
+                      .string()
+                      .describe('Page (canvas) the pin is on.'),
+                    type: zod.enum(['fig']),
+                    x: zod
+                      .number()
+                      .describe(
+                        "Horizontal offset from the layer's origin, or the page's when\nthe pin is on no layer, in design units."
+                      ),
+                    y: zod
+                      .number()
+                      .describe('Vertical offset, measured like `x`.'),
+                  })
+                  .describe(
+                    'A point pinned on a design (`.fig`): on a layer, or on the page\ncanvas when no layer was under it.'
+                  ),
               ])
               .describe(
                 "A thread's location within its document. PDF geometry remains annotation-owned."
@@ -39160,6 +39231,26 @@ export const entityMessageDeleteThreadResponse = zod
                 type: zod.enum(['spreadsheet']),
               })
               .describe('A cell or rectangular range in a native spreadsheet.'),
+            zod
+              .object({
+                nodeId: zod
+                  .string()
+                  .nullish()
+                  .describe(
+                    'Layer the pin follows; absent for a pin on the bare canvas.'
+                  ),
+                pageId: zod.string().describe('Page (canvas) the pin is on.'),
+                type: zod.enum(['fig']),
+                x: zod
+                  .number()
+                  .describe(
+                    "Horizontal offset from the layer's origin, or the page's when\nthe pin is on no layer, in design units."
+                  ),
+                y: zod.number().describe('Vertical offset, measured like `x`.'),
+              })
+              .describe(
+                'A point pinned on a design (`.fig`): on a layer, or on the page\ncanvas when no layer was under it.'
+              ),
           ])
           .describe(
             "A thread's location within its document. PDF geometry remains annotation-owned."
@@ -39279,6 +39370,26 @@ export const entityMessagePatchThreadResponse = zod
                 type: zod.enum(['spreadsheet']),
               })
               .describe('A cell or rectangular range in a native spreadsheet.'),
+            zod
+              .object({
+                nodeId: zod
+                  .string()
+                  .nullish()
+                  .describe(
+                    'Layer the pin follows; absent for a pin on the bare canvas.'
+                  ),
+                pageId: zod.string().describe('Page (canvas) the pin is on.'),
+                type: zod.enum(['fig']),
+                x: zod
+                  .number()
+                  .describe(
+                    "Horizontal offset from the layer's origin, or the page's when\nthe pin is on no layer, in design units."
+                  ),
+                y: zod.number().describe('Vertical offset, measured like `x`.'),
+              })
+              .describe(
+                'A point pinned on a design (`.fig`): on a layer, or on the page\ncanvas when no layer was under it.'
+              ),
           ])
           .describe(
             "A thread's location within its document. PDF geometry remains annotation-owned."
@@ -40271,6 +40382,7 @@ export const uploadFolderHandlerBody = zod.object({
                 'ps',
                 'dxf',
                 'dwg',
+                'fig',
                 'stl',
                 'obj',
                 'fbx',
@@ -40766,6 +40878,7 @@ export const uploadFolderHandlerResponse = zod.object({
                     'ps',
                     'dxf',
                     'dwg',
+                    'fig',
                     'stl',
                     'obj',
                     'fbx',
