@@ -368,20 +368,12 @@ async fn private_defaults_team_sharing_and_revocation_cover_database_and_rows(po
 }
 
 #[sqlx::test(migrator = "MACRO_DB_MIGRATIONS")]
-async fn primary_record_is_required_unique_and_scoped_to_each_pipeline(pool: PgPool) {
+async fn primary_record_is_required_and_scoped_but_can_repeat(pool: PgPool) {
     let (s, _db, a, team, company) = fixture(&pool).await;
     let p = create(&s, team, PipelineRecordType::Company).await;
     let row = inserted(&write(&s, &a, &p, vec![insert(&p, company)]).await.unwrap());
-    let duplicate = write(&s, &a, &p, vec![insert(&p, company)])
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            duplicate,
-            PipelineError::Database(DatabaseError::InvalidOp(_))
-        ),
-        "{duplicate:?}"
-    );
+    let duplicate = inserted(&write(&s, &a, &p, vec![insert(&p, company)]).await.unwrap());
+    assert_ne!(row, duplicate);
     let blank = serde_json::from_value(
         json!({"kind":"rows","table":p.table_id,"change":{"kind":"insert","rows":[[]]}}),
     )
@@ -431,14 +423,62 @@ async fn primary_record_is_required_unique_and_scoped_to_each_pipeline(pool: PgP
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(count, 1);
-    // Removing an entry keeps its CRM record and allows adding it again.
+    assert_eq!(count, 2);
+    // Removing one entry keeps the other entry and its CRM record.
     let remove = DatabaseOp::Rows {
         table: p.table_id,
         change: RowsChange::Delete { rows: vec![row] },
     };
     write(&s, &a, &p, vec![remove]).await.unwrap();
+    let remaining = s
+        .rows(access(&a, p.id, EntityType::CrmPipeline, OWNER).await, None)
+        .await
+        .unwrap();
+    assert_eq!(remaining.rows.len(), 1);
+    assert_eq!(remaining.rows[0].row_id, duplicate);
     write(&s, &a, &p, vec![insert(&p, company)]).await.unwrap();
+}
+
+#[sqlx::test(migrator = "MACRO_DB_MIGRATIONS")]
+async fn repeated_reference_migration_preserves_entries_and_refuses_lossy_rollback(pool: PgPool) {
+    const UP: &str = include_str!(
+        "../../macro_db_client/migrations/20261005231703_allow_repeated_crm_pipeline_records.up.sql"
+    );
+    const DOWN: &str = include_str!(
+        "../../macro_db_client/migrations/20261005231703_allow_repeated_crm_pipeline_records.down.sql"
+    );
+    let (s, _, a, team, company) = fixture(&pool).await;
+    let p = create(&s, team, PipelineRecordType::Company).await;
+    let row = inserted(&write(&s, &a, &p, vec![insert(&p, company)]).await.unwrap());
+
+    // Recreate the previous schema with an existing entry, then upgrade it.
+    sqlx::raw_sql(DOWN).execute(&pool).await.unwrap();
+    assert!(matches!(
+        write(&s, &a, &p, vec![insert(&p, company)]).await,
+        Err(PipelineError::Database(DatabaseError::InvalidOp(_)))
+    ));
+    sqlx::raw_sql(UP).execute(&pool).await.unwrap();
+    let duplicate = inserted(&write(&s, &a, &p, vec![insert(&p, company)]).await.unwrap());
+    assert_ne!(row, duplicate);
+
+    // Rolling back cannot silently delete repeated entries to restore uniqueness.
+    let mut transaction = pool.begin().await.unwrap();
+    assert!(
+        sqlx::raw_sql(DOWN)
+            .execute(&mut *transaction)
+            .await
+            .unwrap_err()
+            .as_database_error()
+            .is_some_and(|error| error.is_unique_violation())
+    );
+    transaction.rollback().await.unwrap();
+    let rows = s
+        .rows(access(&a, p.id, EntityType::CrmPipeline, OWNER).await, None)
+        .await
+        .unwrap();
+    assert_eq!(rows.rows.len(), 2);
+    assert!(rows.rows.iter().any(|entry| entry.row_id == row));
+    assert!(rows.rows.iter().any(|entry| entry.row_id == duplicate));
 }
 
 #[sqlx::test(migrator = "MACRO_DB_MIGRATIONS")]
@@ -503,7 +543,14 @@ async fn contact_pipelines_and_lifecycle_preserve_crm_records(pool: PgPool) {
     let contact = Uuid::now_v7();
     sqlx::query!(r#"INSERT INTO crm_contacts (id,company_id,email,first_interaction,last_interaction) VALUES ($1,$2,'person@example.com',now(),now())"#, contact, company).execute(&pool).await.unwrap();
     let p = create(&s, team, PipelineRecordType::Contact).await;
-    write(&s, &a, &p, vec![insert(&p, contact)]).await.unwrap();
+    let row = inserted(&write(&s, &a, &p, vec![insert(&p, contact)]).await.unwrap());
+    let duplicate = inserted(&write(&s, &a, &p, vec![insert(&p, contact)]).await.unwrap());
+    assert_ne!(row, duplicate);
+    let rows = s
+        .rows(access(&a, p.id, EntityType::CrmPipeline, OWNER).await, None)
+        .await
+        .unwrap();
+    assert_eq!(rows.rows.len(), 2);
     assert!(write(&s, &a, &p, vec![insert(&p, company)]).await.is_err());
     s.rename(
         access(&a, p.id, EntityType::CrmPipeline, OWNER).await,
@@ -718,7 +765,7 @@ async fn http_creation_listing_schema_and_records_use_pipeline_access(pool: PgPo
     for (token, expected) in [
         ("outsider", StatusCode::UNAUTHORIZED),
         ("owner", StatusCode::OK),
-        ("owner", StatusCode::BAD_REQUEST),
+        ("owner", StatusCode::OK),
     ] {
         let response = app
             .clone()
@@ -734,18 +781,6 @@ async fn http_creation_listing_schema_and_records_use_pipeline_access(pool: PgPo
             .await
             .unwrap();
         assert_eq!(response.status(), expected);
-        if expected == StatusCode::BAD_REQUEST {
-            let refusal: serde_json::Value =
-                serde_json::from_slice(&to_bytes(response.into_body(), 16384).await.unwrap())
-                    .unwrap();
-            assert_eq!(refusal["op"], 0);
-            assert!(
-                refusal["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("already in use")
-            );
-        }
     }
     for route in ["table", "rows"] {
         for (token, expected) in [
@@ -768,11 +803,15 @@ async fn http_creation_listing_schema_and_records_use_pipeline_access(pool: PgPo
                 let rows: serde_json::Value =
                     serde_json::from_slice(&to_bytes(response.into_body(), 16384).await.unwrap())
                         .unwrap();
-                assert_eq!(rows["rows"].as_array().unwrap().len(), 1);
-                assert_eq!(
-                    rows["rows"][0]["cells"][primary]["value"][0]["entity_id"],
-                    company.to_string()
-                );
+                let rows = rows["rows"].as_array().unwrap();
+                assert_eq!(rows.len(), 2);
+                assert_ne!(rows[0]["rowId"], rows[1]["rowId"]);
+                for row in rows {
+                    assert_eq!(
+                        row["cells"][primary]["value"][0]["entity_id"],
+                        company.to_string()
+                    );
+                }
             }
         }
     }

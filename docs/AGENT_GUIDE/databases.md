@@ -62,8 +62,9 @@ Pipelines are created from the CRM sidebar's **New pipeline** action. Their
 records are read and edited through the pipeline's access; they are not standalone
 database app entities and do not appear in the Databases list. Use **Share → Team access**
 in the CRM to switch between **None** (private) and **Edit** (team). A pipeline's primary
-company/contact reference is required and unique within that pipeline. Its
-column and table are protected against removal or type changes. See
+company/contact reference is required. The same company or contact can appear
+in multiple independent rows, including through the row menu's **Duplicate** action.
+The reference column and table are protected against removal or type changes. See
 [Customers (CRM)](surfaces.md#customers-crm--appcomponentcompanies) for the flow.
 
 Teams migrated from the legacy CRM have a team-shared **Sales** pipeline with

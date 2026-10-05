@@ -1741,8 +1741,10 @@ and can change access later through the standard **Share** dialog. Under
 pipeline private. **Copy Link** copies a CRM link that opens this pipeline for
 anyone who has access. On mobile, team access is in the **Team** tab.
 
-The first column is a required company/contact reference. Each record can occur
-once per pipeline and can also belong to other pipelines. The reference column
+The first column is a required company/contact reference. The same company or
+contact can occur in multiple rows in a pipeline and can also belong to other
+pipelines. Each row has its own field values; **Duplicate** copies a row into a new
+entry referencing the same company or contact. The reference column
 can be renamed but cannot be removed or changed to another type. Stage, Owner,
 and Revenue are independent pipeline fields; editing them does not modify the
 company's CRM fields. Use **Add column** or a column header's menu to customize
