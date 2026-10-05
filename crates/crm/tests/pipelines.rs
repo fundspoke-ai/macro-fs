@@ -3,13 +3,9 @@
 
 use crm::domain::{auth::CrmTeamReceipt, model::CrmError, pipelines::*, stages::*};
 use crm::outbound::pipelines::PgPipelineRepo;
-use databases::domain::{
-    models::{DatabaseError, Viewer},
-    ports::DatabasesService,
-    sharing::DatabaseSharingService,
-};
+use databases::domain::models::DatabaseError;
 use databases::outbound::{
-    gateway_event_publisher::NoOpTableEventPublisher, pg_databases_repo::PgDatabasesRepo,
+    gateway_event_publisher::NoOpTableEventPublisher, pg_cell_store::PgCellStore,
 };
 use databases::wiring::{PgDatabasesService, build_service};
 use entity_access::{
@@ -36,7 +32,7 @@ const OUTSIDER: &str = "macro|pipeline-outsider@macro.com";
 type Access = EntityAccessServiceImpl<PgAccessRepository>;
 type DatabaseService = PgDatabasesService<NoOpTableEventPublisher, NoopMacroEventBroker, Access>;
 type Service = PipelineServiceImpl<
-    PgPipelineRepo<PgDatabasesRepo<PropertiesPgRepo>>,
+    PgPipelineRepo<PgCellStore<PropertiesPgRepo>>,
     DatabaseService,
     Access,
     Stages,
@@ -175,7 +171,7 @@ async fn fixture(pool: &PgPool) -> (Service, Arc<DatabaseService>, Arc<Access>, 
     let svc = Service::new(
         PgPipelineRepo::new(
             pool.clone(),
-            PgDatabasesRepo::new(pool.clone(), PropertiesPgRepo::new(pool.clone())),
+            PgCellStore::new(pool.clone(), PropertiesPgRepo::new(pool.clone())),
         ),
         db.clone(),
         a.clone(),
@@ -200,21 +196,19 @@ fn insert(p: &Pipeline, entity: Uuid) -> DatabaseOp {
     serde_json::from_value(json!({"kind":"rows", "table":p.table_id, "change":{"kind":"insert", "rows":[[{"column":p.primary_column_id, "value":{"type":"entities","value":[{"entityType":p.record_type.as_str().to_uppercase(),"entityId":entity.to_string()}]}}]]}})).unwrap()
 }
 async fn write(
-    db: &DatabaseService,
+    s: &Service,
     a: &Access,
     p: &Pipeline,
     ops: Vec<DatabaseOp>,
-) -> Result<Vec<OpResult>, DatabaseError> {
-    db.apply_ops(
-        access(a, p.database_id.into_uuid(), EntityType::Database, OWNER).await,
-        Viewer {
-            user_id: user(OWNER),
-            acting_bot: None,
-        },
+) -> Result<Vec<OpResult>, PipelineError> {
+    s.apply_ops(
+        access(a, p.id, EntityType::CrmPipeline, OWNER).await,
         ops.into(),
     )
     .await
+    .map(|applied| applied.results)
 }
+
 fn inserted(result: &[OpResult]) -> RowId {
     match &result[0] {
         OpResult::Rows {
@@ -227,17 +221,17 @@ fn inserted(result: &[OpResult]) -> RowId {
 
 #[sqlx::test(migrator = "MACRO_DB_MIGRATIONS")]
 async fn private_defaults_team_sharing_and_revocation_cover_database_and_rows(pool: PgPool) {
-    let (s, db, a, team, company) = fixture(&pool).await;
+    let (s, _db, a, team, company) = fixture(&pool).await;
     let p = create(&s, team, PipelineRecordType::Company).await;
     assert_eq!(p.name, "Renewals");
     assert_eq!(p.sharing, PipelineSharing::Private);
     assert!(s.list(team_receipt(team, MEMBER)).await.unwrap().is_empty());
-    let detail = db
-        .get_database(access(&a, p.database_id.into_uuid(), EntityType::Database, OWNER).await)
+    let detail = s
+        .table(access(&a, p.id, EntityType::CrmPipeline, OWNER).await)
         .await
         .unwrap();
-    assert_eq!(detail.tables[0].columns.len(), 4);
-    let columns = &detail.tables[0].columns;
+    assert_eq!(detail.columns.len(), 4);
+    let columns = &detail.columns;
     assert_eq!(
         columns
             .iter()
@@ -260,7 +254,7 @@ async fn private_defaults_team_sharing_and_revocation_cover_database_and_rows(po
             .iter()
             .all(|option| option.id != Uuid::nil())
     );
-    let row = inserted(&write(&db, &a, &p, vec![insert(&p, company)]).await.unwrap());
+    let row = inserted(&write(&s, &a, &p, vec![insert(&p, company)]).await.unwrap());
     for actor in [MEMBER, OUTSIDER] {
         for (id, kind) in [
             (p.id, EntityType::CrmPipeline),
@@ -282,38 +276,62 @@ async fn private_defaults_team_sharing_and_revocation_cover_database_and_rows(po
     .await
     .unwrap();
     assert_eq!(s.list(team_receipt(team, MEMBER)).await.unwrap().len(), 1);
-    for (id, kind) in [
-        (p.id, EntityType::CrmPipeline),
-        (p.database_id.into_uuid(), EntityType::Database),
-        (row.into_uuid(), EntityType::DatabaseRow),
-    ] {
-        assert_eq!(
-            a.get_access_level(Some(&user(MEMBER)), &id.to_string(), kind)
-                .await
-                .unwrap(),
-            Some(AccessLevel::Edit)
-        );
-        assert!(
-            a.generate_entity_access_receipt::<OwnerAccessLevel>(
-                &user(MEMBER),
-                None,
-                &id.to_string(),
-                kind
-            )
-            .await
-            .is_err()
-        );
-    }
     assert_eq!(
-        a.accessible_databases(&user(MEMBER)).await.unwrap(),
-        vec![(p.database_id.into_uuid(), AccessLevel::Edit)]
+        a.get_access_level(
+            Some(&user(MEMBER)),
+            &p.id.to_string(),
+            EntityType::CrmPipeline
+        )
+        .await
+        .unwrap(),
+        Some(AccessLevel::Edit)
     );
     assert!(
-        db.share_permissions(
-            access(&a, p.database_id.into_uuid(), EntityType::Database, OWNER).await
+        a.generate_entity_access_receipt::<OwnerAccessLevel>(
+            &user(MEMBER),
+            None,
+            &p.id.to_string(),
+            EntityType::CrmPipeline
         )
         .await
         .is_err()
+    );
+    assert_eq!(
+        s.rows(
+            access(&a, p.id, EntityType::CrmPipeline, MEMBER).await,
+            None
+        )
+        .await
+        .unwrap()
+        .rows
+        .len(),
+        1
+    );
+    for actor in [OWNER, MEMBER] {
+        for (id, kind) in [
+            (p.database_id.into_uuid(), EntityType::Database),
+            (row.into_uuid(), EntityType::DatabaseRow),
+        ] {
+            assert_eq!(
+                a.get_access_level(Some(&user(actor)), &id.to_string(), kind)
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
+        assert!(
+            a.accessible_databases(&user(actor))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar!("SELECT count(*) FROM database_entities")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        Some(0)
     );
     s.share(
         access(&a, p.id, EntityType::CrmPipeline, OWNER).await,
@@ -351,14 +369,17 @@ async fn private_defaults_team_sharing_and_revocation_cover_database_and_rows(po
 
 #[sqlx::test(migrator = "MACRO_DB_MIGRATIONS")]
 async fn primary_record_is_required_unique_and_scoped_to_each_pipeline(pool: PgPool) {
-    let (s, db, a, team, company) = fixture(&pool).await;
+    let (s, _db, a, team, company) = fixture(&pool).await;
     let p = create(&s, team, PipelineRecordType::Company).await;
-    let row = inserted(&write(&db, &a, &p, vec![insert(&p, company)]).await.unwrap());
-    let duplicate = write(&db, &a, &p, vec![insert(&p, company)])
+    let row = inserted(&write(&s, &a, &p, vec![insert(&p, company)]).await.unwrap());
+    let duplicate = write(&s, &a, &p, vec![insert(&p, company)])
         .await
         .unwrap_err();
     assert!(
-        matches!(duplicate, DatabaseError::InvalidOp(_)),
+        matches!(
+            duplicate,
+            PipelineError::Database(DatabaseError::InvalidOp(_))
+        ),
         "{duplicate:?}"
     );
     let blank = serde_json::from_value(
@@ -366,24 +387,29 @@ async fn primary_record_is_required_unique_and_scoped_to_each_pipeline(pool: PgP
     )
     .unwrap();
     assert!(matches!(
-        write(&db, &a, &p, vec![blank]).await,
-        Err(DatabaseError::InvalidOp(_))
+        write(&s, &a, &p, vec![blank]).await,
+        Err(PipelineError::Database(DatabaseError::InvalidOp(_))) | Err(PipelineError::Invalid(_))
     ));
     let clear = serde_json::from_value(json!({"kind":"rows","table":p.table_id,"change":{"kind":"update","changes":{"kind":"uniform","rows":[row],"cells":[{"column":p.primary_column_id,"value":{"type":"clear"}}]}}})).unwrap();
     assert!(matches!(
-        write(&db, &a, &p, vec![clear]).await,
-        Err(DatabaseError::InvalidOp(_))
+        write(&s, &a, &p, vec![clear]).await,
+        Err(PipelineError::Database(DatabaseError::InvalidOp(_))) | Err(PipelineError::Invalid(_))
     ));
     let delete_column = serde_json::from_value(json!({"kind":"column","table":p.table_id,"column":p.primary_column_id,"change":{"kind":"delete"}})).unwrap();
     assert!(matches!(
-        write(&db, &a, &p, vec![delete_column]).await,
-        Err(DatabaseError::InvalidOp(_))
+        write(&s, &a, &p, vec![delete_column]).await,
+        Err(PipelineError::Database(DatabaseError::InvalidOp(_))) | Err(PipelineError::Invalid(_))
     ));
     assert!(matches!(
-        write(&db, &a, &p, vec![insert(&p, Uuid::now_v7())]).await,
-        Err(DatabaseError::InvalidOp(_))
+        write(&s, &a, &p, vec![insert(&p, Uuid::now_v7())]).await,
+        Err(PipelineError::Database(DatabaseError::InvalidOp(_))) | Err(PipelineError::Invalid(_))
     ));
     let second = create(&s, team, PipelineRecordType::Company).await;
+    // A receipt for one pipeline must never write another pipeline's storage.
+    assert!(matches!(
+        write(&s, &a, &p, vec![insert(&second, company)]).await,
+        Err(PipelineError::NotFound)
+    ));
     let change_primary = DatabaseOp::Column {
         table: second.table_id,
         column: second.primary_column_id,
@@ -392,10 +418,10 @@ async fn primary_record_is_required_unique_and_scoped_to_each_pipeline(pool: PgP
         },
     };
     assert!(matches!(
-        write(&db, &a, &second, vec![change_primary]).await,
-        Err(DatabaseError::InvalidOp(_))
+        write(&s, &a, &second, vec![change_primary]).await,
+        Err(PipelineError::Database(DatabaseError::InvalidOp(_))) | Err(PipelineError::Invalid(_))
     ));
-    write(&db, &a, &second, vec![insert(&second, company)])
+    write(&s, &a, &second, vec![insert(&second, company)])
         .await
         .unwrap();
     let count: i64 = sqlx::query_scalar!(
@@ -411,18 +437,74 @@ async fn primary_record_is_required_unique_and_scoped_to_each_pipeline(pool: PgP
         table: p.table_id,
         change: RowsChange::Delete { rows: vec![row] },
     };
-    write(&db, &a, &p, vec![remove]).await.unwrap();
-    write(&db, &a, &p, vec![insert(&p, company)]).await.unwrap();
+    write(&s, &a, &p, vec![remove]).await.unwrap();
+    write(&s, &a, &p, vec![insert(&p, company)]).await.unwrap();
+}
+
+#[sqlx::test(migrator = "MACRO_DB_MIGRATIONS")]
+async fn custom_columns_use_core_validation_and_preserve_values(pool: PgPool) {
+    let (s, _, a, team, company) = fixture(&pool).await;
+    let p = create(&s, team, PipelineRecordType::Company).await;
+    let row = inserted(&write(&s, &a, &p, vec![insert(&p, company)]).await.unwrap());
+    let column = ColumnId::new();
+    let op = |value| serde_json::from_value::<DatabaseOp>(value).unwrap();
+    write(&s, &a, &p, vec![op(json!({
+        "kind": "column", "table": p.table_id, "column": column,
+        "change": {"kind": "create", "definition": {"source": "new", "name": "Notes", "type": {"type": "text"}}}
+    })), op(json!({
+        "kind": "rows", "table": p.table_id,
+        "change": {"kind": "update", "changes": {"kind": "uniform", "rows": [row], "cells": [{"column": column, "value": {"type": "text", "value": "Call next week"}}]}}
+    }))]).await.unwrap();
+    let rows = s
+        .rows(access(&a, p.id, EntityType::CrmPipeline, OWNER).await, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&rows.rows[0].cells[&column]).unwrap(),
+        json!({"type": "String", "value": "Call next week"})
+    );
+    assert!(matches!(
+        write(
+            &s,
+            &a,
+            &p,
+            vec![op(json!({
+                "kind": "column", "table": p.table_id, "column": column,
+                "change": {"kind": "change_type", "to": {"type": "number"}}
+            }))]
+        )
+        .await,
+        Err(PipelineError::Database(DatabaseError::InvalidOp(_)))
+    ));
+    let table = s
+        .table(access(&a, p.id, EntityType::CrmPipeline, OWNER).await)
+        .await
+        .unwrap();
+    assert_eq!(
+        table
+            .columns
+            .last()
+            .unwrap()
+            .definition
+            .definition
+            .data_type,
+        models_properties::DataType::String
+    );
+    // A consumer cannot bind another resource's property definition to bypass access.
+    assert!(matches!(write(&s, &a, &p, vec![op(json!({
+        "kind": "column", "table": p.table_id, "column": ColumnId::new(),
+        "change": {"kind": "create", "definition": {"source": "existing", "property": table.columns[0].column.property_definition_id}}
+    }))]).await, Err(PipelineError::Database(DatabaseError::InvalidOp(_)))));
 }
 
 #[sqlx::test(migrator = "MACRO_DB_MIGRATIONS")]
 async fn contact_pipelines_and_lifecycle_preserve_crm_records(pool: PgPool) {
-    let (s, db, a, team, company) = fixture(&pool).await;
+    let (s, _db, a, team, company) = fixture(&pool).await;
     let contact = Uuid::now_v7();
     sqlx::query!(r#"INSERT INTO crm_contacts (id,company_id,email,first_interaction,last_interaction) VALUES ($1,$2,'person@example.com',now(),now())"#, contact, company).execute(&pool).await.unwrap();
     let p = create(&s, team, PipelineRecordType::Contact).await;
-    write(&db, &a, &p, vec![insert(&p, contact)]).await.unwrap();
-    assert!(write(&db, &a, &p, vec![insert(&p, company)]).await.is_err());
+    write(&s, &a, &p, vec![insert(&p, contact)]).await.unwrap();
+    assert!(write(&s, &a, &p, vec![insert(&p, company)]).await.is_err());
     s.rename(
         access(&a, p.id, EntityType::CrmPipeline, OWNER).await,
         "Hiring".into(),
@@ -441,7 +523,7 @@ async fn contact_pipelines_and_lifecycle_preserve_crm_records(pool: PgPool) {
         .await
         .unwrap();
     assert!(s.list(team_receipt(team, OWNER)).await.unwrap().is_empty());
-    assert!(write(&db, &a, &p, vec![insert(&p, contact)]).await.is_err());
+    assert!(write(&s, &a, &p, vec![insert(&p, contact)]).await.is_err());
     s.set_trashed(
         access(&a, p.id, EntityType::CrmPipeline, OWNER).await,
         false,
@@ -449,7 +531,7 @@ async fn contact_pipelines_and_lifecycle_preserve_crm_records(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(s.list(team_receipt(team, OWNER)).await.unwrap().len(), 1);
-    sqlx::query!(r#"DELETE FROM crm_pipelines WHERE id=$1"#, p.id)
+    sqlx::query!(r#"DELETE FROM crm_pipeline_entities WHERE id=$1"#, p.id)
         .execute(&pool)
         .await
         .unwrap();
@@ -469,6 +551,16 @@ async fn contact_pipelines_and_lifecycle_preserve_crm_records(pool: PgPool) {
     .await
     .unwrap();
     assert!(!exists);
+    assert_eq!(
+        sqlx::query_scalar!(
+            "SELECT count(*) FROM database_changes WHERE database_id = $1",
+            p.database_id.into_uuid()
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        Some(0)
+    );
 }
 
 #[sqlx::test(migrator = "MACRO_DB_MIGRATIONS")]
@@ -504,9 +596,9 @@ async fn disabled_crm_cannot_create_pipeline_storage(pool: PgPool) {
 
 #[sqlx::test(migrator = "MACRO_DB_MIGRATIONS")]
 async fn migration_rollback_preserves_records_and_grants(pool: PgPool) {
-    let (s, db, a, team, company) = fixture(&pool).await;
+    let (s, _db, a, team, company) = fixture(&pool).await;
     let p = create(&s, team, PipelineRecordType::Company).await;
-    let row = inserted(&write(&db, &a, &p, vec![insert(&p, company)]).await.unwrap());
+    let row = inserted(&write(&s, &a, &p, vec![insert(&p, company)]).await.unwrap());
     s.share(
         access(&a, p.id, EntityType::CrmPipeline, OWNER).await,
         PipelineSharing::Team,
@@ -515,13 +607,7 @@ async fn migration_rollback_preserves_records_and_grants(pool: PgPool) {
     .unwrap();
     // Execute the actual rollback DDL in this disposable test database.
     sqlx::raw_sql(include_str!(
-        "../../macro_db_client/migrations/20261004000831_crm_sales_backfill_checkpoint.down.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::raw_sql(include_str!(
-        "../../macro_db_client/migrations/20261003180135_add_crm_pipelines.down.sql"
+        "../../macro_db_client/migrations/20261005213142_add_crm_pipeline_entities.down.sql"
     ))
     .execute(&pool)
     .await
@@ -555,7 +641,7 @@ async fn migration_rollback_preserves_records_and_grants(pool: PgPool) {
 
 #[cfg(feature = "inbound")]
 #[sqlx::test(migrator = "MACRO_DB_MIGRATIONS")]
-async fn http_creation_and_listing_use_the_crm_pipeline_route(pool: PgPool) {
+async fn http_creation_listing_schema_and_records_use_pipeline_access(pool: PgPool) {
     use axum::{
         Router,
         body::{Body, to_bytes},
@@ -574,20 +660,20 @@ async fn http_creation_and_listing_use_the_crm_pipeline_route(pool: PgPool) {
             &self,
             jwt: &str,
         ) -> Result<ValidatedIdentity, rootcause::Report<MacroAuthorizationError>> {
-            if jwt != "owner" {
+            if jwt != "owner" && jwt != "outsider" {
                 return Err(rootcause::Report::new(
                     MacroAuthorizationError::InvalidCredentials,
                 ));
             }
             Ok(ValidatedIdentity {
-                user_id: OWNER.into(),
+                user_id: if jwt == "owner" { OWNER } else { OUTSIDER }.into(),
                 fusion_user_id: "test-fusion-user".into(),
                 organization_id: None,
                 permissions: None,
             })
         }
     }
-    let (service, _, access, _, _) = fixture(&pool).await;
+    let (service, _, access, _, company) = fixture(&pool).await;
     let app = Router::new().nest(
         "/crm/pipelines",
         router(PipelineRouterState {
@@ -624,6 +710,72 @@ async fn http_creation_and_listing_use_the_crm_pipeline_route(pool: PgPool) {
         serde_json::from_slice(&to_bytes(created.into_body(), 16384).await.unwrap()).unwrap();
     assert_eq!(body["sharing"], "private");
     assert_eq!(body["grant"], "owner");
+    assert_eq!(body["userId"], OWNER);
+    let pipeline_id = body["id"].as_str().unwrap();
+    let primary = body["primaryColumnId"].as_str().unwrap();
+    let table = body["tableId"].as_str().unwrap();
+    let operation = json!({"ops": [{"kind": "rows", "table": table, "change": {"kind": "insert", "rows": [[{"column": primary, "value": {"type": "entities", "value": [{"entityType": "COMPANY", "entityId": company}]}}]]}}]});
+    for (token, expected) in [
+        ("outsider", StatusCode::UNAUTHORIZED),
+        ("owner", StatusCode::OK),
+        ("owner", StatusCode::BAD_REQUEST),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/crm/pipelines/{pipeline_id}/ops"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(operation.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::BAD_REQUEST {
+            let refusal: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 16384).await.unwrap())
+                    .unwrap();
+            assert_eq!(refusal["op"], 0);
+            assert!(
+                refusal["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("already in use")
+            );
+        }
+    }
+    for route in ["table", "rows"] {
+        for (token, expected) in [
+            ("outsider", StatusCode::UNAUTHORIZED),
+            ("owner", StatusCode::OK),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/crm/pipelines/{pipeline_id}/{route}"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if route == "rows" && expected == StatusCode::OK {
+                let rows: serde_json::Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 16384).await.unwrap())
+                        .unwrap();
+                assert_eq!(rows["rows"].as_array().unwrap().len(), 1);
+                assert_eq!(
+                    rows["rows"][0]["cells"][primary]["value"][0]["entity_id"],
+                    company.to_string()
+                );
+            }
+        }
+    }
     let listed = app
         .oneshot(
             Request::builder()

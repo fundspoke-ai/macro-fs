@@ -2,6 +2,8 @@
 //! shares one transaction across the schema, row identities, cells and
 //! options.
 
+mod core;
+mod provisioning;
 mod transfer;
 
 use std::collections::HashMap;
@@ -77,47 +79,6 @@ pub enum PgCellStoreError {
     MissingImportFingerprint(TableId),
 }
 
-/// Map only known constraints; never expose arbitrary database errors to clients.
-fn primary_constraint_message(
-    mut error: &(dyn std::error::Error + 'static),
-) -> Option<&'static str> {
-    loop {
-        // Transparent adapter errors expose SQLx's boxed database cause,
-        // skipping the outer sqlx::Error in their source chain.
-        let constraint = if let Some(sqlx::Error::Database(database)) =
-            error.downcast_ref::<sqlx::Error>()
-        {
-            database.constraint()
-        } else if let Some(database) = error.downcast_ref::<Box<dyn sqlx::error::DatabaseError>>() {
-            database.constraint()
-        } else if let Some(database) = error.downcast_ref::<sqlx::postgres::PgDatabaseError>() {
-            database.constraint()
-        } else {
-            None
-        };
-        if let Some(constraint) = constraint {
-            return match constraint {
-                "database_primary_record_required" => Some(
-                    "Choose a record before adding this entry. The primary record cannot be cleared.",
-                ),
-                "database_primary_values_table_id_entity_type_entity_id_key" => {
-                    Some("This record is already in this table.")
-                }
-                "database_primary_column_protected"
-                | "database_primary_columns_column_id_fkey"
-                | "crm_pipelines_table_id_fkey" => Some(
-                    "The primary record column and its table cannot be removed or have their type changed.",
-                ),
-                "database_primary_record_invalid" => {
-                    Some("Choose a valid record of the required type.")
-                }
-                _ => None,
-            };
-        }
-        error = error.source()?;
-    }
-}
-
 /// The unique index on a table's view names.
 const VIEW_NAME_CONSTRAINT: &str = "database_views_table_name_key";
 /// The primary key of `database_views`.
@@ -141,6 +102,18 @@ fn row_of(entity_id: &str) -> Result<RowId, PgCellStoreError> {
     entity_id
         .parse()
         .map_err(|_| PgCellStoreError::CorruptRowId(entity_id.to_string()))
+}
+
+/// Preserve the batch API's missing-table outcome when its parent is absent.
+fn missing_database(writes: &Writes) -> WritesOutcome {
+    WritesOutcome::TableNotFound(
+        writes
+            .writes
+            .iter()
+            .flat_map(|write| write.versioned_tables().iter().copied())
+            .next()
+            .unwrap_or_default(),
+    )
 }
 
 fn cells_error(error: impl std::error::Error + Send + Sync + 'static) -> PgCellStoreError {
@@ -221,6 +194,36 @@ where
         // everything back.
         let mut transaction = self.pool.begin().await?;
 
+        if !rows::lock_live_database(&mut transaction, writes.database_id).await? {
+            return Ok(missing_database(writes));
+        }
+        self.apply_in(transaction, writes).await
+    }
+}
+
+/// What one write did inside its batch: the rows it inserted, or the
+/// outcome refusing the whole batch.
+enum Applied {
+    Rows(Vec<RowId>),
+    Refused(WritesOutcome),
+}
+
+impl<Properties> PgCellStore<Properties>
+where
+    Properties: PropertiesRepo<Err = anyhow::Error>
+        + DatabaseCellWriter<Transaction = Transaction<'static, Postgres>>
+        + DatabaseOptionWriter
+        + DatabaseDefinitionWriter<Transaction = Transaction<'static, Postgres>>
+        + Send
+        + Sync
+        + 'static,
+{
+    /// Commit a core storage batch; the app wrapper takes its entity lock first.
+    async fn apply_in(
+        &self,
+        mut transaction: Transaction<'static, Postgres>,
+        writes: &Writes,
+    ) -> Result<WritesOutcome, PgCellStoreError> {
         // Parent locks precede table locks, as every writer takes them.
         if !schema::lock_database(
             &mut transaction,
@@ -229,13 +232,7 @@ where
         )
         .await?
         {
-            let table = writes
-                .writes
-                .iter()
-                .flat_map(|write| write.versioned_tables().iter().copied())
-                .next()
-                .unwrap_or_default();
-            return Ok(WritesOutcome::TableNotFound(table));
+            return Ok(missing_database(writes));
         }
         let created: Vec<TableId> = writes
             .writes
@@ -342,21 +339,9 @@ where
 
         let mut inserted = Vec::with_capacity(writes.writes.len());
         for (index, write) in writes.writes.iter().enumerate() {
-            let outcome = match self
+            let outcome = self
                 .apply_write(&mut transaction, writes, index, write)
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(error) => match primary_constraint_message(&error) {
-                    Some(message) => {
-                        return Ok(WritesOutcome::ConstraintRefused {
-                            write: index,
-                            message: message.into(),
-                        });
-                    }
-                    None => return Err(error),
-                },
-            };
+                .await?;
             match outcome {
                 Applied::Rows(rows) => inserted.push(rows),
                 Applied::Refused(outcome) => return Ok(outcome),
@@ -407,13 +392,6 @@ where
         stamped.sort();
         stamped.dedup();
         journal::stamp_rows(&mut *transaction, &stamped, writes.created_by.as_ref()).await?;
-        if let Err(error) = sqlx::query!("SET CONSTRAINTS database_row_requires_primary, database_primary_value_required, database_primary_columns_column_id_fkey, crm_pipelines_table_id_fkey IMMEDIATE")
-            .execute(&mut *transaction).await {
-            match primary_constraint_message(&error) {
-                Some(message) => return Ok(WritesOutcome::ConstraintRefused { write: writes.writes.len().saturating_sub(1), message: message.into() }),
-                None => return Err(error.into()),
-            }
-        }
         let entries = crate::domain::journal::entries(writes, &before, &inserted, &table_versions);
         let changes = journal::record(
             &mut transaction,
@@ -431,25 +409,7 @@ where
             changes,
         })
     }
-}
 
-/// What one write did inside its batch: the rows it inserted, or the
-/// outcome refusing the whole batch.
-enum Applied {
-    Rows(Vec<RowId>),
-    Refused(WritesOutcome),
-}
-
-impl<Properties> PgCellStore<Properties>
-where
-    Properties: PropertiesRepo<Err = anyhow::Error>
-        + DatabaseCellWriter<Transaction = Transaction<'static, Postgres>>
-        + DatabaseOptionWriter
-        + DatabaseDefinitionWriter<Transaction = Transaction<'static, Postgres>>
-        + Send
-        + Sync
-        + 'static,
-{
     /// Apply one write of a batch inside its transaction.
     async fn apply_write(
         &self,

@@ -6,6 +6,8 @@ The command uses `DATABASE_URL` through the standard configuration loader.
 
 For each CRM-enabled team with visible companies, it creates one team-shared,
 renameable **Sales** company pipeline. The team owner owns it; members can edit it.
+Pipeline identity, name, owner and lifecycle live in `crm_pipeline_entities`;
+its tables and cells use core storage without a `database_entities` row.
 It copies every visible company, including Customer, Churned and unstaged records,
 with its current Stage, Owner and Revenue. Custom stage order and labels are
 copied into independent pipeline options; old stage IDs resolve through the team's
@@ -64,7 +66,8 @@ representative open, closed and unstaged rows. Verify a nonmember cannot access 
 The legacy records and values are never changed. A failed team's transaction
 leaves no pipeline or checkpoint. If a committed import must be withdrawn before
 cutover, trash its pipeline through the normal owner controls and resume the
-legacy workflow. Preserve the marker. The checkpoint migration's down script
-only removes tracking, so use it only when reverting the feature and retiring the
-operator command; dropping tracking while continuing to run the command permits
-duplicate imports.
+legacy workflow. Preserve the marker. Reverting the pipeline schema removes
+completion tracking and preserves each pipeline's storage as a standalone
+database entity with its grants. Use that rollback only when retiring the
+pipeline feature and operator command; removing tracking while continuing to run
+the command permits duplicate imports.

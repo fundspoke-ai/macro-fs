@@ -7,6 +7,9 @@ pub mod events;
 pub mod journal;
 pub mod models;
 
+#[cfg(feature = "ports")]
+pub mod storage;
+
 #[cfg(feature = "entity_mutation")]
 pub mod entity_mutation;
 

@@ -603,13 +603,8 @@ impl Writes {
 /// What applying [`Writes`] did. Anything but `Applied` wrote nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WritesOutcome {
-    /// A database constraint refused the batch; no changes committed.
-    ConstraintRefused {
-        /// The operation responsible for the refused write.
-        write: usize,
-        /// A safe, actionable explanation supplied by the adapter.
-        message: String,
-    },
+    /// A consumer-owned storage constraint refused the atomic batch.
+    ConstraintViolation(String),
     /// A row the undo would remove has a surviving incoming relation.
     RowInUse,
     /// An option the batch must leave unused is selected by an entity.
@@ -723,7 +718,8 @@ pub struct CommittedChange {
 
 /// What a committed batch answers: a result per op, and the journal's change
 /// for each table version it produced.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct AppliedOps {
     /// One result per op, in order.
     pub results: Vec<models_databases::OpResult>,
@@ -732,12 +728,15 @@ pub struct AppliedOps {
 }
 
 /// A batch of ops for one database and the versions its tables must be at.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct OpBatch {
     /// The ops, in the order they apply.
     pub ops: Vec<DatabaseOp>,
     /// The version each named table must still be at; the batch is refused
     /// as a conflict if one moved. Without one, ops are last-write-wins.
+    #[serde(default)]
+    #[schema(value_type = HashMap<String, TableVersion>)]
     pub base_versions: HashMap<TableId, TableVersion>,
 }
 

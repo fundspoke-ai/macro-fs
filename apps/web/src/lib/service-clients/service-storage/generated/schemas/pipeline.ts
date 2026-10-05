@@ -18,7 +18,7 @@ export interface Pipeline {
   databaseId: string;
   /** Entity identity, used with `CrmPipeline` access receipts. */
   id: string;
-  /** Display name, stored by the backing database. */
+  /** Pipeline display name. */
   name: string;
   /** Protected primary column. */
   primaryColumnId: string;
@@ -32,4 +32,6 @@ export interface Pipeline {
   teamId: string;
   /** Trashed pipelines are omitted from navigation. */
   trashedAt: PipelineTrashedAt;
+  /** Owning user; sharing never changes ownership. */
+  userId: string;
 }

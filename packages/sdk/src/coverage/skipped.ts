@@ -387,7 +387,10 @@ export const storageBacklog = [
   'listEmailReminders',
   // CRM pipelines fit the crm namespace but are not wrapped yet.
   'createCrmPipeline',
+  'applyCrmPipelineOps',
   'getCrmPipeline',
+  'getCrmPipelineRows',
+  'getCrmPipelineTable',
   'listCrmPipelines',
   'renameCrmPipeline',
   'shareCrmPipeline',

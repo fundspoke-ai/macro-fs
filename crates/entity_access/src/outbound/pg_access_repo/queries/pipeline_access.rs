@@ -13,7 +13,7 @@ pub async fn list_pipeline_access(
 ) -> Result<Vec<(Uuid, AccessLevel)>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"SELECT p.id, ea.access_level AS "access_level!: AccessLevel"
-           FROM crm_pipelines p JOIN entity_access ea ON ea.entity_id = p.id AND ea.entity_type = 'crm_pipeline'
+           FROM crm_pipeline_entities p JOIN entity_access ea ON ea.entity_id = p.id AND ea.entity_type = 'crm_pipeline'
            WHERE ea.source_id = ANY($1)"#,
         &sources.0,
     ).fetch_all(pool).await?;

@@ -59,7 +59,8 @@ PostHog unless the variable was set when it was built. With the flag off:
 ## CRM pipelines
 
 Pipelines are created from the CRM sidebar's **New pipeline** action. Their
-backing database and rows inherit the pipeline's access; use **Share → Team access**
+records are read and edited through the pipeline's access; they are not standalone
+database app entities and do not appear in the Databases list. Use **Share → Team access**
 in the CRM to switch between **None** (private) and **Edit** (team). A pipeline's primary
 company/contact reference is required and unique within that pipeline. Its
 column and table are protected against removal or type changes. See
@@ -72,6 +73,10 @@ a one-time copy: later edits to a company’s legacy properties do not synchroni
 with its pipeline row. The pipeline can be renamed, customized or trashed normally.
 
 ## Properties and records
+
+An embedded records editor can allow cell edits while its host controls the
+schema. In that case, column creation and schema actions are absent; record
+editing still works. The standalone database app keeps its full column controls.
 
 Use **Add column** immediately after the table’s headers. It creates an **Unnamed**
 Text column (**Unnamed 2**, and so on if that name exists), selects its name in the

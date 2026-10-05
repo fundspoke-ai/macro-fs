@@ -285,78 +285,48 @@ async fn a_row_carries_every_cell_as_a_property(pool: PgPool) {
     );
 }
 
-/// Flat pages, grouped pages and hydration must agree on a managed database's
-/// grant-bearing parent, including when the backing database has stale grants.
-async fn assert_managed_rows(pool: &PgPool, user: MacroUserIdStr<'static>, expected: &[Uuid]) {
-    let filter = rows_of(Some(Expr::val(DatabaseRowLiteral::TableId(DEALS))));
-    let flat = page(pool, user.clone(), filter.clone()).await;
-    assert_eq!(flat.iter().map(Identify::id).collect::<Vec<_>>(), expected);
-
-    let mut grouped = expanded_dynamic_cursor_soup_grouped(
-        pool,
-        GroupedDynamicCursorArgs {
-            user_id: user.clone(),
-            limit: 20,
-            cursor: Query::Sort(SimpleSortMethod::CreatedAt, filter),
-            exclude_frecency: false,
-            grouping: GroupingConfig {
-                field: GroupByField::Property {
-                    property_definition_id: STAGE,
-                    entity_type: Some("DATABASE_ROW".into()),
-                },
-                group_key: None,
-                per_group_limit: None,
-            },
-        },
+#[sqlx::test(fixtures("test/database_rows.sql"), migrator = "MACRO_DB_MIGRATIONS")]
+async fn core_rows_stay_out_of_soup_even_with_a_stray_database_grant(pool: PgPool) {
+    let database = Uuid::now_v7();
+    let table = Uuid::now_v7();
+    let row = Uuid::now_v7();
+    sqlx::query!("INSERT INTO databases (id) VALUES ($1)", database)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query!("INSERT INTO database_tables (id, database_id, name, position) VALUES ($1, $2, 'Contacts', '80')", table, database)
+        .execute(&pool).await.unwrap();
+    sqlx::query!(
+        "INSERT INTO database_rows (id, table_id, position) VALUES ($1, $2, '80')",
+        row,
+        table
     )
-    .await
-    .unwrap()
-    .map(|info| info.item.id())
-    .collect::<Vec<_>>();
-    grouped.sort();
-    let mut sorted = expected.to_vec();
-    sorted.sort();
-    assert_eq!(grouped, sorted);
-
-    let entities = [DEAL_1, DEAL_2, DEAL_3]
-        .map(|id| EntityType::DatabaseRow.with_entity_string(id.to_string()));
-    let hydrated = by_ids(
-        pool,
-        AdvancedSortParams {
-            user_id: user,
-            entities: &entities,
-        },
-    )
+    .execute(&pool)
     .await
     .unwrap();
-    assert_eq!(
-        hydrated.iter().map(Identify::id).collect::<Vec<_>>(),
-        expected
+    let user = viewer();
+    sqlx::query!("INSERT INTO entity_access (entity_id, entity_type, source_id, source_type, access_level) VALUES ($1, 'database', $2, 'user', 'owner')", database, user.as_ref())
+        .execute(&pool).await.unwrap();
+    assert!(
+        page(
+            &pool,
+            viewer(),
+            rows_of(Some(Expr::val(DatabaseRowLiteral::TableId(table))))
+        )
+        .await
+        .is_empty()
     );
-}
-
-#[sqlx::test(
-    fixtures("test/database_rows.sql", "test/managed_database.sql"),
-    migrator = "MACRO_DB_MIGRATIONS"
-)]
-async fn shared_pipeline_rows_use_pipeline_grants(pool: PgPool) {
-    let owner = MacroUserIdStr::parse_from_str("macro|owner@databases.test").unwrap();
-    assert_managed_rows(&pool, owner, &[DEAL_3, DEAL_2, DEAL_1]).await;
-    assert_managed_rows(&pool, viewer(), &[DEAL_3, DEAL_2, DEAL_1]).await;
-    assert_managed_rows(&pool, stranger(), &[]).await;
-}
-
-#[sqlx::test(
-    fixtures(
-        "test/database_rows.sql",
-        "test/managed_database.sql",
-        "test/private_managed_database.sql"
-    ),
-    migrator = "MACRO_DB_MIGRATIONS"
-)]
-async fn private_pipeline_rows_exclude_teammates_and_database_grants(pool: PgPool) {
-    let owner = MacroUserIdStr::parse_from_str("macro|owner@databases.test").unwrap();
-    assert_managed_rows(&pool, owner, &[DEAL_3, DEAL_2, DEAL_1]).await;
-    assert_managed_rows(&pool, viewer(), &[]).await;
-    assert_managed_rows(&pool, stranger(), &[]).await;
+    let entities = [EntityType::DatabaseRow.with_entity_string(row.to_string())];
+    assert!(
+        by_ids(
+            &pool,
+            AdvancedSortParams {
+                user_id: viewer(),
+                entities: &entities
+            }
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
 }

@@ -760,14 +760,6 @@ impl AccessRepository for PgAccessRepository {
             .await
             .map_err(AccessError::from);
         }
-        if entity_type == EntityType::Database {
-            let owner = queries::database_access::access_owner(&self.pool, *entity_id).await?;
-            if let Some((id, kind)) = owner {
-                return queries::get_entity_users(&self.pool, &id, kind)
-                    .await
-                    .map_err(anyhow_access_error);
-            }
-        }
         queries::get_entity_users(&self.pool, entity_id, entity_type)
             .await
             .map_err(anyhow_access_error)

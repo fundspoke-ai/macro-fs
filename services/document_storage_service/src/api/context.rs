@@ -186,7 +186,7 @@ pub(crate) type DssCrmStageService = crm::domain::stages::CrmStageServiceImpl<
 
 pub(crate) type DssPipelineService = crm::domain::pipelines::PipelineServiceImpl<
     crm::outbound::pipelines::PgPipelineRepo<
-        databases::outbound::pg_databases_repo::PgDatabasesRepo<PropertiesPgRepo>,
+        databases::outbound::pg_cell_store::PgCellStore<PropertiesPgRepo>,
     >,
     DatabasesServiceType,
     EntityAccessService,

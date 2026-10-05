@@ -1450,7 +1450,7 @@ async fn run() -> anyhow::Result<()> {
     let pipeline_service = Arc::new(crm::domain::pipelines::PipelineServiceImpl::new(
         crm::outbound::pipelines::PgPipelineRepo::new(
             db.clone(),
-            databases::outbound::pg_databases_repo::PgDatabasesRepo::new(
+            databases::outbound::pg_cell_store::PgCellStore::new(
                 db.clone(),
                 properties::outbound::properties_pg_repo::PropertiesPgRepo::new(db.clone()),
             ),

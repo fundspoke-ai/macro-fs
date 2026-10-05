@@ -3,11 +3,10 @@
 use crate::domain::pipelines::{
     Pipeline, PipelineBlueprint, PipelineRecordType, PipelineRepo, PipelineSharing,
 };
-use databases::domain::provisioning::ManagedDatabaseWriter;
+use databases::domain::provisioning::DatabaseStorageProvisioner;
 use entity_access_db_utils::{AccessLevel, EntityAccessSourceType, EntityType};
-use models_databases::{DatabaseId, TableId};
+use models_databases::{ColumnId, DatabaseId, TableId};
 use sqlx::{PgPool, Postgres, Transaction};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Pipeline persistence errors.
@@ -36,7 +35,7 @@ impl<Database> PgPipelineRepo<Database> {
 
 impl<Database> PgPipelineRepo<Database>
 where
-    Database: ManagedDatabaseWriter<Transaction = Transaction<'static, Postgres>>,
+    Database: DatabaseStorageProvisioner<Transaction = Transaction<'static, Postgres>>,
 {
     pub(super) async fn create_in(
         &self,
@@ -44,19 +43,26 @@ where
         blueprint: &PipelineBlueprint,
     ) -> Result<(), PipelineRepoError> {
         self.database
-            .create_managed_database_in(transaction, &blueprint.database)
+            .create_storage_in(transaction, &blueprint.database)
             .await
             .map_err(|error| PipelineRepoError::Database(Box::new(error)))?;
         sqlx::query!(
-            "INSERT INTO crm_pipelines (id, team_id, database_id, table_id, record_type) VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO crm_pipeline_primary_columns (table_id, column_id) VALUES ($1, $2)",
+            blueprint.database.table_id.into_uuid(),
+            blueprint.primary_column_id.into_uuid(),
+        )
+        .execute(&mut **transaction)
+        .await?;
+        sqlx::query!(
+            "INSERT INTO crm_pipeline_entities (id, team_id, database_id, table_id, record_type, name, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7)",
             blueprint.id, blueprint.team_id, blueprint.database.id.into_uuid(),
-            blueprint.database.table_id.into_uuid(), blueprint.record_type.as_str(),
+            blueprint.database.table_id.into_uuid(), blueprint.record_type.as_str(), &blueprint.name, blueprint.creator.as_ref(),
         ).execute(&mut **transaction).await?;
         entity_access_db_utils::insert_entity_access_row(
             transaction,
             &blueprint.id,
             EntityType::CrmPipeline,
-            blueprint.database.creator.as_ref(),
+            blueprint.creator.as_ref(),
             EntityAccessSourceType::User,
             AccessLevel::Owner,
         )
@@ -77,7 +83,7 @@ where
 
 impl<Database> PipelineRepo for PgPipelineRepo<Database>
 where
-    Database: ManagedDatabaseWriter<Transaction = Transaction<'static, Postgres>>,
+    Database: DatabaseStorageProvisioner<Transaction = Transaction<'static, Postgres>>,
 {
     type Error = PipelineRepoError;
 
@@ -94,31 +100,16 @@ where
     async fn get_many(&self, ids: &[Uuid]) -> Result<Vec<Pipeline>, Self::Error> {
         let rows = sqlx::query!(
             r#"SELECT p.id, p.team_id, p.record_type, p.database_id, p.table_id,
+                      p.name, p.user_id, p.created_at, p.trashed_at, pc.column_id,
                       EXISTS (SELECT 1 FROM entity_access ea WHERE ea.entity_id = p.id
                         AND ea.entity_type = 'crm_pipeline' AND ea.source_type = 'team'
                         AND ea.source_id = p.team_id::text) AS "team_shared!"
-               FROM crm_pipelines p WHERE p.id = ANY($1) ORDER BY p.id"#,
+               FROM crm_pipeline_entities p JOIN crm_pipeline_primary_columns pc ON pc.table_id = p.table_id
+               WHERE p.id = ANY($1) ORDER BY p.id"#,
             ids,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let ids = rows
-            .iter()
-            .map(|row| DatabaseId::from_uuid(row.database_id))
-            .collect::<Vec<_>>();
-        let mut metadata: HashMap<_, _> = self
-            .database
-            .managed_databases(&ids)
-            .await
-            .map_err(|error| PipelineRepoError::Database(Box::new(error)))?
-            .into_iter()
-            .map(|database| (database.id, database))
-            .collect();
+        ).fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|row| {
-                let database = metadata
-                    .remove(&DatabaseId::from_uuid(row.database_id))
-                    .ok_or(sqlx::Error::RowNotFound)?;
                 let record_type = match row.record_type.as_str() {
                     "company" => PipelineRecordType::Company,
                     "contact" => PipelineRecordType::Contact,
@@ -131,13 +122,14 @@ where
                 Ok(Pipeline {
                     id: row.id,
                     team_id: row.team_id,
-                    name: database.name,
+                    name: row.name,
+                    user_id: row.user_id,
                     record_type,
                     database_id: DatabaseId::from_uuid(row.database_id),
                     table_id: TableId::from_uuid(row.table_id),
-                    primary_column_id: database.primary_column_id,
-                    created_at: database.created_at,
-                    trashed_at: database.trashed_at,
+                    primary_column_id: ColumnId::from_uuid(row.column_id),
+                    created_at: row.created_at,
+                    trashed_at: row.trashed_at,
                     sharing: if row.team_shared {
                         PipelineSharing::Team
                     } else {
@@ -146,6 +138,31 @@ where
                 })
             })
             .collect()
+    }
+
+    type Guard = Transaction<'static, Postgres>;
+
+    async fn lock_live(&self, id: Uuid) -> Result<Option<Self::Guard>, Self::Error> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query!(
+            "SELECT id FROM crm_pipeline_entities WHERE id = $1 AND trashed_at IS NULL FOR SHARE",
+            id
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        Ok(row.map(|_| tx))
+    }
+
+    async fn rename(&self, id: Uuid, name: &str) -> Result<(), Self::Error> {
+        sqlx::query!("UPDATE crm_pipeline_entities SET name = $2, updated_at = now() WHERE id = $1 AND trashed_at IS NULL", id, name)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn set_trashed(&self, id: Uuid, trashed: bool) -> Result<(), Self::Error> {
+        sqlx::query!("UPDATE crm_pipeline_entities SET trashed_at = CASE WHEN $2 THEN now() ELSE NULL END, updated_at = now() WHERE id = $1", id, trashed)
+            .execute(&self.pool).await?;
+        Ok(())
     }
 
     #[tracing::instrument(skip_all, err)]
@@ -167,7 +184,7 @@ where
         entity_access_db_utils::team_share::acquire_guard(&mut transaction).await?;
         // Serialize sharing with pipeline deletion.
         sqlx::query!(
-            "SELECT id FROM crm_pipelines WHERE id = $1 FOR UPDATE",
+            "SELECT id FROM crm_pipeline_entities WHERE id = $1 FOR UPDATE",
             pipeline.id
         )
         .fetch_one(&mut *transaction)

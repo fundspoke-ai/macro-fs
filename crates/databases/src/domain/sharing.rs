@@ -14,12 +14,6 @@ pub trait DatabaseSharingRepo: Send + Sync + 'static {
     /// Persistence failure.
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Whether another entity owns this database's access policy.
-    fn inherits_access(
-        &self,
-        database_id: DatabaseId,
-    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
-
     /// Read the direct channel grants for a database.
     fn channel_grants(
         &self,

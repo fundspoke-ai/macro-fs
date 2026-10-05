@@ -3,6 +3,7 @@ export type Pipeline = {
   id: string;
   teamId: string;
   name: string;
+  userId: string;
   recordType: 'company' | 'contact';
   databaseId: string;
   tableId: string;

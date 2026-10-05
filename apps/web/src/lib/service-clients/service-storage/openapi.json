@@ -6129,6 +6129,86 @@
         }
       }
     },
+    "/crm/pipelines/{id}/ops": {
+      "post": {
+        "tags": ["crm::inbound::pipelines"],
+        "summary": "Edit pipeline schema or records with the common typed operations.",
+        "operationId": "apply_crm_pipeline_ops",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpBatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppliedOps"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/crm/pipelines/{id}/rows": {
+      "get": {
+        "tags": ["crm::inbound::pipelines"],
+        "summary": "Read pipeline records through pipeline access.",
+        "operationId": "get_crm_pipeline_rows",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Continue after this row identity.",
+            "required": false,
+            "schema": {
+              "type": ["string", "null"],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageRows"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/crm/pipelines/{id}/sharing": {
       "put": {
         "tags": ["crm::inbound::pipelines"],
@@ -6158,6 +6238,36 @@
         "responses": {
           "204": {
             "description": ""
+          }
+        }
+      }
+    },
+    "/crm/pipelines/{id}/table": {
+      "get": {
+        "tags": ["crm::inbound::pipelines"],
+        "summary": "Read the host-owned table schema.",
+        "operationId": "get_crm_pipeline_table",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableDetail"
+                }
+              }
+            }
           }
         }
       }
@@ -17772,6 +17882,27 @@
           "THREAD",
           "USER"
         ]
+      },
+      "AppliedOps": {
+        "type": "object",
+        "description": "What a committed batch answers: a result per op, and the journal's change\nfor each table version it produced.",
+        "required": ["results", "changes"],
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CommittedChange"
+            },
+            "description": "The journal's changes."
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OpResult"
+            },
+            "description": "One result per op, in order."
+          }
+        }
       },
       "ApplyOpsRequest": {
         "type": "object",
@@ -29986,6 +30117,30 @@
           "lessThanOrEqual"
         ]
       },
+      "OpBatch": {
+        "type": "object",
+        "description": "A batch of ops for one database and the versions its tables must be at.",
+        "required": ["ops"],
+        "properties": {
+          "baseVersions": {
+            "type": "object",
+            "description": "The version each named table must still be at; the batch is refused\nas a conflict if one moved. Without one, ops are last-write-wins.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TableVersion"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "ops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatabaseOp"
+            },
+            "description": "The ops, in the order they apply."
+          }
+        }
+      },
       "OpRefusalResponse": {
         "type": "object",
         "description": "Why an op of a batch was refused. Nothing in the batch was written.",
@@ -30795,6 +30950,7 @@
         "required": [
           "id",
           "teamId",
+          "userId",
           "name",
           "recordType",
           "databaseId",
@@ -30822,7 +30978,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Display name, stored by the backing database."
+            "description": "Pipeline display name."
           },
           "primaryColumnId": {
             "type": "string",
@@ -30851,6 +31007,10 @@
             "type": ["string", "null"],
             "format": "date-time",
             "description": "Trashed pipelines are omitted from navigation."
+          },
+          "userId": {
+            "type": "string",
+            "description": "Owning user; sharing never changes ownership."
           }
         }
       },
@@ -32322,6 +32482,11 @@
             "description": "Every committed change that touched the row, newest first: who made\nit, when, how, and the touched columns' values before and after."
           }
         }
+      },
+      "RowId": {
+        "type": "string",
+        "format": "uuid",
+        "description": "Identifier of a row."
       },
       "RowsChange": {
         "oneOf": [
@@ -35446,6 +35611,58 @@
           "how_to_guide_id": {
             "type": "string",
             "description": "Id of the user's \"Macro how to guide\"."
+          }
+        }
+      },
+      "StorageRow": {
+        "type": "object",
+        "description": "One storage row, with cells keyed by column placement.",
+        "required": ["rowId", "cells"],
+        "properties": {
+          "cells": {
+            "type": "object",
+            "description": "Populated cells.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PropertyValue"
+            },
+            "propertyNames": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Identifier of a column placement within a table."
+            }
+          },
+          "rowId": {
+            "$ref": "#/components/schemas/RowId",
+            "description": "Row identity, independent of any referenced entity."
+          }
+        }
+      },
+      "StorageRows": {
+        "type": "object",
+        "description": "A bounded page of rows at a table version.",
+        "required": ["rows", "version"],
+        "properties": {
+          "next": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RowId",
+                "description": "Cursor for another page, if present."
+              }
+            ]
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StorageRow"
+            },
+            "description": "Rows ordered by identity, suitable for stable pagination."
+          },
+          "version": {
+            "$ref": "#/components/schemas/TableVersion",
+            "description": "Table version when the read began."
           }
         }
       },

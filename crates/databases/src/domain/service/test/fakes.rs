@@ -15,7 +15,6 @@ pub(super) struct FakeError;
 /// Shared mutable world the fakes read and write.
 #[derive(Default)]
 pub(super) struct World {
-    pub(super) managed_databases: Vec<DatabaseId>,
     pub(super) databases: Vec<Database>,
     pub(super) tables: Vec<Table>,
     pub(super) columns: Vec<Column>,

@@ -6,9 +6,9 @@ mod test;
 use super::{auth::CrmTeamReceipt, stages::StageDefinitionStore};
 use chrono::{DateTime, Utc};
 use databases::domain::{
-    models::{ColumnId, DatabaseId, TableId},
-    ports::DatabasesService,
-    provisioning::{ManagedDatabase, ProvisionedColumn},
+    models::{AppliedOps, ColumnId, DatabaseId, OpBatch, RowId, TableDetail, TableId, Viewer},
+    provisioning::{ProvisionedColumn, StorageBlueprint},
+    storage::{DatabaseStorageService, StorageRows},
 };
 use entity_access::domain::{
     models::{
@@ -83,7 +83,9 @@ pub struct Pipeline {
     pub id: Uuid,
     /// CRM data boundary; independent of sharing.
     pub team_id: Uuid,
-    /// Display name, stored by the backing database.
+    /// Owning user; sharing never changes ownership.
+    pub user_id: String,
+    /// Pipeline display name.
     pub name: String,
     /// Kind of the primary reference.
     pub record_type: PipelineRecordType,
@@ -127,7 +129,13 @@ pub struct PipelineBlueprint {
     /// Initial grants.
     pub sharing: PipelineSharing,
     /// Schema owned by the database domain.
-    pub database: ManagedDatabase,
+    pub database: StorageBlueprint,
+    /// Pipeline-owned display name.
+    pub name: String,
+    /// Initial owner.
+    pub creator: MacroUserIdStr<'static>,
+    /// Protected company/contact reference.
+    pub primary_column_id: ColumnId,
 }
 
 /// Errors crossing the pipeline boundary.
@@ -157,6 +165,21 @@ pub enum PipelineError {
 pub trait PipelineRepo: Send + Sync + 'static {
     /// Adapter error.
     type Error: std::error::Error + Send + Sync + 'static;
+    /// Holds a live pipeline against concurrent trash/deletion.
+    type Guard: Send;
+    /// Acquire a lifecycle guard for reads and writes.
+    fn lock_live(
+        &self,
+        id: Uuid,
+    ) -> impl Future<Output = Result<Option<Self::Guard>, Self::Error>> + Send;
+    /// Rename pipeline metadata.
+    fn rename(&self, id: Uuid, name: &str) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    /// Update pipeline lifecycle metadata.
+    fn set_trashed(
+        &self,
+        id: Uuid,
+        trashed: bool,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
     /// Facts used by creation policy.
     fn crm_enabled(&self, team: Uuid) -> impl Future<Output = Result<bool, Self::Error>> + Send;
     /// Read pipeline metadata for a known set of accessible identities.
@@ -195,7 +218,24 @@ pub trait PipelineService: Send + Sync + 'static {
         &self,
         receipt: EntityAccessReceipt<ViewAccessLevel>,
     ) -> impl Future<Output = Result<AccessiblePipeline, PipelineError>> + Send;
-    /// Rename the pipeline and its backing database together.
+    /// Read the pipeline's schema through its own access boundary.
+    fn table(
+        &self,
+        receipt: EntityAccessReceipt<ViewAccessLevel>,
+    ) -> impl Future<Output = Result<TableDetail, PipelineError>> + Send;
+    /// Read pipeline records, without database app or Soup access.
+    fn rows(
+        &self,
+        receipt: EntityAccessReceipt<ViewAccessLevel>,
+        after: Option<RowId>,
+    ) -> impl Future<Output = Result<StorageRows, PipelineError>> + Send;
+    /// Validate pipeline policy, then use the shared storage operation planner.
+    fn apply_ops(
+        &self,
+        receipt: EntityAccessReceipt<EditAccessLevel>,
+        batch: OpBatch,
+    ) -> impl Future<Output = Result<AppliedOps, PipelineError>> + Send;
+    /// Rename pipeline metadata.
     fn rename(
         &self,
         receipt: EntityAccessReceipt<EditAccessLevel>,
@@ -335,17 +375,13 @@ pub(crate) fn pipeline_blueprint(
         team_id,
         record_type: input.record_type,
         sharing: input.sharing,
-        database: ManagedDatabase {
+        name: input.name,
+        creator,
+        primary_column_id,
+        database: StorageBlueprint {
             id: DatabaseId::new(),
-            name: input.name,
-            creator,
-            access_entity: entity_access::domain::models::Entity {
-                entity_id: id.to_string(),
-                entity_type: EntityType::CrmPipeline,
-            },
             table_id: TableId::new(),
             columns,
-            primary_column_id,
         },
     }
 }
@@ -353,7 +389,7 @@ pub(crate) fn pipeline_blueprint(
 impl<R, D, A, S> PipelineService for PipelineServiceImpl<R, D, A, S>
 where
     R: PipelineRepo,
-    D: DatabasesService,
+    D: DatabaseStorageService,
     A: EntityAccessService + AccessiblePipelines,
     S: StageDefinitionStore,
 {
@@ -461,17 +497,7 @@ where
         if pipeline.trashed_at.is_some() {
             return Err(PipelineError::NotFound);
         }
-        let access = self
-            .access
-            .generate_entity_access_receipt::<EditAccessLevel>(
-                &actor(&receipt)?.0,
-                None,
-                &pipeline.database_id.to_string(),
-                EntityType::Database,
-            )
-            .await?;
-        self.databases.rename_database(access, name).await?;
-        Ok(())
+        self.repo.rename(pipeline.id, &name).await.map_err(storage)
     }
 
     async fn share(
@@ -492,20 +518,114 @@ where
         trashed: bool,
     ) -> Result<(), PipelineError> {
         let pipeline = self.pipeline(&receipt).await?;
-        let access = self
-            .access
-            .generate_entity_access_receipt::<OwnerAccessLevel>(
-                &actor(&receipt)?.0,
-                None,
-                &pipeline.database_id.to_string(),
-                EntityType::Database,
-            )
-            .await?;
-        if trashed {
-            self.databases.trash_database(access).await?;
-        } else {
-            self.databases.restore_database(access).await?;
+        self.repo
+            .set_trashed(pipeline.id, trashed)
+            .await
+            .map_err(storage)
+    }
+
+    async fn table(
+        &self,
+        receipt: EntityAccessReceipt<ViewAccessLevel>,
+    ) -> Result<TableDetail, PipelineError> {
+        let pipeline = self.pipeline(&receipt).await?;
+        let _guard = self
+            .repo
+            .lock_live(pipeline.id)
+            .await
+            .map_err(storage)?
+            .ok_or(PipelineError::NotFound)?;
+        let mut table = self
+            .databases
+            .storage_tables(pipeline.database_id)
+            .await?
+            .into_iter()
+            .find(|table| table.table.id == pipeline.table_id)
+            .ok_or(PipelineError::NotFound)?;
+        let editable = matches!(
+            receipt.entity_permission(),
+            entity_access::domain::models::EntityPermission::AccessLevel {
+                access_level: AccessLevel::Edit | AccessLevel::Owner
+            }
+        );
+        for column in &mut table.columns {
+            column.writable &= editable;
         }
-        Ok(())
+        Ok(table)
+    }
+
+    async fn rows(
+        &self,
+        receipt: EntityAccessReceipt<ViewAccessLevel>,
+        after: Option<RowId>,
+    ) -> Result<StorageRows, PipelineError> {
+        let pipeline = self.pipeline(&receipt).await?;
+        let _guard = self
+            .repo
+            .lock_live(pipeline.id)
+            .await
+            .map_err(storage)?
+            .ok_or(PipelineError::NotFound)?;
+        Ok(self
+            .databases
+            .storage_rows(pipeline.database_id, pipeline.table_id, after)
+            .await?)
+    }
+
+    async fn apply_ops(
+        &self,
+        receipt: EntityAccessReceipt<EditAccessLevel>,
+        batch: OpBatch,
+    ) -> Result<AppliedOps, PipelineError> {
+        use models_databases::{ColumnChange, DatabaseOp, TableChange};
+        let pipeline = self.pipeline(&receipt).await?;
+        let _guard = self
+            .repo
+            .lock_live(pipeline.id)
+            .await
+            .map_err(storage)?
+            .ok_or(PipelineError::NotFound)?;
+        for op in &batch.ops {
+            let table = match op {
+                DatabaseOp::Rows { table, .. } | DatabaseOp::View { table, .. } => *table,
+                DatabaseOp::Column {
+                    table,
+                    column,
+                    change,
+                } => {
+                    if *column == pipeline.primary_column_id
+                        && matches!(
+                            change,
+                            ColumnChange::Delete | ColumnChange::ChangeType { .. }
+                        )
+                    {
+                        return Err(PipelineError::Invalid(
+                            "The primary record column cannot be removed or change type",
+                        ));
+                    }
+                    *table
+                }
+                DatabaseOp::Table {
+                    table,
+                    change: TableChange::ReorderColumns { .. },
+                } => *table,
+                _ => {
+                    return Err(PipelineError::Invalid(
+                        "A pipeline has one table; customize its columns and records",
+                    ));
+                }
+            };
+            if table != pipeline.table_id {
+                return Err(PipelineError::NotFound);
+            }
+        }
+        let viewer = Viewer {
+            user_id: actor(&receipt)?,
+            acting_bot: None,
+        };
+        Ok(self
+            .databases
+            .apply_storage_ops(pipeline.database_id, viewer, batch)
+            .await?)
     }
 }

@@ -6,7 +6,7 @@ use crate::domain::{
     pipelines::PipelineBlueprint,
     sales_backfill::{LegacySalesCompany, LegacySalesTeam, SalesBackfillStore},
 };
-use databases::domain::provisioning::{ManagedDatabaseSeeder, ProvisionedRow};
+use databases::domain::provisioning::{ProvisionedRow, TransactionalDatabaseStorage};
 use macro_user_id::{cowlike::CowLike, user_id::MacroUserIdStr};
 use models_properties::EntityType;
 use properties::domain::property_snapshot_reader::{
@@ -34,7 +34,7 @@ impl<D, P> PgSalesBackfillStore<D, P> {
 
 impl<D, P> SalesBackfillStore for PgSalesBackfillStore<D, P>
 where
-    D: ManagedDatabaseSeeder<Transaction = Transaction<'static, Postgres>>,
+    D: TransactionalDatabaseStorage<Transaction = Transaction<'static, Postgres>>,
     P: PropertySnapshotReader<Transaction = Transaction<'static, Postgres>>,
 {
     type Transaction = Transaction<'static, Postgres>;
@@ -139,7 +139,7 @@ where
         Ok(self
             .pipelines
             .database
-            .seed_managed_rows_in(tx, &blueprint.database, rows)
+            .seed_storage_rows_in(tx, &blueprint.database, rows, &blueprint.creator)
             .await?)
     }
 

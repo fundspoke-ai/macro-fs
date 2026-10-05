@@ -1726,7 +1726,9 @@ editors without changing hosted data.
 At narrow widths, `Show CRM navigation` opens the same navigation in a menu.
 The sidebar's Views and Lists sections can also collapse independently.
 
-**Pipelines** in the CRM sidebar are databases of company or contact entries.
+**Pipelines** in the CRM sidebar hold company or contact entries in the shared
+records editor. They have their own identity, ownership and sharing; their
+storage does not appear as a separate database in navigation.
 **New pipeline** is disabled until the team's CRM is enabled. For a new team,
 use **Open CRM settings** in the empty state to enable CRM, then return to
 Customers to create a pipeline. Verify this with a newly created team as well as
@@ -1744,7 +1746,9 @@ once per pipeline and can also belong to other pipelines. The reference column
 can be renamed but cannot be removed or changed to another type. Stage, Owner,
 and Revenue are independent pipeline fields; editing them does not modify the
 company's CRM fields. Use **Add column** or a column header's menu to customize
-columns. Pipeline Stage options initially copy the team's current deal stages.
+columns. Pipeline Stage options initially copy the team's current deal stages. Open
+pipelines refresh other editors' changes periodically; a local edit refreshes
+immediately after saving.
 **Trash pipeline** removes its table from navigation without deleting the linked
 companies or contacts. **Back to companies** returns to the main CRM views.
 

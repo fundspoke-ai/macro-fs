@@ -7,6 +7,7 @@ mod infer_column_type;
 mod ops;
 mod saved_queries;
 mod sharing;
+mod storage;
 #[cfg(test)]
 mod test;
 mod transfer;

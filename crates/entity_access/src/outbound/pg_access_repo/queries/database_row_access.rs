@@ -31,10 +31,10 @@ pub async fn get_database_row_access(
         SELECT ea.access_level::text
         FROM database_rows r
         JOIN database_tables t ON t.id = r.table_id
-        JOIN databases d ON d.id = t.database_id
-        JOIN entity_access ea ON ea.entity_id = COALESCE(d.access_entity_id, d.id)
+        JOIN database_entities d ON d.database_id = t.database_id
+        JOIN entity_access ea ON ea.entity_id = d.database_id
         WHERE r.id = $1
-        AND ea.entity_type = COALESCE(d.access_entity_type, 'database')
+        AND ea.entity_type = 'database'
         AND ea.source_id = ANY($2)
         "#,
         row_id,
@@ -62,10 +62,10 @@ pub async fn get_database_rows_access(
         SELECT r.id, ea.access_level AS "access_level!: AccessLevel"
         FROM database_rows r
         JOIN database_tables t ON t.id = r.table_id
-        JOIN databases d ON d.id = t.database_id
-        JOIN entity_access ea ON ea.entity_id = COALESCE(d.access_entity_id, d.id)
+        JOIN database_entities d ON d.database_id = t.database_id
+        JOIN entity_access ea ON ea.entity_id = d.database_id
         WHERE r.id = ANY($1)
-        AND ea.entity_type = COALESCE(d.access_entity_type, 'database')
+        AND ea.entity_type = 'database'
         AND ea.source_id = ANY($2)
         "#,
         row_ids,
@@ -93,6 +93,7 @@ pub async fn get_database_row_database(
         SELECT t.database_id
         FROM database_rows r
         JOIN database_tables t ON t.id = r.table_id
+        JOIN database_entities d ON d.database_id = t.database_id
         WHERE r.id = $1
         "#,
         row_id,
@@ -112,8 +113,5 @@ pub async fn explain_database_row_access(
     let Some(database_id) = get_database_row_database(pool, row_id).await? else {
         return Ok(vec![]);
     };
-    let (access_id, access_type) = super::database_access::access_owner(pool, database_id)
-        .await?
-        .unwrap_or((database_id, EntityType::Database));
-    list_entity_access_grants(pool, &access_id, access_type, source_ids).await
+    list_entity_access_grants(pool, &database_id, EntityType::Database, source_ids).await
 }

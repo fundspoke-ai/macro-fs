@@ -867,6 +867,21 @@ export type ApiParticipantRole = 'owner' | 'admin' | 'member';
 export type ApiPropertyEntityType = 'CHANNEL' | 'CHAT' | 'COMPANY' | 'DOCUMENT' | 'PROJECT' | 'TASK' | 'THREAD' | 'USER';
 
 /**
+ * What a committed batch answers: a result per op, and the journal's change
+ * for each table version it produced.
+ */
+export type AppliedOps = {
+    /**
+     * The journal's changes.
+     */
+    changes: Array<CommittedChange>;
+    /**
+     * One result per op, in order.
+     */
+    results: Array<OpResult>;
+};
+
+/**
  * A batch of ops for one database, applied in order, in one transaction,
  * together or not at all.
  */
@@ -8780,6 +8795,23 @@ export type NotificationState = 'unseen' | 'seen' | 'done';
 export type NumberOperator = 'is' | 'isNot' | 'greaterThan' | 'greaterThanOrEqual' | 'lessThan' | 'lessThanOrEqual';
 
 /**
+ * A batch of ops for one database and the versions its tables must be at.
+ */
+export type OpBatch = {
+    /**
+     * The version each named table must still be at; the batch is refused
+     * as a conflict if one moved. Without one, ops are last-write-wins.
+     */
+    baseVersions?: {
+        [key: string]: TableVersion;
+    };
+    /**
+     * The ops, in the order they apply.
+     */
+    ops: Array<DatabaseOp>;
+};
+
+/**
  * Why an op of a batch was refused. Nothing in the batch was written.
  */
 export type OpRefusalResponse = {
@@ -9170,7 +9202,7 @@ export type Pipeline = {
      */
     id: string;
     /**
-     * Display name, stored by the backing database.
+     * Pipeline display name.
      */
     name: string;
     /**
@@ -9197,6 +9229,10 @@ export type Pipeline = {
      * Trashed pipelines are omitted from navigation.
      */
     trashedAt: string | null;
+    /**
+     * Owning user; sharing never changes ownership.
+     */
+    userId: string;
 };
 
 /**
@@ -10060,6 +10096,11 @@ export type RowHistoryResponse = {
      */
     changes: Array<RowHistoryEntry>;
 };
+
+/**
+ * Identifier of a row.
+ */
+export type RowId = string;
 
 /**
  * A write to a table's rows.
@@ -12101,6 +12142,37 @@ export type StarterDocumentsResponse = {
      * Id of the user's "Macro how to guide".
      */
     how_to_guide_id: string;
+};
+
+/**
+ * One storage row, with cells keyed by column placement.
+ */
+export type StorageRow = {
+    /**
+     * Populated cells.
+     */
+    cells: {
+        [key: string]: PropertyValue;
+    };
+    /**
+     * Row identity, independent of any referenced entity.
+     */
+    rowId: RowId;
+};
+
+/**
+ * A bounded page of rows at a table version.
+ */
+export type StorageRows = {
+    next?: null | RowId;
+    /**
+     * Rows ordered by identity, suitable for stable pagination.
+     */
+    rows: Array<StorageRow>;
+    /**
+     * Table version when the read began.
+     */
+    version: TableVersion;
 };
 
 /**
@@ -16166,6 +16238,41 @@ export type RenameCrmPipelineResponses = {
 
 export type RenameCrmPipelineResponse = RenameCrmPipelineResponses[keyof RenameCrmPipelineResponses];
 
+export type ApplyCrmPipelineOpsData = {
+    body: OpBatch;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/crm/pipelines/{id}/ops';
+};
+
+export type ApplyCrmPipelineOpsResponses = {
+    200: AppliedOps;
+};
+
+export type ApplyCrmPipelineOpsResponse = ApplyCrmPipelineOpsResponses[keyof ApplyCrmPipelineOpsResponses];
+
+export type GetCrmPipelineRowsData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        /**
+         * Continue after this row identity.
+         */
+        after?: string | null;
+    };
+    url: '/crm/pipelines/{id}/rows';
+};
+
+export type GetCrmPipelineRowsResponses = {
+    200: StorageRows;
+};
+
+export type GetCrmPipelineRowsResponse = GetCrmPipelineRowsResponses[keyof GetCrmPipelineRowsResponses];
+
 export type ShareCrmPipelineData = {
     body: SharePipeline;
     path: {
@@ -16180,6 +16287,21 @@ export type ShareCrmPipelineResponses = {
 };
 
 export type ShareCrmPipelineResponse = ShareCrmPipelineResponses[keyof ShareCrmPipelineResponses];
+
+export type GetCrmPipelineTableData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/crm/pipelines/{id}/table';
+};
+
+export type GetCrmPipelineTableResponses = {
+    200: TableDetail;
+};
+
+export type GetCrmPipelineTableResponse = GetCrmPipelineTableResponses[keyof GetCrmPipelineTableResponses];
 
 export type TrashCrmPipelineData = {
     body: TrashPipeline;

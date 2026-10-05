@@ -8,10 +8,10 @@ use crate::domain::{
 };
 use axum::{
     Json, Router,
-    extract::{FromRef, Path, State},
+    extract::{FromRef, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use entity_access::{
     domain::{
@@ -71,6 +71,9 @@ where
     Router::new()
         .route("/", get(list::<P, E, A>).post(create::<P, E, A>))
         .route("/{id}", get(read::<P, E, A>))
+        .route("/{id}/table", get(table::<P, E, A>))
+        .route("/{id}/rows", get(rows::<P, E, A>))
+        .route("/{id}/ops", post(apply_ops::<P, E, A>))
         .route("/{id}/name", put(rename::<P, E, A>))
         .route("/{id}/sharing", put(share::<P, E, A>))
         .route("/{id}/trash", put(trash::<P, E, A>))
@@ -140,6 +143,69 @@ pub async fn read<P: PipelineService, E: EntityAccessService, A: MacroAuthorizat
         state
             .service
             .get(receipt::<ViewAccessLevel, _, _>(&*state.access, auth, id).await?)
+            .await?,
+    ))
+}
+
+/// Read the host-owned table schema.
+#[utoipa::path(get, path = "/crm/pipelines/{id}/table", operation_id = "get_crm_pipeline_table",
+    params(("id" = Uuid, Path)), responses((status = 200, body = databases::domain::models::TableDetail)))]
+pub async fn table<P: PipelineService, E: EntityAccessService, A: MacroAuthorizationService>(
+    auth: MacroAuthorizationExtractor<A, UserOrInternal>,
+    State(state): State<PipelineRouterState<P, E, A>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<databases::domain::models::TableDetail>, PipelineError> {
+    Ok(Json(
+        state
+            .service
+            .table(receipt::<ViewAccessLevel, _, _>(&*state.access, auth, id).await?)
+            .await?,
+    ))
+}
+
+/// Pagination through pipeline records.
+#[derive(Deserialize, utoipa::IntoParams)]
+pub struct RowsQuery {
+    /// Continue after this row identity.
+    pub after: Option<Uuid>,
+}
+
+/// Read pipeline records through pipeline access.
+#[utoipa::path(get, path = "/crm/pipelines/{id}/rows", operation_id = "get_crm_pipeline_rows",
+    params(("id" = Uuid, Path), RowsQuery), responses((status = 200, body = databases::domain::storage::StorageRows)))]
+pub async fn rows<P: PipelineService, E: EntityAccessService, A: MacroAuthorizationService>(
+    auth: MacroAuthorizationExtractor<A, UserOrInternal>,
+    State(state): State<PipelineRouterState<P, E, A>>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<RowsQuery>,
+) -> Result<Json<databases::domain::storage::StorageRows>, PipelineError> {
+    Ok(Json(
+        state
+            .service
+            .rows(
+                receipt::<ViewAccessLevel, _, _>(&*state.access, auth, id).await?,
+                query.after.map(models_databases::RowId::from_uuid),
+            )
+            .await?,
+    ))
+}
+
+/// Edit pipeline schema or records with the common typed operations.
+#[utoipa::path(post, path = "/crm/pipelines/{id}/ops", operation_id = "apply_crm_pipeline_ops",
+    request_body = databases::domain::models::OpBatch, params(("id" = Uuid, Path)), responses((status = 200, body = databases::domain::models::AppliedOps)))]
+pub async fn apply_ops<P: PipelineService, E: EntityAccessService, A: MacroAuthorizationService>(
+    auth: MacroAuthorizationExtractor<A, UserOrInternal>,
+    State(state): State<PipelineRouterState<P, E, A>>,
+    Path(id): Path<Uuid>,
+    Json(batch): Json<databases::domain::models::OpBatch>,
+) -> Result<Json<databases::domain::models::AppliedOps>, PipelineError> {
+    Ok(Json(
+        state
+            .service
+            .apply_ops(
+                receipt::<EditAccessLevel, _, _>(&*state.access, auth, id).await?,
+                batch,
+            )
             .await?,
     ))
 }
@@ -237,11 +303,24 @@ impl IntoResponse for PipelineError {
             Self::Database(error) => {
                 use databases::domain::models::DatabaseError;
                 let status = match error {
+                    DatabaseError::InvalidOp(refusal) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({
+                                "message": refusal.reason,
+                                "op": refusal.op,
+                                "row": refusal.row,
+                                "column": refusal.column,
+                                "taken": refusal.taken,
+                            })),
+                        )
+                            .into_response();
+                    }
                     DatabaseError::NotFound => StatusCode::NOT_FOUND,
                     DatabaseError::Unauthorized => StatusCode::FORBIDDEN,
-                    DatabaseError::InvalidSchemaOperation(_)
-                    | DatabaseError::InvalidSharing(_)
-                    | DatabaseError::InvalidOp(_) => StatusCode::BAD_REQUEST,
+                    DatabaseError::InvalidSchemaOperation(_) | DatabaseError::InvalidSharing(_) => {
+                        StatusCode::BAD_REQUEST
+                    }
                     DatabaseError::RowInUse
                     | DatabaseError::OptionInUse
                     | DatabaseError::VersionConflict => StatusCode::CONFLICT,

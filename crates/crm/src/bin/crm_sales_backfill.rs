@@ -5,7 +5,7 @@ use crm::{
     domain::sales_backfill::SalesBackfillService, outbound::sales_backfill::PgSalesBackfillStore,
 };
 use database_env_vars::DatabaseUrl;
-use databases::outbound::pg_databases_repo::PgDatabasesRepo;
+use databases::outbound::pg_cell_store::PgCellStore;
 use macro_entrypoint::MacroEntrypoint;
 use macro_env::Environment;
 use properties::PropertiesPgRepo;
@@ -37,7 +37,7 @@ async fn main() -> Result<(), rootcause::Report> {
         .await?;
     let service = SalesBackfillService(PgSalesBackfillStore::new(
         pool.clone(),
-        PgDatabasesRepo::new(pool.clone(), PropertiesPgRepo::new(pool.clone())),
+        PgCellStore::new(pool.clone(), PropertiesPgRepo::new(pool.clone())),
         PropertiesPgRepo::new(pool.clone()),
     ));
     if let Some(team) = args.team {

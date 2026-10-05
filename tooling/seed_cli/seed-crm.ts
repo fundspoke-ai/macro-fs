@@ -10,8 +10,9 @@ import type { TeamWithMembers } from '../../apps/web/src/lib/service-clients/ser
 import type { AccessiblePipeline } from '../../apps/web/src/lib/service-clients/service-storage/generated/schemas/accessiblePipeline';
 import type { CrmCompanyResponse } from '../../apps/web/src/lib/service-clients/service-storage/generated/schemas/crmCompanyResponse';
 import type { CrmContactResponse } from '../../apps/web/src/lib/service-clients/service-storage/generated/schemas/crmContactResponse';
-import type { DatabaseDetail } from '../../apps/web/src/lib/service-clients/service-storage/generated/schemas/databaseDetail';
 import type { PropertyDefinitionWithOptions } from '../../apps/web/src/lib/service-clients/service-storage/generated/schemas/propertyDefinitionWithOptions';
+import type { StorageRows } from '../../apps/web/src/lib/service-clients/service-storage/generated/schemas/storageRows';
+import type { TableDetail } from '../../apps/web/src/lib/service-clients/service-storage/generated/schemas/tableDetail';
 import type {
   GraphqlEntityFilterAst,
   SoupInput,
@@ -115,16 +116,9 @@ type SeedRecord = {
   notes: string;
   unassigned?: boolean;
 };
-type Row = {
-  properties: {
-    propertyDefinitionId: string;
-    value?: { references?: { entityId: string }[] };
-  }[];
-};
-
-async function applyOps(databaseId: string, ops: DatabaseOp[]) {
+async function applyOps(pipelineId: string, ops: DatabaseOp[]) {
   if (ops.length)
-    await send('POST', `/dss/databases/${databaseId}/ops`, { ops });
+    await send('POST', `/dss/crm/pipelines/${pipelineId}/ops`, { ops });
 }
 
 try {
@@ -265,14 +259,10 @@ try {
       created.pipelines++;
       pipelines.push(pipeline);
     }
-    const detail = await send<DatabaseDetail>(
+    const table = await send<TableDetail>(
       'GET',
-      `/dss/databases/${pipeline.databaseId}`
+      `/dss/crm/pipelines/${pipeline.id}/table`
     );
-    const table = detail.tables.find(
-      (item) => item.table.id === pipeline.tableId
-    );
-    if (!table) throw new Error(`Missing table for ${sample.name}`);
     const column = (name: string) =>
       table.columns.find(
         (item) => item.definition.definition.display_name === name
@@ -281,25 +271,20 @@ try {
       (item) => item.column.id === pipeline.primaryColumnId
     );
     if (!primary) throw new Error(`Missing primary column for ${sample.name}`);
-    const rows = await readSoup<Row>(
-      { databaseRowFilter: { literal: { tableId: pipeline.tableId } } },
-      '... on GraphqlSoupDatabaseRow { properties { propertyDefinitionId value { ... on GraphqlEntityReferencePropertyValue { references { entityId } } } } }'
-    );
-    const existing = new Set(
-      rows.flatMap((row) =>
-        row.properties
-          .filter(
-            (property) =>
-              property.propertyDefinitionId === primary.definition.definition.id
-          )
-          .flatMap(
-            (property) =>
-              property.value?.references?.map(
-                (reference) => reference.entityId
-              ) ?? []
-          )
-      )
-    );
+    const existing = new Set<string>();
+    let after: string | undefined;
+    do {
+      const page = await send<StorageRows>(
+        'GET',
+        `/dss/crm/pipelines/${pipeline.id}/rows${after ? `?after=${after}` : ''}`
+      );
+      for (const row of page.rows) {
+        const value = row.cells[pipeline.primaryColumnId];
+        if (value?.type === 'EntityReference')
+          for (const ref of value.value) existing.add(ref.entity_id);
+      }
+      after = page.next ?? undefined;
+    } while (after);
     const records = (
       sample.recordType === 'company' ? companyRecords : contactRecords
     ).filter(
@@ -383,7 +368,7 @@ try {
         ]),
       },
     });
-    await applyOps(pipeline.databaseId, ops);
+    await applyOps(pipeline.id, ops);
     created.rows += records.length;
   }
   console.log(

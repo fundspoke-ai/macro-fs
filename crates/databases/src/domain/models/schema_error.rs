@@ -194,9 +194,6 @@ pub enum SchemaError {
 /// A refused sharing change.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SharingError {
-    /// An owning entity controls access to this database.
-    #[error("Manage sharing from the entity that owns this database.")]
-    InheritedAccess,
     /// Share links are not supported for databases.
     #[error("Databases cannot be shared by link yet.")]
     LinkShare,

@@ -8,17 +8,14 @@ import { crmKeys } from './keys';
 export async function fetchPipelineSharePermissions(id: string) {
   const pipeline = await storageServiceClient.getCrmPipeline(id);
   if (pipeline.isErr()) return pipeline;
-  const database = await storageServiceClient.databases.get({
-    id: pipeline.value.databaseId,
-  });
-  return database.map(
-    (detail): SharePermissionV2 => ({
+  return pipeline.map(
+    (value): SharePermissionV2 => ({
       id,
-      owner: detail.database.owner_id,
+      owner: value.userId,
       channelSharePermissions: [],
       linkShare: null,
       linkShareAccessLevel: null,
-      teamShareAccessLevel: pipeline.value.sharing === 'team' ? 'edit' : null,
+      teamShareAccessLevel: value.sharing === 'team' ? 'edit' : null,
     })
   );
 }

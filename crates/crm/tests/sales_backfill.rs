@@ -4,7 +4,7 @@
 use crm::{
     domain::sales_backfill::SalesBackfillService, outbound::sales_backfill::PgSalesBackfillStore,
 };
-use databases::outbound::pg_databases_repo::PgDatabasesRepo;
+use databases::outbound::pg_cell_store::PgCellStore;
 use entity_access::{
     domain::{
         models::{EntityType as AccessEntityType, ViewAccessLevel},
@@ -28,11 +28,10 @@ const OUTSIDER: &str = "macro|backfill-outsider@macro.com";
 
 fn service(
     pool: &PgPool,
-) -> SalesBackfillService<PgSalesBackfillStore<PgDatabasesRepo<PropertiesPgRepo>, PropertiesPgRepo>>
-{
+) -> SalesBackfillService<PgSalesBackfillStore<PgCellStore<PropertiesPgRepo>, PropertiesPgRepo>> {
     SalesBackfillService(PgSalesBackfillStore::new(
         pool.clone(),
-        PgDatabasesRepo::new(pool.clone(), PropertiesPgRepo::new(pool.clone())),
+        PgCellStore::new(pool.clone(), PropertiesPgRepo::new(pool.clone())),
         PropertiesPgRepo::new(pool.clone()),
     ))
 }
@@ -115,7 +114,7 @@ async fn stage(pool: &PgPool, company: Uuid, option: StageOption) {
 
 async fn pipeline(pool: &PgPool, team: Uuid) -> (Uuid, Uuid, Uuid) {
     let row = sqlx::query!(
-        "SELECT id, database_id, table_id FROM crm_pipelines WHERE team_id = $1",
+        "SELECT id, database_id, table_id FROM crm_pipeline_entities WHERE team_id = $1",
         team
     )
     .fetch_one(pool)
@@ -126,7 +125,7 @@ async fn pipeline(pool: &PgPool, team: Uuid) -> (Uuid, Uuid, Uuid) {
 
 async fn cell(pool: &PgPool, company: Uuid, column: &str) -> Option<serde_json::Value> {
     sqlx::query_scalar!(
-        r#"SELECT ep.values FROM database_primary_values primary_value
+        r#"SELECT ep.values FROM crm_pipeline_primary_values primary_value
            JOIN database_columns c ON c.table_id = primary_value.table_id
            JOIN property_definitions d ON d.id = c.property_definition_id
            JOIN entity_properties ep ON ep.entity_id = primary_value.row_id::text
@@ -206,10 +205,13 @@ async fn copies_all_visible_companies_with_values_and_team_access(pool: PgPool) 
     );
     let (pipeline, database, _) = pipeline(&pool, team).await;
     assert_eq!(
-        sqlx::query_scalar!("SELECT name FROM databases WHERE id = $1", database)
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
+        sqlx::query_scalar!(
+            "SELECT name FROM crm_pipeline_entities WHERE database_id = $1",
+            database
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
         "Sales"
     );
     let access = EntityAccessServiceImpl::new(PgAccessRepository::new(pool.clone()));
@@ -232,7 +234,10 @@ async fn copies_all_visible_companies_with_values_and_team_access(pool: PgPool) 
                 AccessEntityType::Database,
             )
             .await;
-        assert_eq!(result.is_ok(), actor != OUTSIDER);
+        assert!(
+            result.is_err(),
+            "core storage must not grant database app access"
+        );
     }
 }
 
@@ -330,7 +335,7 @@ async fn check_rolls_back_and_reruns_preserve_user_changes_and_deletions(pool: P
     service.migrate_team(team, false).await.unwrap();
     let (pipeline, database, table) = pipeline(&pool, team).await;
     sqlx::query!(
-        "UPDATE databases SET name = 'Renamed by user', trashed_at = now() WHERE id = $1",
+        "UPDATE crm_pipeline_entities SET name = 'Renamed by user', trashed_at = now() WHERE database_id = $1",
         database
     )
     .execute(&pool)
@@ -346,10 +351,13 @@ async fn check_rolls_back_and_reruns_preserve_user_changes_and_deletions(pool: P
         Some("already migrated")
     );
     assert_eq!(
-        sqlx::query_scalar!("SELECT name FROM databases WHERE id = $1", database)
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
+        sqlx::query_scalar!(
+            "SELECT name FROM crm_pipeline_entities WHERE database_id = $1",
+            database
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
         "Renamed by user"
     );
     assert_eq!(
@@ -362,7 +370,7 @@ async fn check_rolls_back_and_reruns_preserve_user_changes_and_deletions(pool: P
         .unwrap(),
         Some(0)
     );
-    sqlx::query!("DELETE FROM crm_pipelines WHERE id = $1", pipeline)
+    sqlx::query!("DELETE FROM crm_pipeline_entities WHERE id = $1", pipeline)
         .execute(&pool)
         .await
         .unwrap();
@@ -381,7 +389,7 @@ async fn check_rolls_back_and_reruns_preserve_user_changes_and_deletions(pool: P
         None
     );
     assert_eq!(
-        sqlx::query_scalar!("SELECT count(*) FROM crm_pipelines")
+        sqlx::query_scalar!("SELECT count(*) FROM crm_pipeline_entities")
             .fetch_one(&pool)
             .await
             .unwrap(),
@@ -481,7 +489,7 @@ async fn concurrent_retries_seed_once_and_disabled_or_empty_teams_are_untouched(
     assert_eq!(first.companies + second.companies, 1);
     assert_eq!(first.skipped.is_some(), second.skipped.is_none());
     assert_eq!(
-        sqlx::query_scalar!("SELECT count(*) FROM crm_pipelines")
+        sqlx::query_scalar!("SELECT count(*) FROM crm_pipeline_entities")
             .fetch_one(&pool)
             .await
             .unwrap(),

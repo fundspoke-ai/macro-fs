@@ -1290,17 +1290,12 @@ pub(in crate::outbound::pg_soup_repo) fn access_semi_join(
     id_sql: &str,
     entity_type: &str,
 ) -> String {
-    access_semi_join_expression(id_sql, &format!("'{entity_type}'"))
-}
-
-/// The grant-bearing entity may be the parent of a managed database.
-fn access_semi_join_expression(id_sql: &str, entity_type_sql: &str) -> String {
     format!(
         r#"{id_sql} IN (
                     SELECT ea.entity_id::text
                     FROM entity_access ea
                     JOIN user_source_ids us ON us.source_id = ea.source_id
-                    WHERE ea.entity_type = {entity_type_sql}
+                    WHERE ea.entity_type = '{entity_type}'
                 )"#
     )
 }

@@ -7,9 +7,6 @@ use models_permissions::share_permission::{LinkShare, UpdateSharePermissionReque
 
 impl DatabaseSharingRepo for FakeRepo {
     type Error = FakeError;
-    async fn inherits_access(&self, id: DatabaseId) -> Result<bool, Self::Error> {
-        Ok(self.0.lock().unwrap().managed_databases.contains(&id))
-    }
     async fn channel_grants(
         &self,
         _: DatabaseId,
@@ -24,29 +21,6 @@ impl DatabaseSharingRepo for FakeRepo {
         self.0.lock().unwrap().share_updates.push(grants.to_vec());
         Ok(true)
     }
-}
-
-#[tokio::test]
-async fn managed_databases_cannot_change_their_own_sharing() {
-    let seeded = seeded().await;
-    let (world, svc, id) = (seeded.world, seeded.service, seeded.database_id);
-    world.lock().unwrap().managed_databases.push(id);
-    let result = svc
-        .update_share_permissions(
-            receipt(id, OWNER, AccessLevel::Owner),
-            UpdateSharePermissionRequestV2 {
-                link_share: None,
-                link_share_access_level: None,
-                team_share_access_level: None,
-                channel_share_permissions: Some(vec![]),
-            },
-        )
-        .await;
-    assert!(matches!(
-        result,
-        Err(DatabaseError::InvalidSharing(SharingError::InheritedAccess))
-    ));
-    assert!(world.lock().unwrap().share_updates.is_empty());
 }
 
 #[tokio::test]

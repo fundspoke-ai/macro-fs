@@ -5,7 +5,7 @@ use filter_ast::Expr;
 use item_filters::ast::database_row::DatabaseRowLiteral;
 use models_pagination::SimpleSortMethod;
 
-use super::access_semi_join_expression;
+use super::access_semi_join;
 
 pub(in crate::outbound::pg_soup_repo) use item_filters::ast::database_row::database_rows_requested as database_row_opted_in;
 
@@ -44,11 +44,8 @@ pub(super) fn database_row_top_clause(sort: SimpleSortMethod, grouped: bool) -> 
         {sort_ts}::timestamptz as sort_ts {group_columns}
         FROM database_rows r
         JOIN database_tables row_table ON row_table.id = r.table_id
-        JOIN databases row_database ON row_database.id = row_table.database_id
+        JOIN database_entities row_database ON row_database.database_id = row_table.database_id
         WHERE row_database.trashed_at IS NULL AND {}"#,
-        access_semi_join_expression(
-            "COALESCE(row_database.access_entity_id, row_database.id)::text",
-            "COALESCE(row_database.access_entity_type, 'database')",
-        )
+        access_semi_join("row_database.database_id::text", "database")
     )
 }

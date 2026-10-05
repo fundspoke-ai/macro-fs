@@ -129,17 +129,10 @@ impl ExplainAccessRepository for PgExplainAccessRepository {
                 let source_ids = queries::get_user_source_ids(&self.pool, Some(user_id))
                     .await
                     .map_err(anyhow_access_error)?;
-                let (access_id, access_type) = if entity_type == EntityType::Database {
-                    queries::database_access::access_owner(&self.pool, database_id)
-                        .await?
-                        .unwrap_or((database_id, entity_type))
-                } else {
-                    (database_id, entity_type)
-                };
                 Ok(queries::list_entity_access_grants(
                     &self.pool,
-                    &access_id,
-                    access_type,
+                    &database_id,
+                    entity_type,
                     &source_ids,
                 )
                 .await?)
