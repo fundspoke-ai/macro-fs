@@ -2,6 +2,7 @@ use super::*;
 use pollster::block_on;
 
 mod soup;
+mod watch;
 
 const QUERY: &str = r#"query Soup($input: SoupInput!) {
     user { id soup(input: $input) { nextCursor items { __typename id } } }
@@ -98,6 +99,7 @@ fn read(handle: &EngineHandle, op_id: Option<&str>) -> ReadResultWire {
 
 fn empty_write_result() -> WriteResultWire {
     WriteResultWire {
+        field_changes: None,
         identity_errors: Vec::new(),
         mutation_uuid: None,
         revision: "0".to_string(),

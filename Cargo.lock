@@ -3390,6 +3390,7 @@ dependencies = [
  "pollster",
  "postcard",
  "predicate-index",
+ "proptest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3405,6 +3406,7 @@ dependencies = [
  "maybe_send",
  "pollster",
  "predicate-index",
+ "proptest",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -3416,7 +3418,7 @@ dependencies = [
 
 [[package]]
 name = "cache-wasm"
-version = "0.6.38"
+version = "0.6.42"
 dependencies = [
  "async-lock",
  "cache-core",

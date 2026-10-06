@@ -1043,7 +1043,10 @@ const toCalendarEventTime = (
 
 export const isInstructionsMdDoc = (
   item: SoupApiItem,
-  instructionsIdQuery: UseQueryResult<string | null | undefined, Error>
+  instructionsIdQuery: Pick<
+    UseQueryResult<string | null | undefined, Error>,
+    'data' | 'isSuccess'
+  >
 ) => {
   if (item.tag !== 'document') return false;
 
@@ -1055,7 +1058,10 @@ export const isInstructionsMdDoc = (
 export const mapSoupPageToEntityList: (
   data: SoupPage,
   options: {
-    instructionsIdQuery: UseQueryResult<string | null | undefined, Error>;
+    instructionsIdQuery: Pick<
+      UseQueryResult<string | null | undefined, Error>,
+      'data' | 'isSuccess'
+    >;
     showSupportedForeignEntities?: boolean;
   }
 ) => SoupEntity[] = (data, options) => {

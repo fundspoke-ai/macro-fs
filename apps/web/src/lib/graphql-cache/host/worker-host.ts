@@ -27,6 +27,7 @@ import {
   OWNER_EPOCH_LOST_ERROR_CODE,
   OWNER_LOCK_UNAVAILABLE_ERROR_CODE,
   parseStorageGeneration,
+  type QueryUpdate,
   type ReadRecordsByKeysArgs,
   type ReadRecordsByKeysResult,
   type ReadResult,
@@ -63,6 +64,7 @@ import {
 import { CacheNavigationError } from './navigation-error';
 import { createNoopCacheHost } from './noop-host';
 import type {
+  AffectedOperationsListener,
   CacheChangeListener,
   CacheChangeOptions,
   CacheGenerationChange,
@@ -221,7 +223,7 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
   const registeredOpKeys = new Set<number>();
   const lostRegisteredOpKeys = new Set<number>();
   const replacementReadOpKeys = new Set<number>();
-  const affectedSubscribers = new Set<(opKeys: number[]) => void>();
+  const affectedSubscribers = new Set<AffectedOperationsListener>();
   const cacheChangeSubscribers = new Set<CacheChangeListener>();
   const hydrationSubscribers = new Set<CacheChangeListener>();
   const generationChangeSubscribers = new Set<
@@ -333,7 +335,10 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
         ),
       ];
       if (opKeys.length > 0) {
-        for (const cb of affectedSubscribers) cb(opKeys);
+        for (const cb of affectedSubscribers) {
+          if (msg.fieldChanges) cb(opKeys, msg.fieldChanges);
+          else cb(opKeys);
+        }
       }
       return;
     }
@@ -1155,6 +1160,7 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
 
   return {
     clientId,
+    liveQueries: true,
 
     async currentRevision(): Promise<CacheRevision> {
       return (await initializedRequest({
@@ -1183,6 +1189,23 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
         },
         args.opKey
       )) as ReadResult;
+    },
+
+    async watchQuery(args): Promise<QueryUpdate> {
+      trackActiveOperation(args.opKey);
+      return (await initializedRequest(
+        {
+          kind: 'read',
+          opId: opId(args.opKey),
+          query: args.query,
+          operationName: args.operationName,
+          variables: args.variables,
+          priority: args.priority,
+          entityResolvers: args.entityResolvers,
+          watch: { since: args.since },
+        },
+        args.opKey
+      )) as QueryUpdate;
     },
 
     async readRecordsByKeys(
@@ -1408,7 +1431,7 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
       return revision;
     },
 
-    onOpsAffected(cb: (opKeys: number[]) => void): () => void {
+    onOpsAffected(cb: AffectedOperationsListener): () => void {
       affectedSubscribers.add(cb);
       return () => affectedSubscribers.delete(cb);
     },
