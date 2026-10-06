@@ -15,6 +15,10 @@ fn soup_response_schema_exposes_frontend_fields() {
         "threadId: ID!",
         "emailLabels: [GraphqlSoupEmailLabel!]!",
         "emailLinks: [GraphqlEmailLink!]!",
+        "favorites(filter: FavoritesFilterInput): [GraphqlFavorite!]!",
+        "input FavoritesFilterInput {",
+        "entityTypes: [GraphqlEntityType!]! = []",
+        "entityIds: [ID!]! = []",
         "emailThread(input: EmailThreadInput!): GraphqlSoupEmailThread",
         "type GraphqlSoupEmailThread implements GraphqlSoupEntity {",
         "providerId: String",
@@ -56,6 +60,10 @@ fn soup_response_schema_exposes_frontend_fields() {
         "type GraphqlSoupEmailDraftAttachment {",
         "type GraphqlSoupEmailForwardedAttachment {",
         "type GraphqlSoupCall implements GraphqlSoupEntity {",
+        "type GraphqlSoupAgentSession implements GraphqlSoupEntity {",
+        "bot: GraphqlSessionBot",
+        "type GraphqlSessionBot {",
+        "avatarUrl: String",
         "channelName: String",
         "customName: String",
         "status: String!",
@@ -64,23 +72,55 @@ fn soup_response_schema_exposes_frontend_fields() {
         "type GraphqlSoupChat implements GraphqlSoupEntity {",
         "deletedAt: String",
         "type GraphqlSoupProject implements GraphqlSoupEntity {",
+        "type GraphqlSoupInitiative implements GraphqlSoupEntity {",
+        "initiativeFilter: GraphqlInitiativeExpr",
         "parent: GraphqlEntity",
         "type GraphqlCacheDeletion {",
         "graphqlTypeName: String!",
         "entityId: ID!",
         "type SoupUpdated {",
-        "item: GraphqlSoupEntity",
+        "item: GraphqlSoupEntity!",
         "union SoupPatch = SoupUpdated | GraphqlCacheDeletion",
         "type GraphqlMutationSuccess {",
         "effects: [SoupPatch!]!",
+        "setEntityFavorite(entity: EntityRefInput!, favorite: Boolean!): GraphqlEntityMutationResult!",
+        "setFavorite(entity: EntityRefInput!, favorite: Boolean!): SetFavoritePayload!",
+        "type SetFavoritePayload {",
+        "result: GraphqlEntityMutationResult!",
+        "favorite: GraphqlFavorite",
+        "reorderFavorites(input: ReorderFavoritesInput!): [GraphqlFavorite!]!",
+        "input ReorderFavoritesInput {",
+        "favorites: [EntityRefInput!]!",
+        "type GraphqlFavorite {",
+        "entityType: GraphqlEntityType!",
+        "entityId: ID!",
+        "sortOrder: Float!",
         "recordChannelActivity(input: RecordChannelActivityInput!): GraphqlChannelActivity!",
         "updateNotifications(input: UpdateNotificationsInput!): [GraphqlNotification!]!",
+        "updateNotificationsForEntity(input: UpdateNotificationsForEntityInput!): [GraphqlNotification!]!",
+        "input UpdateNotificationsForEntityInput {",
+        "entities: [NotificationEntityInput!]!",
+        "input NotificationEntityInput {",
+        "entityType: GraphqlEntityType!",
+        "entityId: ID!",
         "markEmailThreadSeen(input: MarkEmailThreadSeenInput!): GraphqlSoupEmailThread!",
         "updateEmailThreadLabel(input: UpdateEmailThreadLabelInput!): GraphqlSoupEmailThread!",
+        "saveEmailDraft(input: SaveEmailDraftInput!): SaveEmailDraftPayload!",
+        "deleteEmailDraft(input: DeleteEmailDraftInput!): DeleteEmailDraftPayload!",
         "input MarkEmailThreadSeenInput {",
         "input UpdateEmailThreadLabelInput {",
         "labelId: ID!",
         "value: Boolean!",
+        "input SaveEmailDraftInput {",
+        "draftId: ID!",
+        "input SaveEmailDraftContactInput {",
+        "type SaveEmailDraftPayload {",
+        "draft: GraphqlSoupEmailMessage!",
+        "thread: GraphqlSoupEmailThread!",
+        "input DeleteEmailDraftInput {",
+        "type DeleteEmailDraftPayload {",
+        "deleted: Boolean!",
+        "threadDeleted: Boolean!",
         "enum ChannelActivityType {",
         "enum NotificationUpdateOperation {",
         "MARK_SEEN",
@@ -89,7 +129,12 @@ fn soup_response_schema_exposes_frontend_fields() {
         "type CompleteSubscriptionRoot {",
         "soupUpdates: [SoupPatch!]!",
         "notificationUpdates: GraphqlNotificationPatch!",
-        "union GraphqlNotificationPatch = GraphqlNotification | GraphqlCacheDeletion",
+        "union GraphqlNotificationPatch = GraphqlNewNotification | GraphqlUpdatedNotification | GraphqlCacheDeletion",
+        "type GraphqlNewNotification {",
+        "notification: GraphqlNotification!",
+        "type GraphqlUpdatedNotification {",
+        "activityUpdates: GraphqlActivityPatch!",
+        "union GraphqlActivityPatch = GraphqlActivityEvent | GraphqlActivityInvalidation",
         "type GraphqlNotification {",
         "metadata: GraphqlNotifEvent!",
     ] {
@@ -125,6 +170,36 @@ fn soup_response_schema_exposes_frontend_fields() {
 }
 
 #[test]
+fn activity_overview_is_a_user_scoped_embedded_value() {
+    use apollo_compiler::schema::ExtendedType;
+
+    let schema =
+        apollo_compiler::Schema::parse_and_validate(crate::build_schema().sdl(), "schema.graphql")
+            .expect("generated SDL is valid");
+    let ExtendedType::Object(user) = schema.types.get("GraphqlUser").expect("user type exists")
+    else {
+        panic!("GraphqlUser must be an object");
+    };
+    assert!(user.fields.contains_key("activityOverview"));
+
+    for name in [
+        "GraphqlActivityOverview",
+        "GraphqlActivityDay",
+        "GraphqlActivityEntityRank",
+    ] {
+        let ExtendedType::Object(value) =
+            schema.types.get(name).expect("overview value type exists")
+        else {
+            panic!("{name} must be an object");
+        };
+        assert!(
+            !value.fields.contains_key("id"),
+            "{name} must remain embedded under GraphqlUser"
+        );
+    }
+}
+
+#[test]
 fn soup_interface_exposes_the_complete_shared_entity_contract() {
     use apollo_compiler::schema::ExtendedType;
 
@@ -149,12 +224,24 @@ fn soup_interface_exposes_the_complete_shared_entity_contract() {
         "isFavorited",
         "viewerPermission",
         "frecencyScore",
+        "cacheProjection",
+        "activity",
     ] {
         assert!(
             entity.fields.contains_key(shared_field),
             "Soup interface missing shared field {shared_field}"
         );
     }
+    let cache_projection = entity
+        .fields
+        .get("cacheProjection")
+        .expect("Soup interface cache projection field exists");
+    assert!(
+        cache_projection.arguments.is_empty(),
+        "cacheProjection must remain argument-free"
+    );
+    assert_eq!(cache_projection.ty.to_string(), "SoupCacheProjection");
+
     assert!(
         !schema.types.contains_key("GraphqlSoupItem"),
         "soup items are entities directly; no query-scoped wrapper type"
@@ -176,11 +263,56 @@ fn soup_interface_exposes_the_complete_shared_entity_contract() {
         "viewerPermission",
         "properties",
         "notifications",
+        "cacheProjection",
+        "activity",
     ] {
         assert!(
             document.fields.contains_key(shared_field),
             "Soup document missing shared field {shared_field}"
         );
+    }
+    assert!(
+        !document.fields.contains_key("isEmailAttachment"),
+        "relation-backed projection facts must not become document business fields"
+    );
+
+    for name in [
+        "GraphqlSoupCalendarEvent",
+        "GraphqlSoupDocument",
+        "GraphqlSoupChat",
+        "GraphqlSoupProject",
+        "GraphqlSoupInitiative",
+        "GraphqlSoupEmailThread",
+        "GraphqlSoupChannel",
+        "GraphqlSoupChannelMessage",
+        "GraphqlSoupCall",
+        "GraphqlSoupCrmCompany",
+        "GraphqlSoupForeignEntity",
+        "GraphqlSoupAgentSession",
+        "GraphqlSoupDatabaseRow",
+    ] {
+        let ExtendedType::Object(object) = schema.types.get(name).expect("Soup object exists")
+        else {
+            panic!("{name} must be an object");
+        };
+        assert!(
+            object.fields.contains_key("cacheProjection"),
+            "{name} must implement the shared cacheProjection field"
+        );
+    }
+
+    for name in ["SoupPage", "SoupUpdated"] {
+        let ExtendedType::Object(object) = schema.types.get(name).expect("Soup wrapper exists")
+        else {
+            panic!("{name} must be an object");
+        };
+        assert!(
+            !object.fields.contains_key("cacheProjection"),
+            "{name} must not carry entity projection metadata"
+        );
+        if name == "SoupUpdated" {
+            assert_eq!(object.fields["item"].ty.to_string(), "GraphqlSoupEntity!");
+        }
     }
 }
 
@@ -263,6 +395,319 @@ fn property_values_are_a_typed_union_without_soup_names() {
     );
     assert!(!sdl.contains("GraphqlSoupProperty"));
     assert!(!sdl.contains("GraphqlSoupDataType"));
+}
+
+#[test]
+fn initiative_reads_and_mutations_share_the_canonical_soup_entity() {
+    let sdl = crate::build_schema().sdl();
+    let object = |name: &str| {
+        let declaration = format!("type {name}");
+        sdl.split_once(&declaration)
+            .expect("GraphQL object exists")
+            .1
+            .split_once('{')
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0
+    };
+    assert_sdl_line(
+        object("GraphqlUser"),
+        "initiative(initiativeId: ID!): GraphqlSoupInitiative!",
+    );
+    assert!(!object("SoupQueryRoot").contains("initiative"));
+    for field in [
+        "id: ID!",
+        "properties: [GraphqlProperty!]!",
+        "memberIds: [String!]!",
+        "taskIds: [ID!]!",
+        "sharePermission: InitiativeSharePermission!",
+        "taskCount: Int!",
+        "completedTaskCount: Int!",
+    ] {
+        assert_sdl_line(object("GraphqlSoupInitiative"), field);
+    }
+    assert_sdl_line(
+        &sdl,
+        "createInitiative(input: CreateInitiativeInput!): GraphqlSoupInitiative!",
+    );
+    assert_sdl_line(
+        &sdl,
+        "ensureInitiativeDescriptionSurface(initiativeId: ID!): ID!",
+    );
+    assert_sdl_line(
+        &sdl,
+        "ensureInitiativeDescriptionSurface(initiativeId: ID!): ID!",
+    );
+    assert_sdl_line(
+        &sdl,
+        "updateInitiative(initiativeId: ID!, input: UpdateInitiativeInput!): GraphqlSoupInitiative!",
+    );
+    for obsolete in [
+        "type GraphqlInitiative {",
+        "type InitiativePage {",
+        "input InitiativePageInput {",
+        "enum InitiativeSort {",
+        "type InitiativePropertySnapshot {",
+        "initiatives(input:",
+        // Tasks join a project through their Project property.
+        "type TaskInitiativeReference {",
+        "taskInitiativeReferences(",
+        "assignInitiativeTasks(",
+        "unassignInitiativeTask(",
+        "clearTaskInitiative(",
+    ] {
+        assert!(!sdl.contains(obsolete), "obsolete API remains: {obsolete}");
+    }
+    for duplicate in [
+        "name:",
+        "ownerId:",
+        "createdAt:",
+        "updatedAt:",
+        "userAccessLevel:",
+        "propertySnapshot:",
+    ] {
+        assert!(
+            !object("GraphqlSoupInitiative").contains(duplicate),
+            "duplicate initiative field remains: {duplicate}"
+        );
+    }
+}
+
+#[test]
+fn database_rows_are_an_opt_in_soup_entity_named_by_table() {
+    let sdl = crate::build_schema().sdl();
+    let block = |declaration: &str| {
+        sdl.split_once(declaration)
+            .unwrap_or_else(|| panic!("schema has no `{declaration}`"))
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0
+            .to_owned()
+    };
+    let row = block("type GraphqlSoupDatabaseRow implements GraphqlSoupEntity {");
+    for field in [
+        "id: ID!",
+        "entityType: GraphqlSoupEntityType!",
+        "tableId: ID!",
+        "databaseId: ID!",
+        "position: String!",
+        "ownerId: String!",
+        "creatorId: String",
+        "createdAt: String!",
+        "updatedAt: String!",
+        "properties: [GraphqlProperty!]!",
+    ] {
+        assert_sdl_line(&row, field);
+    }
+    assert_sdl_line(
+        &block("input GraphqlEntityFilterAst {"),
+        "databaseRowFilter: GraphqlDatabaseRowExpr",
+    );
+    let literal = block("input GraphqlDatabaseRowLiteral @oneOf {");
+    assert_sdl_line(&literal, "tableId: ID");
+    assert_sdl_line(&literal, "id: ID");
+    assert_sdl_line(&block("enum GraphqlSoupEntityType {"), "DATABASE_ROW");
+}
+
+#[test]
+fn scheduled_actions_hang_off_the_authenticated_user() {
+    use apollo_compiler::schema::ExtendedType;
+
+    let sdl = crate::build_schema().sdl();
+    assert_sdl_line(&sdl, "scheduledActions: [GraphqlScheduledAction!]!");
+    assert_sdl_line(
+        &sdl,
+        "union GraphqlScheduledActionTrigger = GraphqlScheduledActionCronTrigger | GraphqlScheduledActionEventsTrigger | GraphqlScheduledActionMultipleTrigger",
+    );
+    assert!(sdl.contains("AI routines the authenticated user can access."));
+    for value in [
+        "DOCUMENT_CREATED",
+        "DOCUMENT_UPDATED",
+        "DOCUMENT_DELETED",
+        "TASK_CREATED",
+        "TASK_STATUS_CHANGED",
+        "TASK_PRIORITY_CHANGED",
+        "TASK_PROPERTY_CHANGED",
+        "EMAIL_MESSAGE_RECEIVED",
+        "CHANNEL_CREATED",
+        "CHANNEL_MESSAGE_POSTED",
+        "CHANNEL_MENTIONED",
+        "CHANNEL_MESSAGE_PATCHED",
+        "CHANNEL_MESSAGE_ATTACHMENT_CREATED",
+    ] {
+        assert_sdl_line(&sdl, value);
+    }
+
+    let schema = apollo_compiler::Schema::parse_and_validate(sdl.as_str(), "schema.graphql")
+        .expect("generated SDL is valid");
+    let ExtendedType::Object(user) = schema.types.get("GraphqlUser").expect("user type") else {
+        panic!("GraphqlUser must be an object");
+    };
+    assert!(user.fields.contains_key("scheduledActions"));
+    assert!(
+        user.fields["scheduledActions"]
+            .description
+            .as_ref()
+            .expect("scheduledActions documentation")
+            .to_string()
+            .contains("authenticated user")
+    );
+
+    let ExtendedType::Object(root) = schema.types.get("SoupQueryRoot").expect("query root") else {
+        panic!("SoupQueryRoot must be an object");
+    };
+    assert!(!root.fields.contains_key("scheduledActions"));
+
+    let ExtendedType::Interface(soup) = schema
+        .types
+        .get("GraphqlSoupEntity")
+        .expect("soup entity interface")
+    else {
+        panic!("GraphqlSoupEntity must be an interface");
+    };
+    assert!(!soup.fields.contains_key("scheduledActions"));
+
+    let ExtendedType::Enum(soup_types) = schema
+        .types
+        .get("GraphqlSoupEntityType")
+        .expect("soup entity type enum")
+    else {
+        panic!("GraphqlSoupEntityType must be an enum");
+    };
+    assert!(!soup_types.values.contains_key("SCHEDULED_ACTION"));
+    let ExtendedType::Enum(entity_types) = schema
+        .types
+        .get("GraphqlEntityType")
+        .expect("entity type enum")
+    else {
+        panic!("GraphqlEntityType must be an enum");
+    };
+    assert!(entity_types.values.contains_key("SCHEDULED_ACTION"));
+
+    let ExtendedType::Object(action) = schema
+        .types
+        .get("GraphqlScheduledAction")
+        .expect("routine object")
+    else {
+        panic!("GraphqlScheduledAction must be an object");
+    };
+    assert_eq!(action.fields["id"].ty.to_string(), "ID!");
+    assert_eq!(
+        action
+            .fields
+            .keys()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "id",
+            "name",
+            "enabled",
+            "trigger",
+            "agentTask",
+            "claimExpiresAt",
+            "createdAt",
+            "updatedAt",
+        ]
+    );
+    for absent in [
+        "owner",
+        "kind",
+        "task",
+        "configurationRevision",
+        "eventActivatedAt",
+        "isRunning",
+        "nextRunAt",
+    ] {
+        assert!(
+            !action.fields.contains_key(absent),
+            "{absent} must stay off the routine object"
+        );
+    }
+    assert!(
+        action.fields["claimExpiresAt"]
+            .description
+            .as_ref()
+            .expect("claimExpiresAt documentation")
+            .to_string()
+            .contains("after that instant")
+    );
+
+    let ExtendedType::Object(cron) = schema
+        .types
+        .get("GraphqlScheduledActionCronTrigger")
+        .expect("cron trigger")
+    else {
+        panic!("cron trigger must be an object");
+    };
+    assert!(!cron.fields.contains_key("id"));
+    assert_eq!(cron.fields["nextRunAt"].ty.to_string(), "String");
+    assert!(
+        cron.fields["nextRunAt"]
+            .description
+            .as_ref()
+            .expect("nextRunAt documentation")
+            .to_string()
+            .contains("disabled")
+    );
+
+    let ExtendedType::Object(task) = schema
+        .types
+        .get("GraphqlScheduledActionAgentTask")
+        .expect("agent task")
+    else {
+        panic!("agent task must be an object");
+    };
+    assert_eq!(task.fields["model"].ty.to_string(), "String");
+    assert_eq!(
+        task.fields["agent"].ty.to_string(),
+        "GraphqlScheduledActionAgent"
+    );
+
+    for embedded in [
+        "GraphqlScheduledActionEventsTrigger",
+        "GraphqlScheduledActionEventFilter",
+        "GraphqlScheduledActionAgentTask",
+        "GraphqlScheduledActionAgent",
+    ] {
+        let ExtendedType::Object(value) = schema.types.get(embedded).expect(embedded) else {
+            panic!("{embedded} must be an object");
+        };
+        assert!(
+            !value.fields.contains_key("id"),
+            "{embedded} must stay embedded"
+        );
+    }
+
+    let ExtendedType::Object(agent) = schema
+        .types
+        .get("GraphqlScheduledActionAgent")
+        .expect("scheduled action agent")
+    else {
+        panic!("scheduled action agent must be an object");
+    };
+    assert_eq!(agent.fields["botId"].ty.to_string(), "ID!");
+
+    let ExtendedType::Object(filter) = schema
+        .types
+        .get("GraphqlScheduledActionEventFilter")
+        .expect("event filter")
+    else {
+        panic!("event filter must be an object");
+    };
+    assert_eq!(filter.fields["entityIds"].ty.to_string(), "[ID!]");
+    let entity_ids = filter.fields["entityIds"]
+        .description
+        .as_ref()
+        .expect("entityIds documentation")
+        .to_string();
+    assert!(entity_ids.contains("Null matches every id"), "{entity_ids}");
+    assert!(
+        entity_ids.contains("empty list matches nothing"),
+        "{entity_ids}"
+    );
 }
 
 /// The exported SDL is a frontend contract: `schema.graphql` feeds the client

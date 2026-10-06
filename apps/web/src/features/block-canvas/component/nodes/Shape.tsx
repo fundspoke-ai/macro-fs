@@ -1,6 +1,5 @@
 import { useToolManager } from '@block-canvas/signal/toolManager';
 import { useUpdateNode } from '@block-canvas/store/canvasData';
-import { useCanEdit } from '@core/signal/permissions';
 import {
   createEffect,
   createMemo,
@@ -14,6 +13,7 @@ import {
   Switch,
 } from 'solid-js';
 import { type RenderMode, RenderModes } from '../../constants';
+import { useCanvasDocument } from '../../context/canvas-document-context';
 import type { ShapeNode, ShapeType } from '../../model/CanvasModel';
 import type { Color } from '../../util/color';
 import { getBorderRadius, getTailwindColor, opacity } from '../../util/style';
@@ -34,7 +34,7 @@ function Label(props: {
   onFocus?: (value: string) => void;
   onBlur?: (value: string) => void;
 }) {
-  const canEdit = useCanEdit();
+  const canEdit = useCanvasDocument().canEdit;
   const toolManager = useToolManager();
   let labelRef!: HTMLSpanElement;
   const [hasFocus, setHasFocus] = createSignal(false);
@@ -91,13 +91,13 @@ function Label(props: {
     <div
       class="absolute top-0 left-0 size-full flex items-center justify-center overflow-clip"
       classList={{
-        'user-select-none': !hasFocus(),
+        'select-none': !hasFocus(),
         'pointer-events-auto': hasFocus(),
       }}
     >
       <span
         ref={labelRef}
-        class="text-center font-semibold word-break-break-all min-w-0 max-w-[calc(100%-2rem)]"
+        class="text-center font-semibold break-all min-w-0 max-w-[calc(100%-2rem)]"
         style={labelStyle()}
         contentEditable={canEdit()}
         on:focus={handleFocus}

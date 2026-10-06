@@ -3,6 +3,7 @@ use std::io::Write;
 use clap::Parser;
 use macro_user_id::user_id::MacroUserIdStr;
 use model::document::{DocumentMetadata, FileType};
+use model_owner::Owner;
 use tempfile::NamedTempFile;
 
 use crate::Cli;
@@ -38,8 +39,8 @@ fn parse_document_create_minimal() {
             assert_eq!(create.owner, "macro|alice@example.com");
             assert_eq!(create.file_path, "/tmp/test.pdf");
             assert_eq!(create.document_name, "My Document");
-            assert!(!create.is_public);
-            assert!(create.public_access_level.is_none());
+            assert!(create.link_share.is_none());
+            assert!(create.link_share_access_level.is_none());
             assert!(create.id.is_none());
             assert!(!create.skip_history);
         }
@@ -59,8 +60,9 @@ fn parse_document_create_full() {
         "/tmp/test.pdf",
         "--document-name",
         "My Document",
-        "--is-public",
-        "--public-access-level",
+        "--link-share",
+        "PUBLIC",
+        "--link-share-access-level",
         "view",
         "--id",
         "custom-doc-id",
@@ -76,8 +78,8 @@ fn parse_document_create_full() {
             assert_eq!(create.owner, "macro|alice@example.com");
             assert_eq!(create.file_path, "/tmp/test.pdf");
             assert_eq!(create.document_name, "My Document");
-            assert!(create.is_public);
-            assert_eq!(create.public_access_level.as_deref(), Some("view"));
+            assert_eq!(create.link_share, Some(LinkShare::Public));
+            assert_eq!(create.link_share_access_level, Some(AccessLevel::View));
             assert_eq!(create.id.as_deref(), Some("custom-doc-id"));
             assert!(create.skip_history);
         }
@@ -180,7 +182,7 @@ fn test_document_metadata() -> DocumentMetadata {
     DocumentMetadata::new_document(
         "doc-123",
         1,
-        owner,
+        Owner::User(owner),
         "My Document",
         Some(FileType::Pdf),
         "sha",
@@ -200,7 +202,7 @@ fn test_document_metadata_with_type(file_type: FileType) -> DocumentMetadata {
     DocumentMetadata::new_document(
         "doc-123",
         1,
-        owner,
+        Owner::User(owner),
         "Test Doc",
         Some(file_type),
         "sha",
@@ -245,8 +247,8 @@ async fn create_document_success() {
             owner: "macro|alice@example.com".to_string(),
             file_path: file.path().to_str().unwrap().to_string(),
             document_name: "My Document".to_string(),
-            is_public: false,
-            public_access_level: None,
+            link_share: None,
+            link_share_access_level: None,
             id: None,
             skip_history: false,
         }),
@@ -273,8 +275,8 @@ async fn create_document_db_failure_propagates() {
             owner: "macro|alice@example.com".to_string(),
             file_path: file.path().to_str().unwrap().to_string(),
             document_name: "My Document".to_string(),
-            is_public: false,
-            public_access_level: None,
+            link_share: None,
+            link_share_access_level: None,
             id: None,
             skip_history: false,
         }),
@@ -306,8 +308,8 @@ async fn create_document_s3_failure_propagates() {
             owner: "macro|alice@example.com".to_string(),
             file_path: file.path().to_str().unwrap().to_string(),
             document_name: "My Document".to_string(),
-            is_public: false,
-            public_access_level: None,
+            link_share: None,
+            link_share_access_level: None,
             id: None,
             skip_history: false,
         }),
@@ -325,17 +327,31 @@ async fn seed_creates_all_documents() {
     let doc1 = Uuid::new_v4();
     let doc2 = Uuid::new_v4();
     let json = serde_json::json!([
-        { "document_id": doc1, "document_name": "Test PDF", "file_name": "pdf.pdf", "is_public": false },
-        { "document_id": doc2, "document_name": "Test Markdown", "file_name": "md.md", "is_public": true }
+        { "document_id": doc1, "document_name": "Test PDF", "file_name": "pdf.pdf", "link_share": null, "link_share_access_level": null },
+        { "document_id": doc2, "document_name": "Test Markdown", "file_name": "md.md", "link_share": "PUBLIC", "link_share_access_level": "view" }
     ])
     .to_string();
     let file = write_temp_json(&json);
 
+    let mut create_count = 0;
     let mut mock_db = Db::default();
     mock_db
         .expect_create_document()
         .times(2)
-        .returning(|_| Ok(test_document_metadata()));
+        .returning(move |args| {
+            create_count += 1;
+            if create_count == 1 {
+                assert_eq!(args.share_permission.link_share, None);
+                assert_eq!(args.share_permission.link_share_access_level, None);
+            } else {
+                assert_eq!(args.share_permission.link_share, Some(LinkShare::Public));
+                assert_eq!(
+                    args.share_permission.link_share_access_level,
+                    Some(AccessLevel::View)
+                );
+            }
+            Ok(test_document_metadata())
+        });
 
     let mut mock_s3 = S3::default();
     mock_s3
@@ -350,6 +366,27 @@ async fn seed_creates_all_documents() {
 
     let result = seed_from_file(args, mock_ctx(mock_db, mock_s3), file.path()).await;
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn seed_rejects_legacy_public_field() {
+    let json = serde_json::json!([{
+        "document_id": Uuid::new_v4(),
+        "document_name": "Legacy Document",
+        "file_name": "pdf.pdf",
+        "is_public": true
+    }])
+    .to_string();
+    let file = write_temp_json(&json);
+
+    let args = SeedArgs {
+        user_id: "macro|alice@example.com".to_string(),
+        file_path: None,
+    };
+    let result = seed_from_file(args, mock_ctx(Db::default(), S3::default()), file.path()).await;
+
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("failed to parse json"), "{error}");
 }
 
 #[tokio::test]
@@ -376,9 +413,9 @@ async fn seed_continues_on_db_failure() {
     let doc2 = Uuid::new_v4();
     let doc3 = Uuid::new_v4();
     let json = serde_json::json!([
-        { "document_id": doc1, "document_name": "Good Doc 1", "file_name": "pdf.pdf", "is_public": false },
-        { "document_id": doc2, "document_name": "Bad Doc", "file_name": "md.md", "is_public": false },
-        { "document_id": doc3, "document_name": "Good Doc 2", "file_name": "canvas.canvas", "is_public": false }
+        { "document_id": doc1, "document_name": "Good Doc 1", "file_name": "pdf.pdf", "link_share": null, "link_share_access_level": null },
+        { "document_id": doc2, "document_name": "Bad Doc", "file_name": "md.md", "link_share": null, "link_share_access_level": null },
+        { "document_id": doc3, "document_name": "Good Doc 2", "file_name": "canvas.canvas", "link_share": null, "link_share_access_level": null }
     ])
     .to_string();
     let file = write_temp_json(&json);
@@ -417,8 +454,8 @@ async fn seed_continues_on_s3_failure() {
     let doc1 = Uuid::new_v4();
     let doc2 = Uuid::new_v4();
     let json = serde_json::json!([
-        { "document_id": doc1, "document_name": "Good Doc", "file_name": "pdf.pdf", "is_public": false },
-        { "document_id": doc2, "document_name": "S3 Fail Doc", "file_name": "md.md", "is_public": false }
+        { "document_id": doc1, "document_name": "Good Doc", "file_name": "pdf.pdf", "link_share": null, "link_share_access_level": null },
+        { "document_id": doc2, "document_name": "S3 Fail Doc", "file_name": "md.md", "link_share": null, "link_share_access_level": null }
     ])
     .to_string();
     let file = write_temp_json(&json);
@@ -458,9 +495,9 @@ async fn seed_handles_all_file_types() {
     let doc2 = Uuid::new_v4();
     let doc3 = Uuid::new_v4();
     let json = serde_json::json!([
-        { "document_id": doc1, "document_name": "PDF Doc", "file_name": "pdf.pdf", "is_public": false },
-        { "document_id": doc2, "document_name": "Markdown Doc", "file_name": "md.md", "is_public": false },
-        { "document_id": doc3, "document_name": "Canvas Doc", "file_name": "canvas.canvas", "is_public": false }
+        { "document_id": doc1, "document_name": "PDF Doc", "file_name": "pdf.pdf", "link_share": null, "link_share_access_level": null },
+        { "document_id": doc2, "document_name": "Markdown Doc", "file_name": "md.md", "link_share": null, "link_share_access_level": null },
+        { "document_id": doc3, "document_name": "Canvas Doc", "file_name": "canvas.canvas", "link_share": null, "link_share_access_level": null }
     ])
     .to_string();
     let file = write_temp_json(&json);

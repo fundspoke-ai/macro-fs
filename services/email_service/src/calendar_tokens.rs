@@ -5,8 +5,8 @@ use calendar_events::domain::{
     models::CalendarLinkTokenIdentity,
     ports::{CalendarAccessTokenProvider, CalendarTokenError},
 };
-use email::outbound::fetch_gmail_access_token;
 use email_utils::token_cache_key::TokenCacheKey;
+use google_token::fetch_gmail_access_token;
 use redis::aio::MultiplexedConnection;
 use std::sync::Arc;
 

@@ -41,10 +41,20 @@ pub struct RustService {
     /// Opt-in services (e.g. `search_processing_service`) only start with an
     /// explicit profile and are never converted to the runtime image.
     pub opt_in: bool,
-    /// Built locally with `--no-default-features` (plus any [`Self::build_features`]).
-    /// `authentication_service` drops the default `rate_limit` feature (removing
-    /// the 1-request/minute login-code throttle that makes local dev painful);
-    /// `search_processing_service` drops the default amd64-only `pdf` feature.
+    /// Built locally in its own `cargo` invocation with `--no-default-features`
+    /// (plus [`Self::local_features`]), because the feature it must drop is a
+    /// *default* one and cargo can only drop defaults per-package.
+    ///
+    /// Keep this at zero services if you possibly can. A package-scoped
+    /// invocation resolves features over a different package selection than the
+    /// unified build, which invalidates the shared dependency artifacts the
+    /// unified build just produced — measured at 230 units and ~2 minutes of
+    /// rebuild on the *next* `run_local`, forever. Prefer an additive opt-out
+    /// feature (see `authentication_service`'s `no_rate_limit`), which composes
+    /// into the one unified invocation.
+    ///
+    /// `search_processing_service` genuinely cannot: its `pdf` default feature
+    /// pulls an optional dependency, and no additive feature can un-pull one.
     pub no_default_features: bool,
 }
 
@@ -60,15 +70,19 @@ impl RustService {
         self.opt_in
     }
 
-    /// Cargo features to re-enable alongside `--no-default-features` for this
-    /// service's local build (empty = none). Only `search_processing_service`
-    /// needs this: `authentication_service` opts into local passwordless code
-    /// responses, and dropping `search_processing_service` default features
-    /// removes the amd64-only `pdf` feature, but its bin still requires
-    /// `processing`/`service`.
-    pub fn build_features(&self) -> &'static [&'static str] {
+    /// Cargo features this service's local build enables (empty = none).
+    ///
+    /// For a unified-build service these are passed package-qualified
+    /// (`<package>/<feature>`) so they compose with every other binary in the
+    /// same invocation. For a [`Self::no_default_features`] service they are
+    /// the features re-enabled alongside the dropped defaults.
+    ///
+    /// `authentication_service` opts into local passwordless code responses and
+    /// out of the login-code throttles; `search_processing_service` loses
+    /// `processing`/`service` with its defaults and its bin requires them.
+    pub fn local_features(&self) -> &'static [&'static str] {
         match self.cargo_bin {
-            "authentication_service" => &["return_passwordless_code"],
+            "authentication_service" => &["return_passwordless_code", "no_rate_limit"],
             "search_processing_service" => &["processing", "service"],
             _ => &[],
         }
@@ -78,6 +92,29 @@ impl RustService {
 /// The full service inventory of the local service binaries.
 pub const RUST_SERVICES: &[RustService] = &[
     RustService {
+        compose_name: "slack_import_worker",
+        cargo_bin: "slack_import_worker",
+        package: "slack_import_worker",
+        host_port: None,
+        path_prefix: None,
+        is_websocket: false,
+        // Explicit local Compose profile only; never consume shared-dev queues.
+        modes: &[],
+        opt_in: true,
+        no_default_features: false,
+    },
+    RustService {
+        compose_name: "preview_gateway",
+        cargo_bin: "preview_gateway",
+        package: "preview_gateway",
+        host_port: Some(Port::PreviewControl),
+        path_prefix: Some("/preview"),
+        is_websocket: false,
+        modes: &[Mode::Local],
+        opt_in: false,
+        no_default_features: false,
+    },
+    RustService {
         compose_name: "authentication-service",
         cargo_bin: "authentication_service",
         package: "authentication_service",
@@ -86,7 +123,9 @@ pub const RUST_SERVICES: &[RustService] = &[
         is_websocket: false,
         modes: &[Mode::Local, Mode::Dev],
         opt_in: false,
-        no_default_features: true,
+        // Joins the unified invocation: the local behavior it needs
+        // (`no_rate_limit`, `return_passwordless_code`) is additive.
+        no_default_features: false,
     },
     RustService {
         compose_name: "sync_router",
@@ -195,6 +234,21 @@ pub const RUST_SERVICES: &[RustService] = &[
         no_default_features: false,
     },
     RustService {
+        compose_name: "calendar_service",
+        cargo_bin: "calendar_service",
+        package: "calendar_service",
+        host_port: Some(Port::Calendar),
+        path_prefix: Some("/calendar"),
+        is_websocket: false,
+        // Local-only: the backfill SQS workers spawn unconditionally (not gated
+        // on CALENDAR_SYNC_ENABLED), so running the binary under `run-dev`
+        // against shared-dev resources would race the deployed calendar-service
+        // for its backfill queue — the same reason scheduled_action is local-only.
+        modes: &[Mode::Local],
+        opt_in: false,
+        no_default_features: false,
+    },
+    RustService {
         compose_name: "notification_service",
         cargo_bin: "notification_service",
         package: "notification_service",
@@ -202,6 +256,20 @@ pub const RUST_SERVICES: &[RustService] = &[
         path_prefix: Some("/notification"),
         is_websocket: false,
         modes: &[Mode::Local, Mode::Dev],
+        opt_in: false,
+        no_default_features: false,
+    },
+    RustService {
+        compose_name: "scheduled_action_service",
+        cargo_bin: "service",
+        package: "scheduled_action",
+        host_port: Some(Port::ScheduledAction),
+        path_prefix: Some("/scheduled-action"),
+        is_websocket: false,
+        // Local-only: the binary always boots `PgPollingDispatcher`. Running it
+        // under `run-dev` against the shared-dev MacroDB would race the deployed
+        // agent-schedule-dev service for due schedules.
+        modes: &[Mode::Local],
         opt_in: false,
         no_default_features: false,
     },
@@ -254,6 +322,35 @@ pub const RUST_SERVICES: &[RustService] = &[
         modes: &[Mode::Local],
         opt_in: false,
         no_default_features: true,
+    },
+    RustService {
+        compose_name: "agent_harness_service",
+        cargo_bin: "agent_harness_service",
+        package: "agent_harness_service",
+        host_port: Some(Port::AgentHarness),
+        path_prefix: Some("/agent-harness"),
+        is_websocket: false,
+        // Local stacks default to DEV_DANGEROUS_LOCAL_CONTAINERS, so managed
+        // sandboxes run on the host Docker daemon. Daytona is opt-in via
+        // DEV_DANGEROUS_LOCAL_CONTAINERS=false DAYTONA_API_KEY=... just run_local.
+        modes: &[Mode::Local],
+        opt_in: false,
+        no_default_features: false,
+    },
+    RustService {
+        compose_name: "mcp_service",
+        cargo_bin: "mcp_service",
+        package: "mcp_service",
+        // No host port and no proxy route: its one local client is the agent
+        // egress proxy, which dials it across the compose network as
+        // `mcp-service`. (Interactive MCP clients like claude.ai only exist
+        // against deployed environments.)
+        host_port: None,
+        path_prefix: None,
+        is_websocket: false,
+        modes: &[Mode::Local],
+        opt_in: false,
+        no_default_features: false,
     },
 ];
 

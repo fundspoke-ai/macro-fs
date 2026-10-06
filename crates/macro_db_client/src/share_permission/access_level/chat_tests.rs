@@ -1,5 +1,64 @@
 use super::*;
 
+async fn configure_team_link_access(pool: &sqlx::Pool<sqlx::Postgres>) -> anyhow::Result<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO team (id, name, owner_id)
+        VALUES
+            ('dddddddd-dddd-dddd-dddd-000000000001', 'Chat owner team', 'user-1'),
+            ('dddddddd-dddd-dddd-dddd-000000000002', 'Other team', 'user-2')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query!(
+        r#"
+        INSERT INTO team_user (user_id, team_id, team_role)
+        VALUES
+            ('user-1', 'dddddddd-dddd-dddd-dddd-000000000001', 'owner'),
+            ('user-3', 'dddddddd-dddd-dddd-dddd-000000000001', 'member'),
+            ('user-2', 'dddddddd-dddd-dddd-dddd-000000000002', 'owner'),
+            ('user-public-access-only', 'dddddddd-dddd-dddd-dddd-000000000002', 'member')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query!(
+        r#"
+        UPDATE "SharePermission"
+        SET "linkShare" = 'TEAM', "linkShareAccessLevel" = 'comment'
+        WHERE id = 'sp-public-edit'
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query!(
+        r#"
+        INSERT INTO entity_access (
+            entity_id,
+            entity_type,
+            source_id,
+            source_type,
+            access_level
+        )
+        VALUES (
+            'cccccccc-cccc-cccc-cccc-000000000001',
+            'chat',
+            'user-3',
+            'user',
+            'view'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 #[sqlx::test(fixtures(path = "../../../fixtures", scripts("highest_access_level_for_chat")))]
 async fn test_batch_public_access_user(pool: sqlx::Pool<sqlx::Postgres>) -> anyhow::Result<()> {
     // SCENARIO: Get access for 'user-public-access-only' on multiple chats
@@ -43,6 +102,75 @@ async fn test_batch_user_with_mixed_access(pool: sqlx::Pool<sqlx::Postgres>) -> 
         "Expected 'edit' access from higher public permissions"
     );
 
+    Ok(())
+}
+
+#[sqlx::test(fixtures(path = "../../../fixtures", scripts("highest_access_level_for_chat")))]
+async fn test_batch_team_link_access_for_same_team_user(
+    pool: sqlx::Pool<sqlx::Postgres>,
+) -> anyhow::Result<()> {
+    configure_team_link_access(&pool).await?;
+    let chat_id = "cccccccc-cccc-cccc-cccc-000000000001".to_string();
+
+    let access_levels =
+        get_highest_access_level_for_chats(&pool, std::slice::from_ref(&chat_id), "user-3").await?;
+
+    assert_eq!(
+        access_levels.get(&chat_id),
+        Some(&Some(AccessLevel::Comment)),
+        "expected TEAM link access to exceed the user's explicit view access"
+    );
+
+    Ok(())
+}
+
+#[sqlx::test(fixtures(path = "../../../fixtures", scripts("highest_access_level_for_chat")))]
+async fn test_batch_team_link_denies_other_team_user(
+    pool: sqlx::Pool<sqlx::Postgres>,
+) -> anyhow::Result<()> {
+    configure_team_link_access(&pool).await?;
+    let chat_id = "cccccccc-cccc-cccc-cccc-000000000001".to_string();
+
+    let access_levels = get_highest_access_level_for_chats(
+        &pool,
+        std::slice::from_ref(&chat_id),
+        "user-public-access-only",
+    )
+    .await?;
+
+    assert_eq!(
+        access_levels.get(&chat_id),
+        Some(&None),
+        "expected no TEAM link access for a user on another team"
+    );
+
+    Ok(())
+}
+
+#[sqlx::test(fixtures(
+    path = "../../../../entity_access/fixtures",
+    scripts("typed_owner_team")
+))]
+async fn typed_owner_team_links_match_batch_access(pool: sqlx::PgPool) -> anyhow::Result<()> {
+    let ids: Vec<_> = (31..=37)
+        .map(|suffix| format!("90000000-0000-0000-0000-{suffix:012}"))
+        .collect();
+    for (user, member) in [
+        ("macro|typed-owner@example.com", true),
+        ("macro|typed-other@example.com", false),
+        ("macro|typed-teamless@example.com", false),
+    ] {
+        let levels = get_highest_access_level_for_chats(&pool, &ids, user).await?;
+        for (id, has_team) in ids
+            .iter()
+            .zip([true, false, true, true, true, false, false])
+        {
+            assert_eq!(
+                levels.get(id),
+                Some(&(member && has_team).then_some(AccessLevel::Comment))
+            );
+        }
+    }
     Ok(())
 }
 

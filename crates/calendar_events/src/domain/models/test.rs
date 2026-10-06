@@ -47,6 +47,7 @@ fn sync_plan_extends_only_the_uncovered_tail() {
         materialized_range: Some(materialized.clone()),
         synced_at: None,
         watch_expires_at: None,
+        watch_unsupported_at: None,
     };
 
     assert_eq!(
@@ -78,6 +79,7 @@ fn sync_plan_extends_only_the_uncovered_tail() {
         materialized_range: Some(materialized.clone()),
         synced_at: None,
         watch_expires_at: None,
+        watch_unsupported_at: None,
     };
     assert_eq!(
         uninitialized.sync_plan(&OccurrenceRange::historical_sync(now)),
@@ -90,11 +92,50 @@ fn sync_plan_extends_only_the_uncovered_tail() {
         materialized_range: None,
         synced_at: None,
         watch_expires_at: None,
+        watch_unsupported_at: None,
     };
     assert_eq!(
         unmaterialized.sync_plan(&OccurrenceRange::historical_sync(now)),
         GoogleSyncPlan::FullSnapshot
     );
+}
+
+#[test]
+fn watch_renewal_skips_calendars_that_recently_refused_push() {
+    let now = Utc.with_ymd_and_hms(2026, 9, 23, 12, 0, 0).unwrap();
+    let calendar = StoredGoogleCalendar {
+        id: Uuid::now_v7(),
+        sync_token: None,
+        materialized_range: None,
+        synced_at: None,
+        watch_expires_at: None,
+        watch_unsupported_at: None,
+    };
+    assert!(calendar.needs_watch_renewal(now));
+
+    let healthy = StoredGoogleCalendar {
+        watch_expires_at: Some(now + chrono::Duration::days(3)),
+        ..calendar.clone()
+    };
+    assert!(!healthy.needs_watch_renewal(now));
+
+    let expiring = StoredGoogleCalendar {
+        watch_expires_at: Some(now + chrono::Duration::hours(1)),
+        ..calendar.clone()
+    };
+    assert!(expiring.needs_watch_renewal(now));
+
+    let refused = StoredGoogleCalendar {
+        watch_unsupported_at: Some(now - chrono::Duration::days(1)),
+        ..calendar.clone()
+    };
+    assert!(!refused.needs_watch_renewal(now));
+
+    let refusal_aged_out = StoredGoogleCalendar {
+        watch_unsupported_at: Some(now - chrono::Duration::days(8)),
+        ..calendar
+    };
+    assert!(refusal_aged_out.needs_watch_renewal(now));
 }
 
 #[test]
@@ -148,12 +189,14 @@ fn default_reminders_stay_out_of_serialized_projections() {
         owner_id: "macro|projection@example.com".to_string(),
         ical_uid: "projection@example.com".to_string(),
         calendar_id: None,
+        sources: Vec::new(),
         title: "Projection".to_string(),
         description: None,
         location: None,
         status: EventStatus::Confirmed,
         visibility: EventVisibility::Default,
         transparency: EventTransparency::Opaque,
+        event_type: EventType::Default,
         time: EventTime::Timed {
             starts_at,
             ends_at: starts_at + chrono::Duration::hours(1),
@@ -162,6 +205,8 @@ fn default_reminders_stay_out_of_serialized_projections() {
         recurrence_lines: Vec::new(),
         organizer_email: None,
         organizer_name: None,
+        creator_email: None,
+        creator_name: None,
         conference_url: None,
         conference_provider: None,
         sequence: 0,
@@ -174,11 +219,24 @@ fn default_reminders_stay_out_of_serialized_projections() {
 
     // Projections stored before reminders were modeled have no `reminders`
     // key. Serializing the default as nothing keeps them comparing equal to
-    // fresh normalizations, so full snapshots stay no-ops.
+    // fresh normalizations, so full snapshots stay no-ops. The same holds
+    // for creator fields and the event type added later.
     let serialized = serde_json::to_value(&event).unwrap();
     assert!(serialized.get("reminders").is_none());
+    assert!(serialized.get("creatorEmail").is_none());
+    assert!(serialized.get("creatorName").is_none());
+    assert!(serialized.get("eventType").is_none());
+    assert!(serialized.get("sources").is_none());
     let legacy: CalendarEvent = serde_json::from_value(serialized).unwrap();
     assert_eq!(legacy.reminders, EventReminders::default());
+    assert_eq!(legacy.event_type, EventType::Default);
+
+    event.event_type = EventType::WorkingLocation;
+    let serialized = serde_json::to_value(&event).unwrap();
+    assert_eq!(serialized["eventType"], "working_location");
+    let status_event: CalendarEvent = serde_json::from_value(serialized).unwrap();
+    assert_eq!(status_event.event_type, EventType::WorkingLocation);
+    event.event_type = EventType::Default;
 
     event.reminders = EventReminders {
         use_default: false,

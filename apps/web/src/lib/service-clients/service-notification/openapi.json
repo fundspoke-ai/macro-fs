@@ -121,7 +121,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/EntityType"
             }
           },
           {
@@ -130,6 +130,16 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "snoozed_until",
+            "in": "query",
+            "description": "A future resume time. Omit to mute indefinitely.",
+            "required": false,
+            "schema": {
+              "type": ["string", "null"],
+              "format": "date-time"
             }
           }
         ],
@@ -140,6 +150,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EmptyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -176,7 +196,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/EntityType"
             }
           },
           {
@@ -306,6 +326,15 @@
         "operationId": "list_typed_notifications",
         "parameters": [
           {
+            "name": "states",
+            "in": "query",
+            "description": "Comma-separated exact states: unseen,seen,done. Omitted defaults to unseen,seen; empty includes all states.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Size limit per page.",
@@ -377,6 +406,15 @@
         "description": "Rows that fail to deserialize are dropped with a warning log.",
         "operationId": "bulk_get_typed_notifications_by_event_item_ids",
         "parameters": [
+          {
+            "name": "states",
+            "in": "query",
+            "description": "Comma-separated exact states: unseen,seen,done. Omitted defaults to unseen,seen; empty includes all states.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "limit",
             "in": "query",
@@ -458,6 +496,15 @@
         "summary": "Typed wrapper for getting notifications by a single event item ID.",
         "operationId": "get_typed_notifications_by_event_item_id",
         "parameters": [
+          {
+            "name": "states",
+            "in": "query",
+            "description": "Comma-separated exact states: unseen,seen,done. Omitted defaults to unseen,seen; empty includes all states.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "event_item_id",
             "in": "path",
@@ -1004,6 +1051,150 @@
   },
   "components": {
     "schemas": {
+      "AgentSessionMentionedMetadata": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AgentSessionNotificationRef"
+          },
+          {
+            "type": "object",
+            "required": ["actionId"],
+            "properties": {
+              "actionId": {
+                "type": "string",
+                "format": "uuid",
+                "description": "The action carrying the prompt."
+              },
+              "mentionedBy": {
+                "type": ["string", "null"],
+                "description": "Who wrote the prompt, absent when a bot acted on nobody's behalf."
+              }
+            }
+          }
+        ],
+        "description": "Someone named the recipient in a prompt to an agent session."
+      },
+      "AgentSessionNotificationRef": {
+        "type": "object",
+        "description": "Flattened into each agent-session kind so the wire keeps these keys at the\ntop level of the metadata, the way [`CommonChannelMetadata`] does.",
+        "required": ["sessionId", "sessionName", "botId", "botName"],
+        "properties": {
+          "announcementMessageId": {
+            "type": ["string", "null"],
+            "format": "uuid",
+            "description": "The magic-chip message for the turn in question, when one was posted."
+          },
+          "botId": {
+            "type": "string",
+            "description": "The bot the session runs for. A string on the wire: system bots have\nfixed ids like `00000000-0000-0000-0000-00000000a2a2`, which are not\nRFC 4122 uuids and fail a `format: uuid` check on the client."
+          },
+          "botName": {
+            "type": "string",
+            "description": "The bot's display name; agent notifications have no user sender, so\nthis is who they read as being from."
+          },
+          "channelId": {
+            "type": ["string", "null"],
+            "format": "uuid",
+            "description": "The channel the session was opened from, when it was opened from a\nchannel thread."
+          },
+          "parent": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AgentSessionOriginParent",
+                "description": "The channel or document the session was opened from, when it was."
+              }
+            ]
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The session; what a click opens."
+          },
+          "sessionName": {
+            "type": "string",
+            "description": "The session's name at the time of the event."
+          },
+          "threadId": {
+            "type": ["string", "null"],
+            "format": "uuid",
+            "description": "The thread the session was opened from, when it was."
+          }
+        }
+      },
+      "AgentSessionOriginParent": {
+        "type": "object",
+        "description": "The session an agent-session notification is about, and where its magic\nchip lives when it was opened from a thread.\n\nThe conversation an agent session was opened from: a channel, document,\nor initiative. Spelled like the message API's parent for client routing.",
+        "required": ["type", "id"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The parent entity id."
+          },
+          "type": {
+            "type": "string",
+            "description": "`channel`, `document`, or `initiative`."
+          }
+        }
+      },
+      "AgentSessionSettledMetadata": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AgentSessionNotificationRef"
+          },
+          {
+            "type": "object",
+            "required": ["turn", "stopReason"],
+            "properties": {
+              "actor": {
+                "type": ["string", "null"],
+                "description": "Who prompted the turn, absent when a bot acted on nobody's behalf."
+              },
+              "excerpt": {
+                "type": ["string", "null"],
+                "description": "The agent's last prose in the turn, whole; `None` when it wrote none."
+              },
+              "stopReason": {
+                "type": "string",
+                "description": "The ACP stop reason, or `error`."
+              },
+              "turn": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The turn that ended.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "An agent finished a turn with nothing queued behind it."
+      },
+      "AgentSessionWaitingForInputMetadata": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AgentSessionNotificationRef"
+          },
+          {
+            "type": "object",
+            "required": ["turn", "question"],
+            "properties": {
+              "question": {
+                "type": "string",
+                "description": "The question, as the agent phrased it."
+              },
+              "turn": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The turn asking.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "An agent is blocked on a question only the session's owner can answer."
+      },
       "AiResponseMetadata": {
         "type": "object",
         "required": ["summary", "messageId"],
@@ -1029,7 +1220,7 @@
               "id",
               "notification_event_type",
               "sent",
-              "done",
+              "state",
               "created_at",
               "updated_at",
               "notification_metadata"
@@ -1044,10 +1235,6 @@
                 "type": ["string", "null"],
                 "format": "date-time",
                 "description": "When the notification was deleted."
-              },
-              "done": {
-                "type": "boolean",
-                "description": "Whether the notification is marked as done."
               },
               "id": {
                 "type": "string",
@@ -1073,6 +1260,10 @@
               "sent": {
                 "type": "boolean",
                 "description": "Whether the notification has been sent."
+              },
+              "state": {
+                "$ref": "#/components/schemas/NotificationState",
+                "description": "The authoritative notification lifecycle state."
               },
               "updated_at": {
                 "type": "string",
@@ -1216,6 +1407,40 @@
           }
         ]
       },
+      "ChannelMessageReactionMetadata": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommonChannelMetadata"
+          },
+          {
+            "type": "object",
+            "required": ["messageId", "messageContent", "emoji"],
+            "properties": {
+              "emoji": {
+                "type": "string",
+                "description": "The emoji added by the reactor."
+              },
+              "messageContent": {
+                "type": "string",
+                "description": "The reacted-to message content."
+              },
+              "messageId": {
+                "type": "string",
+                "description": "The reacted-to message id."
+              },
+              "senderProfilePictureUrl": {
+                "type": ["string", "null"],
+                "description": "Optional reactor profile picture URL."
+              },
+              "threadId": {
+                "type": ["string", "null"],
+                "description": "The thread root id when the reacted-to message is a reply."
+              }
+            }
+          }
+        ],
+        "description": "Metadata for a reaction added to one of the recipient's channel messages."
+      },
       "ChannelMessageSendMetadata": {
         "allOf": [
           {
@@ -1292,14 +1517,28 @@
         "type": "string",
         "enum": ["public", "private", "directMessage", "team"]
       },
+      "CommentRef": {
+        "oneOf": [
+          {
+            "type": "integer",
+            "format": "int64",
+            "description": "Legacy `Comment.id` or `Thread.id`."
+          },
+          {
+            "type": "string",
+            "format": "uuid",
+            "description": "Message or root id in the shared message store."
+          }
+        ],
+        "description": "Identity of a document comment or its thread. Comments written before the\nshared message store carry the legacy numeric ids; comments in the shared\nstore carry the message and root UUIDs."
+      },
       "CommentedOnDocumentMetadata": {
         "type": "object",
         "description": "Notification sent when someone comments on a document the user owns.",
         "required": ["documentName", "owner", "commentId", "threadId", "text"],
         "properties": {
           "commentId": {
-            "type": "integer",
-            "format": "int64",
+            "$ref": "#/components/schemas/CommentRef",
             "description": "the comment id"
           },
           "documentName": {
@@ -1313,6 +1552,10 @@
           "owner": {
             "type": "string",
             "description": "The owner of the document."
+          },
+          "senderDisplayName": {
+            "type": ["string", "null"],
+            "description": "Public bot name when the author is an agent rather than a Macro user."
           },
           "senderProfilePictureUrl": {
             "type": ["string", "null"]
@@ -1333,8 +1576,7 @@
             "description": "the text of the comment"
           },
           "threadId": {
-            "type": "integer",
-            "format": "int64",
+            "$ref": "#/components/schemas/CommentRef",
             "description": "the thread id"
           }
         }
@@ -1380,6 +1622,48 @@
             }
           }
         ]
+      },
+      "CrmDiscussionMetadata": {
+        "type": "object",
+        "description": "CRM discussion metadata. The notification entity identifies the company or\ncontact; message and thread UUIDs select the discussion inside it.",
+        "required": ["recordName", "reason", "messageId", "threadId", "text"],
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Canonical shared message UUID."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/CrmDiscussionReason",
+            "description": "Semantic reason selected by the message delivery domain."
+          },
+          "recordName": {
+            "type": "string",
+            "description": "Company or contact display name."
+          },
+          "senderDisplayName": {
+            "type": ["string", "null"],
+            "description": "Public display name for a bot author."
+          },
+          "senderProfilePictureUrl": {
+            "type": ["string", "null"],
+            "description": "Optional avatar for push notification attachments."
+          },
+          "text": {
+            "type": "string",
+            "description": "Posted Markdown content."
+          },
+          "threadId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Canonical discussion root UUID."
+          }
+        }
+      },
+      "CrmDiscussionReason": {
+        "type": "string",
+        "description": "Why a CRM discussion notification was delivered.",
+        "enum": ["mention", "reply", "owner"]
       },
       "DeviceRequest": {
         "type": "object",
@@ -1475,7 +1759,12 @@
           "crm_company",
           "crm_contact",
           "reminder",
-          "skill"
+          "skill",
+          "agent_session",
+          "scheduled_action",
+          "initiative",
+          "database",
+          "database_row"
         ]
       },
       "ErrorResponse": {
@@ -1847,6 +2136,59 @@
           }
         }
       },
+      "InitiativeDiscussionMetadata": {
+        "type": "object",
+        "description": "Project discussion metadata. The notification entity identifies the initiative;\nmessage and thread UUIDs select the discussion inside that project.",
+        "required": [
+          "projectName",
+          "owner",
+          "reason",
+          "messageId",
+          "threadId",
+          "text"
+        ],
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Canonical shared message UUID."
+          },
+          "owner": {
+            "type": "string",
+            "description": "Authenticated project owner."
+          },
+          "projectName": {
+            "type": "string",
+            "description": "Name displayed in the project header."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/InitiativeDiscussionReason",
+            "description": "Semantic reason selected by the message delivery domain."
+          },
+          "senderDisplayName": {
+            "type": ["string", "null"],
+            "description": "Public display name for a bot author."
+          },
+          "senderProfilePictureUrl": {
+            "type": ["string", "null"],
+            "description": "Optional avatar for push notification attachments."
+          },
+          "text": {
+            "type": "string",
+            "description": "Posted Markdown content."
+          },
+          "threadId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Canonical discussion root UUID."
+          }
+        }
+      },
+      "InitiativeDiscussionReason": {
+        "type": "string",
+        "description": "Why a project discussion notification was delivered.",
+        "enum": ["mention", "reply", "assignee", "owner"]
+      },
       "InviteToTeamMetadata": {
         "type": "object",
         "description": "Metadata for when a user is invited to a team.",
@@ -1929,8 +2271,7 @@
         ],
         "properties": {
           "commentId": {
-            "type": "integer",
-            "format": "int64",
+            "$ref": "#/components/schemas/CommentRef",
             "description": "the comment id"
           },
           "documentName": {
@@ -1948,6 +2289,10 @@
           "owner": {
             "type": "string",
             "description": "The owner of the document."
+          },
+          "senderDisplayName": {
+            "type": ["string", "null"],
+            "description": "Public bot name when the author is an agent rather than a Macro user."
           },
           "senderProfilePictureUrl": {
             "type": ["string", "null"]
@@ -1968,8 +2313,7 @@
             "description": "the text of the comment"
           },
           "threadId": {
-            "type": "integer",
-            "format": "int64",
+            "$ref": "#/components/schemas/CommentRef",
             "description": "the thread id"
           }
         }
@@ -2069,6 +2413,36 @@
               "tag": {
                 "type": "string",
                 "enum": ["commented_on_document"]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Someone commented, replied, or mentioned the recipient on a project.",
+            "required": ["content", "tag"],
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/InitiativeDiscussionMetadata",
+                "description": "Someone commented, replied, or mentioned the recipient on a project."
+              },
+              "tag": {
+                "type": "string",
+                "enum": ["initiative_discussion"]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Someone commented, replied, or mentioned the recipient on a CRM company or contact.",
+            "required": ["content", "tag"],
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/CrmDiscussionMetadata",
+                "description": "Someone commented, replied, or mentioned the recipient on a CRM company or contact."
+              },
+              "tag": {
+                "type": "string",
+                "enum": ["crm_discussion"]
               }
             }
           },
@@ -2326,6 +2700,66 @@
                 "enum": ["github_pr_review"]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "An agent finished a turn with nothing queued behind it.",
+            "required": ["content", "tag"],
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/AgentSessionSettledMetadata",
+                "description": "An agent finished a turn with nothing queued behind it."
+              },
+              "tag": {
+                "type": "string",
+                "enum": ["agent_session_settled"]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An agent is blocked on a question for the session's owner.",
+            "required": ["content", "tag"],
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/AgentSessionWaitingForInputMetadata",
+                "description": "An agent is blocked on a question for the session's owner."
+              },
+              "tag": {
+                "type": "string",
+                "enum": ["agent_session_waiting_for_input"]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The user was named in a prompt to an agent session.",
+            "required": ["content", "tag"],
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/AgentSessionMentionedMetadata",
+                "description": "The user was named in a prompt to an agent session."
+              },
+              "tag": {
+                "type": "string",
+                "enum": ["agent_session_mentioned"]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Someone reacted to one of the user's channel messages.",
+            "required": ["content", "tag"],
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/ChannelMessageReactionMetadata",
+                "description": "Someone reacted to one of the user's channel messages."
+              },
+              "tag": {
+                "type": "string",
+                "enum": ["channel_message_reaction"]
+              }
+            }
           }
         ],
         "description": "Mirrors [`model_notifications::NotificationEvent`] but uses `tag` / `content`\nas the serde adjacently-tagged field names so it can be deserialized from the\nshape produced by [`UserNotificationRow::into_tagged`] +\n[`UserNotificationRow::into_json`].\n\nOnly includes variants whose metadata types implement the `Notification` trait."
@@ -2376,6 +2810,16 @@
                 "enum": ["skill"]
               }
             }
+          },
+          {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["initiative_description"]
+              }
+            }
           }
         ],
         "description": "The sub type of a document in a notification.\nSerializes as `{ \"type\": \"task\" }` matching the storage service pattern."
@@ -2383,6 +2827,11 @@
       "NotificationServiceApiVersion": {
         "type": "string",
         "enum": ["v1"]
+      },
+      "NotificationState": {
+        "type": "string",
+        "description": "The mutually exclusive lifecycle states of a user's notification.",
+        "enum": ["unseen", "seen", "done"]
       },
       "NotificationTypeName": {
         "type": "string",
@@ -2415,7 +2864,7 @@
               "notification_id",
               "notification_event_type",
               "sent",
-              "done",
+              "state",
               "created_at",
               "updated_at",
               "notification_metadata"
@@ -2430,10 +2879,6 @@
                 "type": ["string", "null"],
                 "format": "date-time",
                 "description": "When the notification was deleted."
-              },
-              "done": {
-                "type": "boolean",
-                "description": "Whether the notification is marked as done."
               },
               "notification_event_type": {
                 "type": "string",
@@ -2470,6 +2915,10 @@
                 "type": "boolean",
                 "description": "Whether the notification has been sent."
               },
+              "state": {
+                "$ref": "#/components/schemas/NotificationState",
+                "description": "The authoritative lifecycle state, independent of viewing timestamps."
+              },
               "updated_at": {
                 "type": "string",
                 "format": "date-time",
@@ -2498,6 +2947,11 @@
             "type": "string",
             "format": "uuid",
             "description": "The reminder that fired."
+          },
+          "scheduledFor": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "Which firing this is — the occurrence the reminder came due for.\n\nWhat distinguishes two firings of the same recurring reminder, which are\notherwise identical: same id, same description. The collapse key is\nbuilt from it, so without it Tuesday's alert would replace Monday's\nunread one on the lock screen.\n\nOptional because notifications written before recurring dispatch existed\nhave no such field, and they still have to read back."
           }
         }
       },
@@ -2507,8 +2961,7 @@
         "required": ["documentName", "owner", "commentId", "threadId", "text"],
         "properties": {
           "commentId": {
-            "type": "integer",
-            "format": "int64",
+            "$ref": "#/components/schemas/CommentRef",
             "description": "the comment id"
           },
           "documentName": {
@@ -2522,6 +2975,10 @@
           "owner": {
             "type": "string",
             "description": "The owner of the document."
+          },
+          "senderDisplayName": {
+            "type": ["string", "null"],
+            "description": "Public bot name when the author is an agent rather than a Macro user."
           },
           "senderProfilePictureUrl": {
             "type": ["string", "null"]
@@ -2542,8 +2999,7 @@
             "description": "the text of the comment"
           },
           "threadId": {
-            "type": "integer",
-            "format": "int64",
+            "$ref": "#/components/schemas/CommentRef",
             "description": "the thread id"
           }
         }
@@ -2589,7 +3045,7 @@
             "type": "string"
           },
           "item_type": {
-            "type": "string"
+            "$ref": "#/components/schemas/EntityType"
           }
         }
       },
@@ -2604,6 +3060,11 @@
           "item_type": {
             "type": "string",
             "description": "The item type"
+          },
+          "snoozed_until": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "None for permanent mutes; notifications resume automatically at this deadline."
           }
         }
       }

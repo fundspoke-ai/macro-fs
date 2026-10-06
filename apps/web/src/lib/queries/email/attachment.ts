@@ -1,5 +1,9 @@
 import { toast } from '@core/component/Toast/Toast';
-import { contentHash } from '@core/util/hash';
+import {
+  nativeUploadChecksum,
+  resolveUploadSource,
+  uploadNativeStagedFileToPresignedUrl,
+} from '@core/mobile/nativeStagedUpload';
 import { throwOnErr } from '@core/util/result';
 import { type MutationCallbacks, withCallbacks } from '@queries/utils';
 import { emailClient } from '@service-email/client';
@@ -11,10 +15,20 @@ type UploadDraftAttachmentsParams = {
   attachments: File[];
   /** Target inbox for a non-primary inbox; sent as the X-Email-Link-Id header. */
   linkId?: string;
-};
-
-type UploadDraftAttachmentsReturn = {
-  attachments: { file: File; attachmentID: string }[];
+  /**
+   * Called as soon as the attachment record exists, before the content upload.
+   * Callers must record the id here rather than after the mutation settles --
+   * the content upload can take a long time, and a debounced draft save that
+   * still sees the file without an id would add it to the draft a second time.
+   */
+  onAttachmentAdded?: (file: File, attachmentID: string) => void;
+  /**
+   * Called when the content upload fails, once its attachment record has been
+   * confirmed removed from the draft, so the file becomes eligible for a
+   * retry. Not called when the removal itself fails -- retrying a file whose
+   * record survived would duplicate it on the draft.
+   */
+  onAttachmentUploadFailed?: (file: File) => void;
 };
 
 class UploadDraftAttachmentError extends Error {
@@ -28,19 +42,12 @@ class UploadDraftAttachmentError extends Error {
 }
 
 export const useUploadDraftAttachmentsMutation = (
-  callbacks?: MutationCallbacks<
-    UploadDraftAttachmentsReturn,
-    Error,
-    UploadDraftAttachmentsParams
-  >
+  callbacks?: MutationCallbacks<void, Error, UploadDraftAttachmentsParams>
 ) => {
   return useMutation(() => ({
     mutationFn: async (params: UploadDraftAttachmentsParams) => {
-      const uploadedAttachments = [];
-
       for (const attachment of params.attachments) {
-        const arrayBuffer = await attachment.arrayBuffer();
-        const sha = await contentHash(arrayBuffer);
+        const source = await resolveUploadSource(attachment);
 
         const result = await throwOnErr(
           async () =>
@@ -49,60 +56,76 @@ export const useUploadDraftAttachmentsMutation = (
                 draftID: params.draftID,
                 attachment: {
                   file_name: attachment.name,
-                  size: attachment.size,
-                  sha,
+                  size: source.size,
+                  sha: source.sha,
                 },
               },
               params.linkId
             )
         );
 
-        uploadedAttachments.push({
-          file: attachment,
+        params.onAttachmentAdded?.(attachment, result.attachment_id);
+
+        // Any content-upload failure must become an UploadDraftAttachmentError
+        // so onError removes the record and clears the id -- a plain throw from
+        // the fetch (network drop, abort) would otherwise leave the id in
+        // place and the broken record would never be retried.
+        const context = {
           attachmentID: result.attachment_id,
-        });
-
-        const uploadedResponse = await uploadToPresignedUrl({
-          presignedUrl: result.upload_url,
-          sha,
-          buffer: arrayBuffer,
-          type: result.content_type,
-        });
-
-        if (uploadedResponse.isErr()) {
-          const uploadError = uploadedResponse.error[0] ?? {
-            code: 'SERVER_ERROR',
-            message: 'Upload failed',
-          };
-          throw new UploadDraftAttachmentError(
-            uploadError.message,
-            { cause: uploadError.code },
-            {
-              attachmentID: result.attachment_id,
-              file: attachment,
+          file: attachment,
+        };
+        try {
+          if (source.kind === 'staged') {
+            await uploadNativeStagedFileToPresignedUrl(
+              { ...source.staged, mimeType: result.content_type },
+              result.upload_url,
+              nativeUploadChecksum(source.sha)
+            );
+          } else {
+            const uploaded = await uploadToPresignedUrl({
+              presignedUrl: result.upload_url,
+              sha: source.sha,
+              buffer: source.buffer,
+              type: result.content_type,
+            });
+            if (uploaded.isErr()) {
+              const uploadError = uploaded.error[0] ?? {
+                code: 'SERVER_ERROR',
+                message: 'Upload failed',
+              };
+              throw new UploadDraftAttachmentError(
+                uploadError.message,
+                { cause: uploadError.code },
+                context
+              );
             }
+          }
+        } catch (cause) {
+          if (cause instanceof UploadDraftAttachmentError) throw cause;
+          throw new UploadDraftAttachmentError(
+            'Upload failed',
+            { cause },
+            context
           );
         }
       }
-
-      return { attachments: uploadedAttachments };
     },
-    ...withCallbacks<
-      UploadDraftAttachmentsReturn,
-      Error,
-      UploadDraftAttachmentsParams
-    >(
+    ...withCallbacks<void, Error, UploadDraftAttachmentsParams>(
       {
         async onError(error, variables) {
           if (error instanceof UploadDraftAttachmentError) {
             try {
-              await emailClient.removeDraftAttachment(
-                {
-                  draftID: variables.draftID,
-                  attachmentID: error.context.attachmentID,
-                },
-                variables.linkId
+              await throwOnErr(
+                async () =>
+                  await emailClient.removeDraftAttachment(
+                    {
+                      draftID: variables.draftID,
+                      attachmentID: error.context.attachmentID,
+                    },
+                    variables.linkId
+                  )
               );
+              variables.onAttachmentUploadFailed?.(error.context.file);
             } catch {
               console.error('Unable to remove draft attachment after failure');
             }

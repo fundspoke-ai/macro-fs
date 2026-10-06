@@ -13,6 +13,7 @@ import {
   TextLayerBuilder,
 } from 'pdfjs-dist/web/pdf_viewer';
 import { PageModel } from '../model/Page';
+import { selectedTextBounds } from '../util/pdfjsUtils';
 import { PDF_TO_CSS_UNITS } from '../util/pixelsPerInch';
 import { destHrefToDest } from './DestArray';
 import {
@@ -1125,10 +1126,19 @@ export class InternalPDFViewer {
     this._boundEvents.scriptingready = this._handleScriptingReady;
 
     for (const key in this._boundEvents) {
-      const event = key as keyof TEvents;
-      if (!this._boundEvents[event]) continue;
-      this._eventBus.on(event, this._boundEvents[event]);
+      this.#bindEvent(key as keyof TEvents);
     }
+  }
+
+  #bindEvent<TEvent extends keyof TEvents>(event: TEvent) {
+    const listener = this._boundEvents[event];
+    if (listener) this._eventBus.on(event, listener);
+  }
+
+  #unbindEvent<TEvent extends keyof TEvents>(event: TEvent) {
+    const listener = this._boundEvents[event];
+    if (listener) this._eventBus.off(event, listener);
+    this._boundEvents[event] = undefined;
   }
 
   #unbindEvents() {
@@ -1145,10 +1155,7 @@ export class InternalPDFViewer {
     this._container.removeEventListener('click', this._handleContainerClick);
 
     for (const key in this._boundEvents) {
-      const event = key as keyof TEvents;
-      if (!this._boundEvents[event]) continue;
-      this._eventBus.off(event, this._boundEvents[event]);
-      this._boundEvents[event] = undefined;
+      this.#unbindEvent(key as keyof TEvents);
     }
     this._eventBus._listeners = [];
     this._boundEvents = Object.create(null);
@@ -1472,15 +1479,12 @@ export class InternalPDFViewer {
     location: Rect;
   } | null {
     const range = selection.getRangeAt(0);
-    // focus node will be the end span
-    let lastTextNode = selection.focusNode?.parentElement;
-    if (lastTextNode?.tagName !== 'SPAN') {
-      // fixes triple click line selection
-      lastTextNode = range.startContainer.parentElement;
-    }
-    const rect = lastTextNode
-      ? lastTextNode.getBoundingClientRect()
-      : range.getBoundingClientRect();
+    const textLayer = this._viewer
+      .getPageView(pageIndex)
+      ?.div.querySelector<HTMLElement>('.textLayer');
+    const rect =
+      (textLayer && selectedTextBounds(range, textLayer)) ??
+      range.getBoundingClientRect();
     const pdfCoords = this.windowToPagePercentCoords(pageIndex, rect);
     return this.setSelectionOverlay(pageIndex, pdfCoords, false);
   }

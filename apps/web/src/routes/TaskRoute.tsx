@@ -4,20 +4,15 @@ import { LoadingBlock } from '@core/component/LoadingBlock';
 import { setPostLoginRedirect } from '@core/util/postLoginRedirect';
 import { thrownResultErrorHasCode } from '@core/util/result';
 import { useTeamTaskQuery } from '@queries/storage/team-task';
-import { Navigate, useNavigate, useParams } from '@solidjs/router';
+import { Navigate, useNavigate } from '@solidjs/router';
 import { Button } from '@ui';
 import { createEffect, createMemo, Match, on, Show, Switch } from 'solid-js';
 
-type TaskRouteParams = {
-  taskSlug: string;
-};
-
 /** Resolves a team-scoped task slug to the existing canonical task route. */
-export function TaskRoute() {
-  const params = useParams<TaskRouteParams>();
+export function TaskRoute(props: { taskSlug: string }) {
   const navigate = useNavigate();
   const isAuthenticated = useIsAuthenticated();
-  const taskSlug = () => params.taskSlug;
+  const taskSlug = () => props.taskSlug;
   const isValidSlug = () => isValidTeamTaskSlug(taskSlug());
   const slugToResolve = createMemo(() =>
     isAuthenticated() === true && isValidSlug() ? taskSlug() : undefined
@@ -82,12 +77,16 @@ function TaskRouteError(props: { notFound: boolean; onRetry?: () => void }) {
             : 'Something went wrong while resolving this task reference.'}
         </p>
         <div class="flex items-center gap-2">
-          <Button variant="base" size="sm" onClick={() => navigate('/tasks')}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => navigate('/tasks')}
+          >
             Go to tasks
           </Button>
           <Show when={!props.notFound && props.onRetry}>
             {(onRetry) => (
-              <Button variant="base" size="sm" onClick={onRetry()}>
+              <Button variant="outline" size="sm" onClick={onRetry()}>
                 Try again
               </Button>
             )}

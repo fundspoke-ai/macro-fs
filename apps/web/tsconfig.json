@@ -1,7 +1,8 @@
 {
   "include": [
     "./src/**/*",
-    "./src/lib/core/component/Emoji/cldr-tags.json"
+    "./src/lib/core/component/Emoji/cldr-tags.json",
+    "../../crates/agent_harness/sandbox_sizes.json"
   ],
   "exclude": [
     "./tests/**/*",
@@ -9,8 +10,7 @@
     "./src/features/block-code/scripts/**/*"
   ],
   "compilerOptions": {
-    "noImplicitAny": true,
-    "strictNullChecks": true,
+    "strict": true,
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
@@ -44,11 +44,8 @@
       "@types/facebook-pixel"
     ],
     "paths": {
-      "loro-crdt": [
-        "../../node_modules/loro-crdt"
-      ],
-      "loro-crdt/*": [
-        "../../node_modules/loro-crdt/*"
+      "@sandbox-sizes": [
+        "../../crates/agent_harness/sandbox_sizes.json"
       ],
       "@graphql-cache/*": [
         "./src/lib/graphql-cache/*"
@@ -74,6 +71,9 @@
       "@phosphor/*": [
         "../../node_modules/@phosphor-icons/core/assets/regular/*"
       ],
+      "@phosphor-fill/*": [
+        "../../node_modules/@phosphor-icons/core/assets/fill/*"
+      ],
       "@block-canvas/*": [
         "./src/features/block-canvas/*"
       ],
@@ -91,6 +91,9 @@
       ],
       "@service-storage/*": [
         "./src/lib/service-clients/service-storage/*"
+      ],
+      "@service-agent-harness/*": [
+        "./src/lib/service-clients/service-agent-harness/*"
       ],
       "@service-search/*": [
         "./src/lib/service-clients/service-search/*"
@@ -122,14 +125,26 @@
       "@service-scheduled-action/*": [
         "./src/lib/service-clients/service-scheduled-action/*"
       ],
+      "@service-calendar/*": [
+        "./src/lib/service-clients/service-calendar/*"
+      ],
       "@service-email/*": [
         "./src/lib/service-clients/service-email/*"
       ],
       "@service-properties/*": [
         "./src/lib/service-clients/service-properties/*"
       ],
+      "@service-agent-fold/*": [
+        "./src/lib/service-clients/service-agent-fold/*"
+      ],
       "@block-chat/*": [
         "./src/features/block-chat/*"
+      ],
+      "@block-calendar/*": [
+        "./src/features/block-calendar/*"
+      ],
+      "@block-database/*": [
+        "./src/features/block-database/*"
       ],
       "@block-code/*": [
         "./src/features/block-code/*"
@@ -140,20 +155,11 @@
       "@block-channel/*": [
         "./src/features/block-channel/*"
       ],
-      "@block-automation/*": [
-        "./src/features/block-automation/*"
-      ],
       "@channel/*": [
         "./src/features/channel/*"
       ],
-      "@companies/*": [
-        "./src/features/companies/*"
-      ],
       "@block-company/*": [
         "./src/features/block-company/*"
-      ],
-      "@contacts/*": [
-        "./src/features/contacts/*"
       ],
       "@block-contact/*": [
         "./src/features/block-contact/*"
@@ -190,12 +196,6 @@
       ],
       "@service-contacts/*": [
         "./src/lib/service-clients/service-contacts/*"
-      ],
-      "@baby-gl": [
-        "./src/lib/baby-gl/"
-      ],
-      "@baby-gl/*": [
-        "./src/lib/baby-gl/*"
       ],
       "@notifications": [
         "./src/features/notifications/"

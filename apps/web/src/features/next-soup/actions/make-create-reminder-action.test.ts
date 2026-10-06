@@ -1,137 +1,82 @@
 import type { EntityData } from '@entity';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, expect, it, vi } from 'vitest';
+import type { EntityActionListState } from './entity-action-context';
 
-const mocks = vi.hoisted(() => ({
-  openReminderComposer: vi.fn(),
-  remindersEnabled: true,
-}));
-
+const mocks = vi.hoisted(() => ({ open: vi.fn(), enabled: true }));
 vi.mock('@app/features/reminders/reminder-composer', () => ({
-  openReminderComposer: mocks.openReminderComposer,
+  openReminderComposer: mocks.open,
 }));
-
-// Spread the original so the other flags in this module keep working; only the
-// reminders gate is driven by the tests. Under vitest MODE is not
-// 'development', so the real ENABLE_REMINDERS would resolve to false.
-vi.mock('@core/constant/featureFlags', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@core/constant/featureFlags')>()),
-  ENABLE_REMINDERS: () => mocks.remindersEnabled,
+vi.mock('@core/constant/featureFlags', () => ({
+  enableReminders: {},
+  isFeatureEnabled: () => mocks.enabled,
 }));
 
 import { makeCreateReminderAction } from './make-create-reminder-action';
 
-const entity = (type: EntityData['type'], id = 'e1') =>
-  ({ type, id, name: 'Thing' }) as EntityData;
+const entity = (type: EntityData['type'], id = 'thread') =>
+  ({ type, id, name: 'Subject' }) as EntityData;
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.enabled = true;
+});
 
-const threadEntity = (channelId = 'chan-1') =>
-  ({
-    type: 'channel_thread',
-    id: 'msg-1',
-    channelId,
-    name: 'Channel thread',
-    content: 'ship it',
-  }) as EntityData;
-
-describe('makeCreateReminderAction', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mocks.remindersEnabled = true;
-  });
-
-  it('can run for entity types the reminders API accepts', () => {
-    const { canExecute } = makeCreateReminderAction();
-
-    expect(canExecute(entity('document'))).toBe(true);
-    expect(canExecute(entity('email'))).toBe(true);
-    expect(canExecute(entity('crm_company'))).toBe(true);
-  });
-
-  // `entity_access` resolves no access level for `channel_message`, so the
-  // receipt the reminders API requires cannot be minted for one.
-  it('cannot run for entity types with no reminder mapping', () => {
-    const { canExecute } = makeCreateReminderAction();
-
-    expect(canExecute(entity('channel_message'))).toBe(false);
-    expect(canExecute(entity('automation'))).toBe(false);
-  });
-
-  // Thread rows are offered the action even though `channel_message` is not a
-  // reminder target: they fall back to the parent channel.
-  it('can run for a channel thread row', () => {
-    expect(makeCreateReminderAction().canExecute(threadEntity())).toBe(true);
-  });
-
-  it('opens the composer for a channel thread row', () => {
-    const target = threadEntity();
-
-    makeCreateReminderAction().execute([target]);
-
-    expect(mocks.openReminderComposer).toHaveBeenCalledWith(target);
-  });
-
-  it('opens the composer for the entity', () => {
-    const target = entity('document', 'doc-1');
-
-    makeCreateReminderAction().execute([target]);
-
-    expect(mocks.openReminderComposer).toHaveBeenCalledWith(target);
-  });
-
-  it('does nothing for an empty selection', () => {
-    makeCreateReminderAction().execute([]);
-
-    expect(mocks.openReminderComposer).not.toHaveBeenCalled();
-  });
-
-  // A reminder points at one thing, so a multi-select uses the first entity
-  // rather than opening a composer per item.
-  it('uses only the first entity of a multi-selection', () => {
-    const first = entity('document', 'doc-1');
-
-    makeCreateReminderAction().execute([first, entity('document', 'doc-2')]);
-
-    expect(mocks.openReminderComposer).toHaveBeenCalledOnce();
-    expect(mocks.openReminderComposer).toHaveBeenCalledWith(first);
-  });
-
-  it('does not open the composer for an unsupported entity', () => {
-    makeCreateReminderAction().execute([entity('channel_message')]);
-
-    expect(mocks.openReminderComposer).not.toHaveBeenCalled();
-  });
-
-  // Every surface gates on canExecute, so a closed flag removes the hotkey, both
-  // soup menus and the block menu at once.
-  it('cannot run when the reminders flag is off', () => {
-    mocks.remindersEnabled = false;
-
-    expect(makeCreateReminderAction().canExecute(entity('document'))).toBe(
-      false
-    );
-  });
-
-  // execute re-checks the gate, so a command-menu entry left over from before
-  // the flag closed cannot still open the composer.
-  it('does not open the composer when the reminders flag is off', () => {
-    mocks.remindersEnabled = false;
-
-    makeCreateReminderAction().execute([entity('document', 'doc-1')]);
-
-    expect(mocks.openReminderComposer).not.toHaveBeenCalled();
-  });
-
-  // The soup context menu and soup command menu both drive actions through
-  // executeWithSoup, so the action is unreachable from a list without it.
-  it('opens the composer when driven from a soup list', async () => {
-    const target = entity('channel', 'channel-1');
-
-    await makeCreateReminderAction().executeWithSoup(
-      [target],
-      {} as Parameters<
-        ReturnType<typeof makeCreateReminderAction>['executeWithSoup']
-      >[1]
-    );
-
-    expect(mocks.openReminderComposer).toHaveBeenCalledWith(target);
+it.each([
+  'document',
+  'chat',
+  'channel',
+  'channel_thread',
+  'crm_company',
+  'crm_contact',
+  'project',
+  'call',
+  'calendar_event',
+  'routine',
+] as const)('does not offer or open reminders for %s', (type) => {
+  const action = makeCreateReminderAction();
+  expect(action.canExecute(entity(type))).toBe(false);
+  action.execute([entity(type)]);
+  expect(mocks.open).not.toHaveBeenCalled();
+});
+it('opens an email and defers navigation until the save succeeds', async () => {
+  const onSaved = vi.fn();
+  const target = entity('email');
+  const action = makeCreateReminderAction({ onEmailSaved: onSaved });
+  expect(action.canExecute(target)).toBe(true);
+  action.execute([target]);
+  expect(onSaved).not.toHaveBeenCalled();
+  await mocks.open.mock.calls[0][1].onCreated();
+  expect(onSaved).toHaveBeenCalledOnce();
+});
+it('rechecks the flag for stale menu entries', () => {
+  const action = makeCreateReminderAction();
+  mocks.enabled = false;
+  expect(action.canExecute(entity('email'))).toBe(false);
+  action.execute([entity('email')]);
+  expect(mocks.open).not.toHaveBeenCalled();
+});
+it('advances to the current next row only after the email snooze has been saved', async () => {
+  const previousNext = entity('email', 'previous-next');
+  const next = entity('email', 'next');
+  const peekOffset = vi.fn(() => ({
+    row: { id: previousNext.id, original: previousNext },
+  }));
+  const soup = {
+    navigate: { peekOffset },
+    selection: { clear: vi.fn() },
+    focus: { set: vi.fn() },
+  };
+  const onNavigate = vi.fn();
+  await makeCreateReminderAction().executeWithSoup(
+    [entity('email')],
+    soup as unknown as EntityActionListState,
+    { advances: true, onNavigate }
+  );
+  expect(soup.selection.clear).not.toHaveBeenCalled();
+  peekOffset.mockReturnValue({ row: { id: next.id, original: next } });
+  await mocks.open.mock.calls[0][1].onCreated();
+  expect(soup.focus.set).toHaveBeenCalledWith('next');
+  expect(onNavigate).toHaveBeenCalledWith({
+    actionId: 'create-reminder',
+    entity: next,
   });
 });

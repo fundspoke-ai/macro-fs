@@ -90,25 +90,107 @@ export function apiValuesToGraphqlPropertyValue(
 }
 
 /**
- * Complete optimistic mutation payload for an existing property
- * assignment, or `undefined` when none can be built safely:
- * uninstantiated definitions have no assignment id until the server
- * responds, and inventing one would corrupt the normalized cache.
+ * The property record as the server would return it, for an already-persisted
+ * assignment carrying `value`.
  */
-export function buildOptimisticSetEntityProperty(
+function optimisticPropertyRecord(
   property: Property | PropertyDefinitionDomain,
-  apiValues: PropertyApiValues
-): SoupPropertyFieldsFragment | undefined {
-  if (!isInstantiatedProperty(property)) return undefined;
+  value: GraphqlPropertyValue | null,
+  id: string
+): SoupPropertyFieldsFragment {
   return {
-    id: property.propertyId,
-    propertyDefinitionId: property.propertyDefinitionId,
+    id,
+    propertyDefinitionId: isInstantiatedProperty(property)
+      ? property.propertyDefinitionId
+      : property.id,
     displayName: property.displayName,
     dataType: property.valueType,
     isMultiSelect: property.isMultiSelect,
     specificEntityType: property.specificEntityType ?? null,
-    isSystem: property.isSystemProperty ?? false,
+    isSystem: isInstantiatedProperty(property)
+      ? (property.isSystemProperty ?? false)
+      : property.isSystem,
     isMetadata: property.isMetadata ?? false,
-    value: apiValuesToGraphqlPropertyValue(apiValues),
+    value,
   };
+}
+
+const TEMPORARY_PROPERTY_PREFIX = 'optimistic-property:';
+
+/** Temporary assignments must retain a response-derived parent-list recipe. */
+export function isTemporaryGraphqlProperty(id: string): boolean {
+  return id.startsWith(TEMPORARY_PROPERTY_PREFIX);
+}
+
+function hasPersistedAssignment(
+  property: Property | PropertyDefinitionDomain
+): property is Property {
+  return (
+    isInstantiatedProperty(property) &&
+    isPersistedAssignmentId(property.propertyId, property.propertyDefinitionId)
+  );
+}
+
+function isPersistedAssignmentId(id: string, definitionId: string): boolean {
+  return (
+    id !== definitionId &&
+    !id.startsWith('pending:') &&
+    !isTemporaryGraphqlProperty(id)
+  );
+}
+
+/**
+ * New assignments use a target-scoped temporary ID, never a shared definition
+ * ID. Callers supplying a target must also install a response-derived list
+ * recipe, so commit replaces the temporary link with the server's assignment.
+ */
+export function buildOptimisticSetEntityProperty(
+  property: Property | PropertyDefinitionDomain,
+  apiValues: PropertyApiValues,
+  target?: { entityType: string; entityId: string }
+): SoupPropertyFieldsFragment | undefined {
+  const definitionId = isInstantiatedProperty(property)
+    ? property.propertyDefinitionId
+    : property.id;
+  const id = hasPersistedAssignment(property)
+    ? property.propertyId
+    : target
+      ? `${TEMPORARY_PROPERTY_PREFIX}${target.entityType}:${target.entityId}:${definitionId}`
+      : undefined;
+  if (!id) return undefined;
+  return optimisticPropertyRecord(
+    property,
+    apiValuesToGraphqlPropertyValue(apiValues),
+    id
+  );
+}
+
+/**
+ * Optimistic payload for a multi-select property reaching `optionIds`, or
+ * `undefined` when the entity has no assignment for the definition yet (the
+ * first tag from a set): that record's id is only known once the server
+ * responds, so the write waits for the commit instead of inventing one.
+ */
+export function buildOptimisticEntityPropertyOptions(
+  property: Property | PropertyDefinitionDomain,
+  optionIds: readonly string[],
+  assignmentId?: string
+): SoupPropertyFieldsFragment | undefined {
+  const definitionId = isInstantiatedProperty(property)
+    ? property.propertyDefinitionId
+    : property.id;
+  const id =
+    assignmentId ??
+    (isInstantiatedProperty(property) ? property.propertyId : undefined);
+  if (!id || !isPersistedAssignmentId(id, definitionId)) return undefined;
+  return optimisticPropertyRecord(
+    property,
+    optionIds.length > 0
+      ? {
+          __typename: 'GraphqlSelectOptionPropertyValue',
+          optionIds: [...optionIds],
+        }
+      : null,
+    id
+  );
 }

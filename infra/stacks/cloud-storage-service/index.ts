@@ -3,6 +3,7 @@ import * as pulumi from '@pulumi/pulumi';
 import { createBucket, Queue } from '../../packages/resources';
 import {
   config,
+  DOCUMENT_STORAGE_GATEWAY_URL,
   getMacroApiToken,
   getMacroNotify,
   getSearchEventQueue,
@@ -25,6 +26,9 @@ import {
 } from './document-upload-finalizer-lambda';
 import { CalendarReminderDispatchQueue } from './calendar-reminder-dispatch-queue';
 import { ReminderDispatchQueue } from './reminder-dispatch-queue';
+import { SlackImportQueue } from './slack-import-queue';
+import { deploySlackImportWorker } from './slack-import-worker';
+import { WafObservability } from './waf-observability';
 
 const tags = {
   environment: stack,
@@ -190,8 +194,61 @@ export const bulkUploadLambdaRoleArn = bulkUploadStack
   .getOutput('uploadExtractHandlerLambdaRoleArn')
   .apply((arn) => arn as string);
 
+const bulkUploadBucketName = bulkUploadStack
+  .requireOutput('bulkUploadBucketName')
+  .apply((name) => name as string);
+
+const slackImportQueue = new SlackImportQueue(`slack-import-${stack}`, {
+  stagingBucketArn: pulumi.interpolate`arn:aws:s3:::${bulkUploadBucketName}`,
+  notificationIngressQueueArn,
+  tags,
+});
+
+export const slackImportQueueArn = slackImportQueue.queue.arn;
+export const slackImportQueueName = slackImportQueue.queue.name;
+export const slackImportDlqArn = slackImportQueue.dlq.arn;
+export const slackImportDlqName = slackImportQueue.dlq.name;
+export const slackImportWorkerPolicyArn = slackImportQueue.workerPolicy.arn;
+
+const slackImportWorker = deploySlackImportWorker(
+  `slack-import-worker-${stack}`,
+  {
+    ecsClusterArn: cloudStorageClusterArn,
+    vpc: coparse_api_vpc,
+    workerPolicyArn: slackImportQueue.workerPolicy.arn,
+    tags,
+  }
+);
+export const slackImportWorkerRoleArn = slackImportWorker?.role.arn;
+export const slackImportWorkerServiceName =
+  slackImportWorker?.service.service.name;
+export const slackImportWorkerSgId = slackImportWorker?.serviceSg.id;
+
 export const docxUploadBucketArn = docxUploadBucket.arn;
 export const docxUploadBucketName = docxUploadBucket.id;
+
+// ── GitHub pull request patches ──────────────────────────────────────────────
+// One patch per pull request base and head, under `pull-requests/`, shared by
+// every user, team, and agent session that reads those changes. A patch can be
+// read again from GitHub, so expiring it only costs a re-read.
+const githubPullRequestPatchBucket = createBucket({
+  id: `macro-github-pull-request-patches-${stack}`,
+  bucketName: `macro-github-pull-request-patches-${stack}`,
+  transferAcceleration: false,
+  enableVersioning: false,
+  lifecycleRules: [
+    {
+      id: 'expire-patches',
+      enabled: true,
+      expiration: { days: 90 },
+    },
+  ],
+  tags,
+});
+
+export const githubPullRequestPatchBucketArn = githubPullRequestPatchBucket.arn;
+export const githubPullRequestPatchBucketName =
+  githubPullRequestPatchBucket.bucket;
 
 const deleteDocumentHandler = new DeleteDocumentHandler(
   `delete-document-handler-${stack}`,
@@ -297,6 +354,7 @@ const cloudStorageService = new CloudStorageService(
     },
     documentStorageBucketArn,
     docxUploadBucketArn,
+    githubPullRequestPatchBucketArn: githubPullRequestPatchBucket.arn,
     serviceContainerPort: 8080,
     healthCheckPath: '/health',
     secretKeyArns: [
@@ -310,9 +368,14 @@ const cloudStorageService = new CloudStorageService(
       calWebhookSecretKeyArn,
       calEventTypeContentNamesKeyArn,
     ],
+    slackImportUploadPolicyArn: slackImportQueue.uploadPolicy.arn,
     callRecordingCrudPolicyArn,
     snsPlatformArns: [snsApnsVoipPlatformArn],
     containerEnvVars: [
+      {
+        name: 'GITHUB_PULL_REQUEST_PATCH_BUCKET',
+        value: githubPullRequestPatchBucket.bucket,
+      },
       // OpenTelemetry / Datadog tracing configuration
       {
         name: 'DD_SERVICE',
@@ -323,15 +386,17 @@ const cloudStorageService = new CloudStorageService(
         value: stack,
       },
     ],
-    isPrivate: false,
     tags,
   }
 );
 
+if (stack === 'prod') {
+  new WafObservability('cloud-storage-service-prod', { protect: true });
+}
+
 export const cloudStorageServiceRoleArn = cloudStorageService.role.arn;
 export const cloudStorageServiceSgId = cloudStorageService.serviceSg.id;
-export const cloudStorageServiceAlbSgId = cloudStorageService.serviceAlbSg.id;
-export const cloudStorageServiceUrl = pulumi.interpolate`${cloudStorageService.domain}`;
+export const cloudStorageServiceUrl = DOCUMENT_STORAGE_GATEWAY_URL;
 
 const convertServiceStack = new pulumi.StackReference('convert-service-stack', {
   name: `macro-inc/convert-service/${stack}`,

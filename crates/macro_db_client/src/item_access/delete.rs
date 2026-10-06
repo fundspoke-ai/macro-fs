@@ -43,8 +43,11 @@ pub async fn delete_user_entity_access_bulk(
         | EntityType::CrmContact
         | EntityType::Skill
         | EntityType::ForeignEntity
-        // Reminders own no entity_access rows to delete.
-        | EntityType::Reminder => {
+        // Reminders, scheduled actions, and database rows own no
+        // entity_access rows to delete.
+        | EntityType::Reminder
+        | EntityType::ScheduledAction
+        | EntityType::DatabaseRow => {
             anyhow::bail!("invalid entity type")
         }
         EntityType::Project => {
@@ -64,7 +67,13 @@ pub async fn delete_user_entity_access_bulk(
             .execute(transaction.as_mut())
             .await?
         }
-        EntityType::Chat | EntityType::Document | EntityType::EmailThread | EntityType::Call => {
+        EntityType::Chat
+        | EntityType::Document
+        | EntityType::EmailThread
+        | EntityType::Call
+        | EntityType::AgentSession
+        | EntityType::Initiative
+        | EntityType::Database => {
             sqlx::query!(
                 r#"
         DELETE FROM "entity_access"

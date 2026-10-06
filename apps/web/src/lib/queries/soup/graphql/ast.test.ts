@@ -19,6 +19,55 @@ function makeInput(query: Parameters<typeof queryStateFrom>[0]) {
 }
 
 describe('makeGraphqlSoupInput', () => {
+  it('preserves agent session opt-in and owner exclusions', () => {
+    const input = makeInput({
+      include: { includeAgentSessions: true },
+      exclude: { agentSessionOwnerId: ['macro|me@example.com'] },
+    });
+    expect(input).toMatchObject({
+      initial: {
+        filters: {
+          agentSessionFilter: {
+            and: {
+              left: { not: { literal: { owner: 'macro|me@example.com' } } },
+              right: { literal: { include: true } },
+            },
+          },
+        },
+      },
+    });
+    expect(
+      makeInput({ include: { agentSessionId: ['session'] } })
+    ).toMatchObject({
+      initial: {
+        filters: { agentSessionFilter: { literal: { id: 'session' } } },
+      },
+    });
+  });
+  it('maps exact states and keeps email read independent', () => {
+    for (const state of ['unseen', 'seen', 'done'] as const) {
+      const input = makeGraphqlSoupInput({
+        params: { limit: 100, sort_method: 'updated_at' },
+        body: { df: { l: { ns: state } }, ef: { l: { Read: true } } },
+      });
+      expect(input).toMatchObject({
+        initial: {
+          filters: {
+            documentFilter: {
+              literal: { notificationState: state.toUpperCase() },
+            },
+            emailFilter: { tree: { literal: { read: true } } },
+          },
+        },
+      });
+    }
+    expect(() =>
+      makeGraphqlSoupInput({
+        params: { limit: 100, sort_method: 'updated_at' },
+        body: { df: { l: { ns: false } } },
+      })
+    ).toThrow();
+  });
   it('maps compiled soup AST and request params into GraphQL Soup input', () => {
     const input = makeInput({
       include: {
@@ -38,7 +87,12 @@ describe('makeGraphqlSoupInput', () => {
         filters: {
           documentFilter: {
             and: {
-              left: { literal: { notificationDone: false } },
+              left: {
+                or: {
+                  left: { literal: { notificationState: 'UNSEEN' } },
+                  right: { literal: { notificationState: 'SEEN' } },
+                },
+              },
               right: { literal: { updatedAt: { gte: UPDATED_AT } } },
             },
           },
@@ -65,7 +119,12 @@ describe('makeGraphqlSoupInput', () => {
         filters: {
           channelFilter: {
             and: {
-              left: { literal: { notificationDone: false } },
+              left: {
+                or: {
+                  left: { literal: { notificationState: 'UNSEEN' } },
+                  right: { literal: { notificationState: 'SEEN' } },
+                },
+              },
               right: { literal: { isParticipant: true } },
             },
           },
@@ -139,7 +198,12 @@ describe('makeGraphqlSoupInput', () => {
         limit: 100,
         sortMethod: 'UPDATED_AT',
         filters: {
-          documentFilter: { literal: { notificationDone: false } },
+          documentFilter: {
+            or: {
+              left: { literal: { notificationState: 'UNSEEN' } },
+              right: { literal: { notificationState: 'SEEN' } },
+            },
+          },
         },
       },
     });
@@ -205,83 +269,6 @@ describe('makeGraphqlSoupInput', () => {
     });
   });
 
-  it('maps the reminder opt-in so reminders are not silently dropped', () => {
-    // `includeReminders` is what opts a query into reminders at all. Dropping
-    // it leaves the server on its default (exclude), which reads as an empty
-    // Reminders view rather than an error.
-    const input = makeInput({
-      include: { includeReminders: true },
-    });
-
-    expect(input).toMatchObject({
-      initial: {
-        filters: { reminderFilter: { literal: { include: true } } },
-      },
-    });
-  });
-
-  it('maps the completed and fired reminder literals', () => {
-    const input = makeInput({
-      include: {
-        includeReminders: true,
-        reminderCompleted: false,
-        reminderFired: true,
-      },
-    });
-
-    expect(input).toMatchObject({
-      initial: {
-        filters: {
-          // Literal order follows FIELD_CONFIG, which puts the opt-in last.
-          reminderFilter: {
-            and: {
-              left: { literal: { completed: false } },
-              right: {
-                and: {
-                  left: { literal: { fired: true } },
-                  right: { literal: { include: true } },
-                },
-              },
-            },
-          },
-        },
-      },
-    });
-  });
-
-  it('maps reminder id and entity literals', () => {
-    const input = makeGraphqlSoupInput({
-      params: { limit: 100, sort_method: 'updated_at' },
-      body: {
-        remf: {
-          '&': [{ l: { id: 'reminder-1' } }, { l: { ent: 'document:doc-1' } }],
-        },
-      } as never,
-    });
-
-    expect(input).toMatchObject({
-      initial: {
-        filters: {
-          reminderFilter: {
-            and: {
-              left: { literal: { id: 'reminder-1' } },
-              right: { literal: { entity: 'document:doc-1' } },
-            },
-          },
-        },
-      },
-    });
-  });
-
-  it('throws for unknown reminder literals so callers can fall back', () => {
-    expect(() =>
-      makeGraphqlSoupInput({
-        params: { limit: 100, sort_method: 'updated_at' },
-        body: { remf: { l: { enabled: true } } } as never,
-      })
-    ).toThrow('Unsupported GraphQL Soup AST');
-  });
-
   it('maps calendar event id filters', () => {
     const input = makeGraphqlSoupInput({
       params: { limit: 100, sort_method: 'updated_at' },
@@ -297,6 +284,51 @@ describe('makeGraphqlSoupInput', () => {
     });
   });
 
+  it('translates CRM association and email attachment literals', () => {
+    const companyId = '0198a1b2-c3d4-7e5f-8061-728394a5b700';
+    expect(
+      makeGraphqlSoupInput({
+        params: { limit: 100, sort_method: 'updated_at' },
+        body: {
+          df: {
+            '|': [
+              {
+                l: {
+                  prop: {
+                    pd: '00000001-0000-0000-0000-00000000000c',
+                    v: { er: companyId },
+                  },
+                },
+              },
+              { l: { eap: { Domain: 'acme.com' } } },
+            ],
+          },
+        } as never,
+      })
+    ).toMatchObject({
+      initial: {
+        filters: {
+          documentFilter: {
+            or: {
+              left: {
+                literal: {
+                  property: {
+                    propertyDefinitionId:
+                      '00000001-0000-0000-0000-00000000000c',
+                    value: { entityRef: companyId },
+                  },
+                },
+              },
+              right: {
+                literal: { emailAttachmentParticipant: { domain: 'acme.com' } },
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
   it('throws for unsupported calendar literals so callers can fall back', () => {
     expect(() =>
       makeGraphqlSoupInput({
@@ -306,12 +338,53 @@ describe('makeGraphqlSoupInput', () => {
     ).toThrow('Unsupported GraphQL Soup AST');
   });
 
-  it('throws for REST-only file association literals so callers can fall back', () => {
+  it('translates skill inclusion and markdown skill exclusions without falling back', () => {
+    expect(makeInput({ include: { subType: ['skill'] } })).toMatchObject({
+      initial: {
+        filters: { documentFilter: { literal: { subType: 'SKILL' } } },
+      },
+    });
+    expect(makeInput({ exclude: { subType: ['skill'] } })).toMatchObject({
+      initial: {
+        filters: { documentFilter: { not: { literal: { subType: 'SKILL' } } } },
+      },
+    });
+  });
+
+  it('expands file associations into native-evaluatable GraphQL file types', () => {
+    expect(makeInput({ include: { fileAssoc: ['assoc:pdf'] } })).toMatchObject({
+      initial: {
+        filters: { documentFilter: { literal: { fileType: 'pdf' } } },
+      },
+    });
+    const code = makeInput({ include: { fileAssoc: ['assoc:code'] } });
+    const depth = (value: unknown): number =>
+      value && typeof value === 'object'
+        ? 1 + Math.max(0, ...Object.values(value).map(depth))
+        : 0;
+    expect(depth(code)).toBeLessThan(32);
+    expect(JSON.stringify(code)).toContain('"fileType":"ts"');
+    expect(JSON.stringify(code)).not.toContain('assoc:code');
     expect(() =>
-      makeInput({
-        include: { fileAssoc: ['assoc:pdf'] },
+      makeInput({ include: { fileAssoc: ['assoc:unknown'] } })
+    ).toThrow('unknown file association');
+  });
+
+  it('preserves the stable favorites constraint without expanding entity IDs', () => {
+    const body = { ...compileToAst(queryStateFrom({})), favorites_only: true };
+    expect(
+      makeGraphqlSoupInput({
+        params: { limit: 100, sort_method: 'updated_at' },
+        body,
       })
-    ).toThrow('Unsupported GraphQL Soup AST');
+    ).toMatchObject({ initial: { filters: { favoritesOnly: true } } });
+    expect(
+      makeGraphqlGroupedSoupInput({
+        params: { limit: 100, sort_method: 'updated_at' },
+        body,
+        groupBy: { type: 'entity_type' },
+      })
+    ).toMatchObject({ initial: { filters: { favoritesOnly: true } } });
   });
 
   it('throws for REST-only top-level filters instead of silently widening the query', () => {
@@ -338,15 +411,18 @@ describe('makeGraphqlSoupInput', () => {
     ).toThrow('Unsupported GraphQL Soup AST');
   });
 
-  it('rejects email views for grouped queries instead of dropping them', () => {
-    expect(() =>
-      makeGraphqlGroupedSoupInput({
-        params: { limit: 100, sort_method: 'updated_at' },
-        body: { emailView: 'inbox' } as never,
-        groupBy: { type: 'entity_type' },
-      })
-    ).toThrow('Unsupported GraphQL Soup AST');
-  });
+  it.each(['inbox', 'drafts', 'sent', 'all'] as const)(
+    'rejects grouped %s mail, including the date-grouped cached-mail slice',
+    (emailView) => {
+      expect(() =>
+        makeGraphqlGroupedSoupInput({
+          params: { limit: 100, sort_method: 'updated_at' },
+          body: { emailView },
+          groupBy: { type: 'date' },
+        })
+      ).toThrow('email views are not supported by grouped GraphQL Soup yet');
+    }
+  );
 
   it('rejects unknown email views instead of using the GraphQL default', () => {
     expect(() =>

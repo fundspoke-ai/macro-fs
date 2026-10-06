@@ -1,3 +1,15 @@
+import { parseLocalDate } from '@app/features/calendar/utils/calendar-date';
+import {
+  parseMacroAppLink,
+  sanitizeCalendarDescription,
+} from '@app/features/calendar/utils/calendar-description';
+import {
+  type CalendarMentionTarget,
+  copyCalendarEventMentionTarget,
+} from '@app/features/calendar-view/copy-event-mention';
+import { calendarMentionOpen } from '@app/features/calendar-view/mention-open-target';
+import { openCalendarEventSplit } from '@app/features/calendar-view/open-calendar-event';
+import { CALENDAR_VIEW_ID } from '@app/features/calendar-view/types';
 import { openChatWithAgent } from '@app/features/chat/ChatWithAgentButton';
 import { globalSplitManager } from '@app/signal/splitLayout';
 import { URL_PARAMS as URL_PARAMS_CANVAS } from '@block-canvas/constants';
@@ -10,51 +22,55 @@ import {
   useMaybeBlockName,
 } from '@core/block';
 import { EntityIcon } from '@core/component/EntityIcon';
-import { isBlockNameWithLocation } from '@core/component/LexicalMarkdown/component/core/BlockLink';
+import { useHoldParentHoverCardOpen } from '@core/component/HoverCard';
+import {
+  isBlockNameWithLocation,
+  openDocument as openBlockDocument,
+} from '@core/component/LexicalMarkdown/component/core/BlockLink';
 import { StaticMarkdown } from '@core/component/LexicalMarkdown/component/core/StaticMarkdown';
 import { channelTheme } from '@core/component/LexicalMarkdown/theme';
 import { toast } from '@core/component/Toast/Toast';
-import { UserIcon as UserIconComponent } from '@core/component/UserIcon';
 import { itemToBlockName, resolveBlockAlias } from '@core/constant/allBlocks';
 import { getDisplayName, tryMacroId } from '@core/user';
 import { copyBranchNameToClipboard } from '@core/util/branchName';
 import { matches } from '@core/util/match';
+import { openExternalUrl } from '@core/util/url';
 import MacroEmbed from '@icon/macro-embed.svg';
 import CollapseInlinePreview from '@phosphor/arrows-in-line-horizontal.svg';
-import OpenIcon from '@phosphor/arrows-out.svg';
 import ExpandInlinePreview from '@phosphor/arrows-out-line-horizontal.svg';
 import MessageIcon from '@phosphor/chat-circle.svg';
 import ThreadIcon from '@phosphor/chats-circle.svg';
 import ClockIcon from '@phosphor/clock.svg';
 import ColumnsPlusRight from '@phosphor/columns-plus-right.svg';
+import DotsThree from '@phosphor/dots-three.svg';
+import EyeIcon from '@phosphor/eye.svg';
 import GitBranchIcon from '@phosphor/git-branch.svg';
 import HighlightIcon from '@phosphor/highlighter-circle.svg';
 import Link from '@phosphor/link.svg';
 import MapPinIcon from '@phosphor/map-pin-simple.svg';
 import SparkleIcon from '@phosphor/sparkle.svg';
 import LoadingSpinner from '@phosphor/spinner.svg';
+import TextAlignLeftIcon from '@phosphor/text-align-left.svg';
 import TrashSimple from '@phosphor/trash-simple.svg';
-import { Property } from '@property';
-import { SYSTEM_PROPERTY_IDS } from '@property/constants';
-import { useEntityProperties } from '@property/hooks';
-import { getEntityValues, hasValue } from '@property/utils';
+import UsersIcon from '@phosphor/users.svg';
 import {
   isAccessiblePreviewItem,
+  isCalendarEventPreviewItem,
   isChannelPreviewItem,
   isPreviewItemNoAccess,
+  type PreviewCalendarEventAccess,
 } from '@queries/preview';
 import { useBinaryDocumentQuery } from '@queries/storage/binary-document';
 import { blockNameToItemType } from '@service-storage/client';
 import { fetchBinary } from '@service-storage/util/fetchBinary';
 import { createCallback } from '@solid-primitives/rootless';
 import { useNavigate } from '@solidjs/router';
-import { cn, Layer, Surface, Tooltip } from '@ui';
+import { Card, cn, Dropdown, Item } from '@ui';
 import type { Component, JSX } from 'solid-js';
 import {
   createEffect,
   createMemo,
   createSignal,
-  For,
   Match,
   onCleanup,
   Show,
@@ -66,6 +82,10 @@ import { formatDate } from '../util/date';
 import NotFound from './AccessErrorViews/NotFound';
 import Unauthorized from './AccessErrorViews/Unauthorized';
 import { useItemPreviewData } from './ItemPreview';
+import {
+  TaskPropertiesPreview,
+  TaskPropertiesPreviewProvider,
+} from './TaskPropertiesPreview';
 
 /**
  * Container for displaying mentions with optional collapsing
@@ -206,39 +226,6 @@ export const mentionsAccessories = (
   }
 };
 
-function PopupIcon(props: {
-  icon: Component<JSX.SvgSVGAttributes<SVGSVGElement>>;
-}) {
-  return (
-    <Dynamic
-      component={props.icon}
-      class="relative size-4 inline-flex items-center mx-1"
-    />
-  );
-}
-
-function PopupIconButton(props: {
-  tooltip: string;
-  onClick: () => void;
-  icon: Component<JSX.SvgSVGAttributes<SVGSVGElement>>;
-}) {
-  return (
-    <Tooltip label={props.tooltip}>
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          props.onClick();
-        }}
-        class="rounded-md py-1 hover:bg-hover transition flex items-center gap-1.5"
-      >
-        <div class="w-fit flex justify-right items-center m-0.5 text-xs font-normal text-current/90">
-          <PopupIcon icon={props.icon} />
-        </div>
-      </button>
-    </Tooltip>
-  );
-}
-
 /**
  * Metadata info component with icon and text
  */
@@ -250,7 +237,8 @@ function MetadataInfo(props: {
   return (
     <div
       class={cn(
-        props.align === 'right' ? 'justify-right' : 'justify-left',
+        'flex',
+        props.align === 'right' ? 'justify-end' : 'justify-start',
         'mt-2',
         props.align === 'left' && 'w-fit max-w-[66%]',
         'text-ink-muted',
@@ -260,26 +248,6 @@ function MetadataInfo(props: {
       <span class="relative text-[0.8em] text-ink-muted max-w-full flex items-center">
         <Dynamic component={props.icon} class="relative size-3 mx-1" />
         {props.children}
-      </span>
-    </div>
-  );
-}
-
-/**
- * User info with icon and display name
- */
-function UserInfo(props: { userId: string }) {
-  const displayName = () => getDisplayName(tryMacroId(props.userId));
-  return (
-    <div class="justify-left mt-2 w-fit max-w-[66%] text-ink-muted truncate flex items-center gap-1.5">
-      <UserIconComponent
-        id={props.userId}
-        size="sm"
-        suppressClick
-        showTooltip={false}
-      />
-      <span class="relative text-[0.8em] text-ink-muted max-w-full">
-        {displayName()}
       </span>
     </div>
   );
@@ -372,82 +340,117 @@ function ImageCoverStrip(props: {
   );
 }
 
-const TASK_PREVIEW_PROPERTIES = [
-  SYSTEM_PROPERTY_IDS.STATUS,
-  SYSTEM_PROPERTY_IDS.PRIORITY,
-  SYSTEM_PROPERTY_IDS.ASSIGNEES,
-];
+const calendarDateFormat = new Intl.DateTimeFormat(undefined, {
+  weekday: 'short',
+  month: 'short',
+  day: 'numeric',
+});
+const calendarTimeFormat = new Intl.DateTimeFormat(undefined, {
+  hour: 'numeric',
+  minute: '2-digit',
+});
 
-export function TaskPropertiesPreview(props: { taskId: string }) {
-  const { properties, isLoading } = useEntityProperties(
-    props.taskId,
-    'TASK',
-    false
-  );
-
-  const previewProperties = createMemo(() =>
-    TASK_PREVIEW_PROPERTIES.flatMap((id) => {
-      const p = properties().find((p) => p.propertyDefinitionId === id);
-      return p && hasValue(p) ? [p] : [];
-    })
-  );
-
-  return (
-    <Show when={!isLoading() && previewProperties().length > 0}>
-      <div class="px-2 pb-2 flex flex-row flex-wrap gap-1 text-xs justify-start">
-        <For each={previewProperties()}>
-          {(property) => <PreviewPropertyPill property={property} />}
-        </For>
-      </div>
-    </Show>
-  );
+/** One compact local-time schedule line for a calendar mention preview. */
+export function calendarPreviewSchedule(
+  event: PreviewCalendarEventAccess['event']
+): string | undefined {
+  if (event.time.kind === 'allDay') {
+    const start = parseLocalDate(event.time.startDate);
+    if (!start) return undefined;
+    const end = parseLocalDate(event.time.endDate);
+    const inclusiveEnd = end ? new Date(end) : undefined;
+    inclusiveEnd?.setDate(inclusiveEnd.getDate() - 1);
+    return inclusiveEnd && inclusiveEnd > start
+      ? `${calendarDateFormat.format(start)} – ${calendarDateFormat.format(inclusiveEnd)} · All day`
+      : `${calendarDateFormat.format(start)} · All day`;
+  }
+  const start = new Date(event.time.startsAt);
+  const end = new Date(event.time.endsAt);
+  if (!Number.isFinite(start.getTime())) return undefined;
+  if (!Number.isFinite(end.getTime())) {
+    return `${calendarDateFormat.format(start)} · ${calendarTimeFormat.format(start)}`;
+  }
+  return start.toDateString() === end.toDateString()
+    ? `${calendarDateFormat.format(start)} · ${calendarTimeFormat.format(start)} – ${calendarTimeFormat.format(end)}`
+    : `${calendarDateFormat.format(start)}, ${calendarTimeFormat.format(start)} – ${calendarDateFormat.format(end)}, ${calendarTimeFormat.format(end)}`;
 }
 
-/**
- * Compact read-only pill for the document preview popup. The popup itself is
- * already a tooltip-like surface, so there's no edit trigger or hover-card.
- * Visually matches the side-panel Properties pills.
- */
-function PreviewPropertyPill(props: {
-  property: import('@property/types').Property;
+/** Meeting-level rows of the calendar mention hover card. */
+function CalendarEventPreviewDetails(props: {
+  event: PreviewCalendarEventAccess['event'];
 }) {
-  const isMultiUser = () =>
-    props.property.valueType === 'ENTITY' &&
-    props.property.specificEntityType === 'USER' &&
-    getEntityValues(props.property).length > 1;
-
-  const isUserEntity = () =>
-    props.property.valueType === 'ENTITY' &&
-    props.property.specificEntityType === 'USER';
-
+  const organizer = () =>
+    props.event.organizerName ?? props.event.organizerEmail;
+  const descriptionHtml = () =>
+    sanitizeCalendarDescription(props.event.description ?? '');
+  // Opening a Macro link reads the split layout from context, so the handler
+  // keeps this component's owner.
+  const openDescriptionLink = createCallback((event: MouseEvent) => {
+    const anchor = (event.target as Element | null)?.closest('a[href]');
+    if (!(anchor instanceof HTMLAnchorElement)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const target = parseMacroAppLink(anchor.href);
+    if (target) {
+      openBlockDocument(
+        target.blockName,
+        target.documentId,
+        Object.fromEntries(new URL(anchor.href).searchParams),
+        event.shiftKey
+      );
+      return;
+    }
+    openExternalUrl(anchor.href);
+  });
   return (
-    <Property.Root property={props.property}>
-      <Layer depth={2}>
-        <div
-          class={cn(
-            'inline-flex items-center gap-1.5 min-w-0 max-w-full border border-edge-muted',
-            'px-2 py-1 leading-tight text-left rounded-full bg-surface'
-          )}
-        >
-          <Switch
-            fallback={
-              <Property.Icon
-                property={props.property}
-                class="size-3 shrink-0"
-              />
-            }
-          >
-            <Match when={isMultiUser()}>
-              <Property.UserStack property={props.property} maxUsers={2} />
-            </Match>
-            <Match when={isUserEntity()}>
-              <Property.Icon property={props.property} />
-            </Match>
-          </Switch>
-          <Property.Text property={props.property} class="truncate" />
-        </div>
-      </Layer>
-    </Property.Root>
+    <div class="px-2 pb-2 flex flex-col gap-1 text-sm text-ink-muted">
+      <Show when={!props.event.viewerEventId}>
+        <MetadataInfo icon={EyeIcon}>
+          Shared with you · not on your calendar
+        </MetadataInfo>
+      </Show>
+      <Show when={calendarPreviewSchedule(props.event)}>
+        {(schedule) => (
+          <MetadataInfo icon={ClockIcon}>
+            {schedule()}
+            <Show when={props.event.isRecurring}> · Repeats</Show>
+          </MetadataInfo>
+        )}
+      </Show>
+      <Show when={props.event.location}>
+        {(location) => (
+          <MetadataInfo icon={MapPinIcon}>
+            <span class="truncate">{location()}</span>
+          </MetadataInfo>
+        )}
+      </Show>
+      <Show when={descriptionHtml()}>
+        {(html) => (
+          <div class="mt-2 flex items-start text-[0.8em] text-ink-muted">
+            <TextAlignLeftIcon class="relative mx-1 mt-0.5 size-3 shrink-0" />
+            <div
+              class="line-clamp-4 min-w-0 wrap-anywhere [&_a]:text-accent [&_a]:underline [&_ol]:list-decimal [&_ol]:pl-4 [&_p+p]:mt-1 [&_ul]:list-disc [&_ul]:pl-4"
+              innerHTML={html()}
+              onClick={openDescriptionLink}
+            />
+          </div>
+        )}
+      </Show>
+      <Show when={organizer() || props.event.attendeeCount > 0}>
+        <MetadataInfo icon={UsersIcon}>
+          <span class="truncate">
+            <Show when={organizer()}>{(name) => <>{name()}</>}</Show>
+            <Show when={organizer() && props.event.attendeeCount > 0}>
+              {' · '}
+            </Show>
+            <Show when={props.event.attendeeCount > 0}>
+              {props.event.attendeeCount}{' '}
+              {props.event.attendeeCount === 1 ? 'attendee' : 'attendees'}
+            </Show>
+          </span>
+        </MetadataInfo>
+      </Show>
+    </div>
   );
 }
 
@@ -486,8 +489,8 @@ export type DocumentPreviewContentProps = {
 /**
  * The inner preview body shared by every document/task preview: the header
  * (icon + filename + action buttons), the task body
- * ({@link TaskPropertiesPreview}), the image cover strip, the owner/updated
- * footer, and the loading / no_access / does_not_exist states.
+ * ({@link TaskPropertiesPreview}), the inset image preview, the author/update
+ * byline, and the loading / no_access / does_not_exist states.
  *
  * It renders NO floating/highlighted chrome — no colored highlight border, no
  * shadow, no rounded floating shell. Wrap it in your own container to control
@@ -511,7 +514,11 @@ export function DocumentPreviewContent(props: DocumentPreviewContentProps) {
     return { id: props.documentInfo.id, type, messageId };
   };
 
-  const { item, ItemEntityIcon } = useItemPreviewData(itemPreviewEntity);
+  const { item, ItemEntityIcon, documentProperties } =
+    useItemPreviewData(itemPreviewEntity);
+
+  const [menuOpen, setMenuOpen] = createSignal(false);
+  useHoldParentHoverCardOpen(menuOpen);
 
   // Resolve the caller-provided type against the item's actual subType so
   // that e.g. a markdown doc with `subType: { type: 'task' }` routes to the
@@ -545,7 +552,37 @@ export function DocumentPreviewContent(props: DocumentPreviewContentProps) {
     props.collapseInfo?.handleCollapse();
   };
 
-  const openDocument = createCallback(async () => {
+  // Calendar is a singleton application view: a mentioned event opens it aimed
+  // at the viewer's own copy of the meeting rather than a per-id split. A
+  // preview that is not (yet) accessible still routes the mentioned id through
+  // the singleton opener so it resolves through the event preview API.
+  const calendarOpen = () => {
+    if (targetBlockType() !== 'calendar') return undefined;
+    return calendarMentionOpen(
+      item(),
+      props.documentInfo.id,
+      props.documentInfo.params?.occurrenceKey
+    );
+  };
+  const calendarOpenTarget = () => {
+    const open = calendarOpen();
+    return open?.kind === 'calendar' ? open.target : undefined;
+  };
+  // A meeting shared through a channel but absent from the viewer's own
+  // calendars previews read-only: there is no event of theirs to open.
+  const isReadOnlyCalendarShare = () => calendarOpen()?.kind === 'read_only';
+  const isOpenable = () =>
+    !!props.documentInfo.isOpenable && !isReadOnlyCalendarShare();
+
+  const openDocument = createCallback(async (event: MouseEvent) => {
+    const calendarTarget = calendarOpenTarget();
+    if (calendarTarget) {
+      await openCalendarEventSplit({
+        ...calendarTarget,
+        openInNewSplit: event.shiftKey,
+      });
+      return;
+    }
     const type = targetBlockType();
     const splitManager = globalSplitManager();
     if (!splitManager) {
@@ -558,6 +595,14 @@ export function DocumentPreviewContent(props: DocumentPreviewContentProps) {
         link += `?${queryParams}`;
       }
       navigate(link);
+      return;
+    }
+
+    if (event.shiftKey) {
+      splitManager.openWithSplit(
+        { type, id: props.documentInfo.id, params: props.documentInfo.params },
+        { preferNewSplit: true }
+      );
       return;
     }
 
@@ -581,12 +626,45 @@ export function DocumentPreviewContent(props: DocumentPreviewContentProps) {
     });
   };
 
+  // Copying an event has to reproduce what the calendar's own copy action
+  // writes, so pasting into an editor rebuilds the mention instead of
+  // dropping in a bare deep link.
+  const calendarMentionTarget = (): CalendarMentionTarget | undefined => {
+    const open = calendarOpen();
+    if (!open) return undefined;
+    // A read-only share re-mentions the id that was shared with the channel.
+    const target =
+      open.kind === 'calendar'
+        ? open.target
+        : {
+            eventId: props.documentInfo.id,
+            occurrenceKey: props.documentInfo.params?.occurrenceKey,
+          };
+    const i = item();
+    const previewed = isCalendarEventPreviewItem(i) ? i.event : undefined;
+    return {
+      eventId: target.eventId,
+      // An untitled event still copies as a mention, under the same
+      // '(No title)' label it carries everywhere else.
+      title: previewed?.title || props.documentInfo.name || '(No title)',
+      occurrenceKey:
+        previewed && !previewed.isRecurring ? undefined : target.occurrenceKey,
+    };
+  };
+
   const handleCopy = () => {
     try {
       let hostname = window.location.hostname.replace('www.', '').toLowerCase();
       if (hostname === 'localhost') {
         hostname = 'dev.macro.com';
       }
+
+      const mentionTarget = calendarMentionTarget();
+      if (mentionTarget) {
+        copyCalendarEventMentionTarget(mentionTarget);
+        return;
+      }
+
       let link = `https://${hostname}/app/${targetBlockType()}/${props.documentInfo.id}`;
 
       if (
@@ -612,6 +690,9 @@ export function DocumentPreviewContent(props: DocumentPreviewContentProps) {
   const isSplitAlreadyOpen = () => {
     const splitManager = globalSplitManager();
     if (!splitManager) return false;
+    if (calendarOpenTarget()) {
+      return !!splitManager.getSplitByContent('component', CALENDAR_VIEW_ID);
+    }
     return !!splitManager.getSplitByContent(
       targetBlockType(),
       props.documentInfo.id
@@ -619,6 +700,11 @@ export function DocumentPreviewContent(props: DocumentPreviewContentProps) {
   };
 
   const openInNewSplit = createCallback(async () => {
+    const calendarTarget = calendarOpenTarget();
+    if (calendarTarget) {
+      await openCalendarEventSplit({ ...calendarTarget, openInNewSplit: true });
+      return;
+    }
     const splitManager = globalSplitManager();
     if (!splitManager) return;
 
@@ -651,118 +737,99 @@ export function DocumentPreviewContent(props: DocumentPreviewContentProps) {
     await handle?.goToLocationFromParams(props.documentInfo.params);
   });
 
-  /**
-   * Renders the action buttons for the preview
-   */
-  const renderActionButtons = () => {
-    const buttons = [];
+  const PreviewTitle = (local: { name: string }) => (
+    <Item.Title>
+      <Show
+        when={isOpenable()}
+        fallback={<span class="wrap-anywhere">{local.name}</span>}
+      >
+        <button
+          type="button"
+          class="min-w-0 text-left wrap-anywhere rounded-sm hover:underline focus-visible:outline-2 focus-visible:outline-accent"
+          onClick={(event) => {
+            event.stopPropagation();
+            void openDocument(event);
+          }}
+        >
+          {local.name}
+        </button>
+      </Show>
+    </Item.Title>
+  );
 
-    // Preview toggle button
-    if (props.previewInfo?.showPreview) {
-      buttons.push(
-        <Show when={props.previewInfo.showPreview}>
-          <PopupIconButton
-            tooltip={
-              props.previewInfo.isPreviewable
-                ? 'Convert to Embed'
-                : 'Convert to Card View'
-            }
-            onClick={props.previewInfo.handlePreviewToggle}
-            icon={MacroEmbed}
-          />
-        </Show>
-      );
-    }
-
-    // Collapse/expand button
-    if (props.collapseInfo?.isCollapsable) {
-      buttons.push(
-        <>
-          <Show
-            when={props.collapseInfo?.isCollapsed}
-            fallback={
-              <PopupIconButton
-                tooltip="Collapse Reference"
-                onClick={handleToggleCollapse}
-                icon={CollapseInlinePreview}
-              />
-            }
-          >
-            <PopupIconButton
-              tooltip="Expand Reference"
-              onClick={handleToggleCollapse}
-              icon={ExpandInlinePreview}
-            />
+  const renderActionButtons = () => (
+    <Item.Actions
+      class="col-start-3 row-start-1 h-5"
+      onClick={(event) => event.stopPropagation()}
+    >
+      <Dropdown open={menuOpen()} onOpenChange={setMenuOpen}>
+        <Dropdown.Trigger
+          size="icon-sm"
+          variant="ghost"
+          aria-label="Reference actions"
+        >
+          <DotsThree />
+        </Dropdown.Trigger>
+        <Dropdown.Content blockingBackdrop class="z-nested-action-menu">
+          <Dropdown.Group>
+            <Show when={props.previewInfo?.showPreview}>
+              <Dropdown.Item
+                onSelect={() => props.previewInfo?.handlePreviewToggle()}
+              >
+                <MacroEmbed class="size-4" />
+                {props.previewInfo?.isPreviewable
+                  ? 'Convert to Embed'
+                  : 'Convert to Card View'}
+              </Dropdown.Item>
+            </Show>
+            <Show when={props.collapseInfo?.isCollapsable}>
+              <Dropdown.Item onSelect={handleToggleCollapse}>
+                <Show
+                  when={props.collapseInfo?.isCollapsed}
+                  fallback={<CollapseInlinePreview class="size-4" />}
+                >
+                  <ExpandInlinePreview class="size-4" />
+                </Show>
+                {props.collapseInfo?.isCollapsed
+                  ? 'Expand Reference'
+                  : 'Collapse Reference'}
+              </Dropdown.Item>
+            </Show>
+            <Show when={canOpenInChat()}>
+              <Dropdown.Item onSelect={handleOpenInChat}>
+                <SparkleIcon class="size-4" />
+                Ask Macro
+              </Dropdown.Item>
+            </Show>
+            <Dropdown.Item onSelect={handleCopy}>
+              <Link class="size-4" />
+              Copy Link
+            </Dropdown.Item>
+            <Show when={props.documentInfo.type === 'task'}>
+              <Dropdown.Item onSelect={handleCopyBranchName}>
+                <GitBranchIcon class="size-4" />
+                Copy Branch Name
+              </Dropdown.Item>
+            </Show>
+            <Show when={isOpenable() && !isSplitAlreadyOpen()}>
+              <Dropdown.Item onSelect={() => void openInNewSplit()}>
+                <ColumnsPlusRight class="size-4" />
+                Open in New Split
+              </Dropdown.Item>
+            </Show>
+          </Dropdown.Group>
+          <Show when={props.delete}>
+            <Dropdown.Group>
+              <Dropdown.Item onSelect={() => props.delete?.()}>
+                <TrashSimple class="size-4" />
+                Delete
+              </Dropdown.Item>
+            </Dropdown.Group>
           </Show>
-          <div class="w-px mx-1 h-6 bg-edge" />
-        </>
-      );
-    }
-
-    // Open in AI chat button
-    if (canOpenInChat()) {
-      buttons.push(
-        <PopupIconButton
-          tooltip="Open Document in AI Chat"
-          onClick={handleOpenInChat}
-          icon={SparkleIcon}
-        />
-      );
-    }
-
-    buttons.push(
-      <PopupIconButton tooltip="Copy Link" onClick={handleCopy} icon={Link} />
-    );
-
-    if (props.documentInfo.type === 'task') {
-      buttons.push(
-        <PopupIconButton
-          tooltip="Copy Branch Name"
-          onClick={handleCopyBranchName}
-          icon={GitBranchIcon}
-        />
-      );
-    }
-
-    if (props.documentInfo.isOpenable) {
-      buttons.push(
-        <PopupIconButton
-          tooltip="Open Fullscreen"
-          onClick={openDocument}
-          icon={OpenIcon}
-        />
-      );
-
-      if (!isSplitAlreadyOpen()) {
-        buttons.push(
-          <PopupIconButton
-            tooltip="Open in New Split"
-            onClick={openInNewSplit}
-            icon={ColumnsPlusRight}
-          />
-        );
-      }
-    }
-
-    if (props.delete) {
-      buttons.push(
-        <PopupIconButton
-          tooltip="Delete"
-          onClick={props.delete}
-          icon={TrashSimple}
-        />
-      );
-    }
-
-    // Add dividers between buttons
-    return buttons.map((button, _index, _array) => (
-      <>
-        {button}
-        {/* Divider */}
-        {/* {index < array.length - 1 && <div class="w-px mx-1 h-6 bg-edge" />} */}
-      </>
-    ));
-  };
+        </Dropdown.Content>
+      </Dropdown>
+    </Item.Actions>
+  );
 
   return (
     <Switch>
@@ -787,121 +854,170 @@ export function DocumentPreviewContent(props: DocumentPreviewContentProps) {
           };
 
           return (
-            <div class="w-full flex flex-col">
-              {/* Header: icon + filename + action buttons */}
-              <div class="flex items-center justify-between gap-2 p-2">
-                <div class="flex items-center gap-2 min-w-0">
-                  <ItemEntityIcon size="sm" />
-                  <div class="text-sm font-semibold select-text min-w-0">
-                    <Show when={accessories()}>
-                      {(acc) => (
-                        <div class="text-[0.8em] text-ink-muted mt-1 select-none">
-                          {`${acc().note} `}
-                          {getMentionsIcon(acc().icon)}
-                        </div>
-                      )}
-                    </Show>
-                  </div>
-                </div>
-                <div class="flex shrink-0">{renderActionButtons()}</div>
-              </div>
-
-              <div class="line-clamp-2 wrap-break-word px-2 mb-2">
-                {props.documentInfo.name || accessibleItem().name}
-              </div>
-
-              {/* Task properties: status, priority, assignees */}
-              <Show when={props.documentInfo.type === 'task'}>
-                <Suspense fallback={<div class="w-full bg-active h-4 m-2" />}>
-                  <TaskPropertiesPreview taskId={props.documentInfo.id} />
-                </Suspense>
-              </Show>
-
-              {/* Visual preview for images */}
-              <Show when={props.documentInfo.type === 'image'}>
-                <ImageCoverStrip
-                  documentId={accessibleItem().id}
-                  fileType={accessibleItem().fileType}
-                  class="shrink-0 h-32"
-                />
-              </Show>
-
-              {/* Footer: message context + owner/timestamp */}
-              <Show
-                when={
-                  messageContext() ||
-                  accessibleItem().owner ||
-                  accessibleItem().updatedAt ||
-                  props.snapshotInfo
-                }
-              >
-                <div class="p-2 border-t border-edge-muted">
-                  <Show when={messageContext()}>
-                    {(context) => (
-                      <div class="mb-2 text-sm text-ink-muted border-l-2 border-edge pl-3 py-1">
-                        <div class="line-clamp-3 wrap-break-word">
-                          <StaticMarkdown
-                            markdown={context().content}
-                            theme={channelTheme}
-                            target="internal"
+            <TaskPropertiesPreviewProvider
+              taskId={
+                targetBlockType() === 'task' ? props.documentInfo.id : undefined
+              }
+              previewProperties={documentProperties()}
+            >
+              <div class="w-full flex flex-col">
+                <Card.Header class="py-2.5">
+                  <Item class="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-x-2 border-0 p-0">
+                    <Item.Icon class="col-start-1 row-start-1">
+                      <Show
+                        when={targetBlockType() === 'task'}
+                        fallback={<ItemEntityIcon size="xs" />}
+                      >
+                        <Suspense
+                          fallback={
+                            <LoadingSpinner class="size-4 animate-spin text-ink-muted" />
+                          }
+                        >
+                          <TaskPropertiesPreview
+                            taskId={props.documentInfo.id}
+                            taskName={accessibleItem().name}
+                            previewProperties={documentProperties()}
+                            mode="status"
                           />
-                        </div>
-                      </div>
-                    )}
-                  </Show>
+                        </Suspense>
+                      </Show>
+                    </Item.Icon>
+                    <Item.Content class="col-start-2 row-start-1">
+                      <PreviewTitle
+                        name={props.documentInfo.name || accessibleItem().name}
+                      />
+                      {/* A calendar card shows the event's own schedule; its
+                          last-updated time would read as the meeting time. */}
+                      <Show
+                        when={
+                          !isCalendarEventPreviewItem(accessibleItem()) &&
+                          (messageContext()?.sender_id ||
+                            accessibleItem().owner ||
+                            messageContext()?.created_at ||
+                            accessibleItem().updatedAt)
+                        }
+                      >
+                        <Item.Description class="text-left wrap-anywhere">
+                          <Show
+                            when={
+                              messageContext()?.sender_id ||
+                              accessibleItem().owner
+                            }
+                          >
+                            {(owner) =>
+                              getDisplayName(tryMacroId(owner())) ||
+                              owner().replace('macro|', '')
+                            }
+                          </Show>
+                          <Show
+                            when={
+                              (messageContext()?.sender_id ||
+                                accessibleItem().owner) &&
+                              (messageContext()?.created_at ||
+                                accessibleItem().updatedAt)
+                            }
+                          >
+                            {' - '}
+                          </Show>
+                          <Show
+                            when={
+                              messageContext()?.created_at ||
+                              accessibleItem().updatedAt
+                            }
+                          >
+                            {(time) => formatDate(time())}
+                          </Show>
+                        </Item.Description>
+                      </Show>
+                      <Show when={accessories()}>
+                        {(acc) => (
+                          <Item.Metadata>
+                            {acc().note}
+                            {getMentionsIcon(acc().icon)}
+                          </Item.Metadata>
+                        )}
+                      </Show>
+                    </Item.Content>
+                    {renderActionButtons()}
+                  </Item>
+                </Card.Header>
 
-                  <div class="flex justify-between items-center text-sm font-medium">
-                    <Show
-                      when={messageContext()}
-                      fallback={
-                        <Show when={accessibleItem().owner}>
-                          {(owner) => <UserInfo userId={owner()} />}
-                        </Show>
-                      }
+                {/* Status lives in the header; remaining properties align with the title. */}
+                <Show when={targetBlockType() === 'task'}>
+                  <Card.Body class="pt-2 pl-9 [&>div]:px-0 [&>div]:pb-0">
+                    <Suspense
+                      fallback={<div class="w-full bg-active h-4 m-2" />}
                     >
-                      {(context) => <UserInfo userId={context().sender_id} />}
-                    </Show>
+                      <TaskPropertiesPreview
+                        taskId={props.documentInfo.id}
+                        taskName={accessibleItem().name}
+                        previewProperties={documentProperties()}
+                        mode="details"
+                      />
+                    </Suspense>
+                  </Card.Body>
+                </Show>
 
-                    <Show
-                      when={messageContext()}
-                      fallback={
-                        <Show when={accessibleItem().updatedAt}>
-                          {(time) => (
-                            <MetadataInfo icon={ClockIcon} align="right">
-                              <span class="text-xxs font-mono uppercase">
-                                {formatDate(time())}
-                              </span>
-                            </MetadataInfo>
-                          )}
-                        </Show>
-                      }
+                {/* Calendar event schedule, location, and people */}
+                <Show when={matches(item(), isCalendarEventPreviewItem)}>
+                  {(calendarItem) => (
+                    <CalendarEventPreviewDetails event={calendarItem().event} />
+                  )}
+                </Show>
+
+                {/* Visual preview for images */}
+                <Show when={props.documentInfo.type === 'image'}>
+                  <Card.Body class="px-3 pt-2 pb-3">
+                    <Card
+                      variant="filled"
+                      offset={1}
+                      class="overflow-hidden rounded-lg"
                     >
+                      <ImageCoverStrip
+                        documentId={accessibleItem().id}
+                        fileType={accessibleItem().fileType}
+                        class="shrink-0 h-32"
+                      />
+                    </Card>
+                  </Card.Body>
+                </Show>
+
+                {/* Message excerpt and snapshot details */}
+                <Show when={messageContext() || props.snapshotInfo}>
+                  <Card.Body class="pt-2">
+                    <Show when={messageContext()}>
                       {(context) => (
-                        <MetadataInfo icon={ClockIcon} align="right">
-                          {formatDate(context().created_at)}
-                        </MetadataInfo>
+                        <div class="mb-2 text-sm text-ink-muted border-l-2 border-edge pl-3 py-1">
+                          <div class="line-clamp-3 wrap-break-word">
+                            <StaticMarkdown
+                              markdown={context().content}
+                              theme={channelTheme}
+                              target="internal"
+                            />
+                          </div>
+                        </div>
                       )}
                     </Show>
-                  </div>
 
-                  <Show when={props.snapshotInfo}>
-                    {(snapshot) => (
-                      <div class="mt-2 pt-2 border-t border-edge">
-                        <div class="flex items-center gap-1.5 text-ink-muted">
-                          <ClockIcon class="size-3" />
-                          <span class="text-xxs font-medium font-mono uppercase">
-                            Snapshot from{' '}
-                            {formatDate(new Date(snapshot().date), {
-                              showTime: true,
-                            })}
-                          </span>
+                    <Show when={props.snapshotInfo}>
+                      {(snapshot) => (
+                        <div class="mt-2 pt-2 border-t border-edge">
+                          <div class="flex items-center gap-1.5 text-ink-muted">
+                            <ClockIcon class="size-3" />
+                            <span class="text-xs font-medium font-mono uppercase">
+                              Snapshot from{' '}
+                              {formatDate(new Date(snapshot().date), {
+                                showTime: true,
+                              })}
+                            </span>
+                          </div>
                         </div>
-                      </div>
-                    )}
-                  </Show>
-                </div>
-              </Show>
-            </div>
+                      )}
+                    </Show>
+                  </Card.Body>
+                </Show>
+              </div>
+            </TaskPropertiesPreviewProvider>
           );
         }}
       </Match>
@@ -925,17 +1041,17 @@ export function DocumentPreviewContent(props: DocumentPreviewContentProps) {
               </div>
             }
           >
-            <div class="w-full flex flex-col">
-              <div class="flex items-center justify-between gap-2 px-3 pt-3 pb-2">
-                <div class="flex items-center gap-2 min-w-0">
-                  <EntityIcon targetType={props.documentInfo.type} size="sm" />
-                </div>
-                <div class="flex shrink-0">{renderActionButtons()}</div>
-              </div>
-              <div class="line-clamp-2 wrap-break-word px-2 mb-2">
-                {props.documentInfo.name}
-              </div>
-            </div>
+            <Card.Header class="py-2.5">
+              <Item class="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-x-2 border-0 p-0">
+                <Item.Icon class="col-start-1 row-start-1">
+                  <EntityIcon targetType={props.documentInfo.type} size="xs" />
+                </Item.Icon>
+                <Item.Content class="col-start-2 row-start-1">
+                  <PreviewTitle name={props.documentInfo.name ?? ''} />
+                </Item.Content>
+                {renderActionButtons()}
+              </Item>
+            </Card.Header>
           </Show>
         )}
       </Match>
@@ -946,7 +1062,7 @@ export function DocumentPreviewContent(props: DocumentPreviewContentProps) {
 /**
  * Floating hover-card preview for document references. This is the shell used by
  * {@link import('./ItemPreview').ItemPreview} hover cards: a fixed-width,
- * floating, rounded surface with a highlighted (colored) border and drop
+ * floating, rounded filled card with a semantic border and drop
  * shadow, plus mouse-enter/leave handling to keep the card alive while hovered.
  *
  * The reusable body lives in {@link DocumentPreviewContent}; this component only
@@ -964,7 +1080,11 @@ export function PopupPreview(
       onMouseEnter={props.mouseEnter}
       onMouseLeave={props.mouseLeave}
     >
-      <Surface depth={3} class="rounded-xl shadow-lg shadow-drop-shadow">
+      <Card
+        variant="filled"
+        depth={2}
+        class="rounded-xl shadow-lg shadow-drop-shadow"
+      >
         <DocumentPreviewContent
           delete={props.delete}
           collapseInfo={props.collapseInfo}
@@ -973,7 +1093,7 @@ export function PopupPreview(
           snapshotInfo={props.snapshotInfo}
           useFallbackData={props.useFallbackData}
         />
-      </Surface>
+      </Card>
     </div>
   );
 }

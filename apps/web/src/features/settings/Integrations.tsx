@@ -134,7 +134,7 @@ function AddServerForm(props: {
 
           <div class="flex justify-end gap-2 pt-1">
             <Button
-              variant="base"
+              variant="ghost"
               size="sm"
               depth={3}
               onClick={() => {
@@ -145,7 +145,7 @@ function AddServerForm(props: {
               Cancel
             </Button>
             <Button
-              variant="active"
+              variant="strong"
               size="sm"
               depth={3}
               disabled={
@@ -281,7 +281,7 @@ function ServerRow(props: { server: ServerResponse }) {
           </span>
         </Show>
         <Button
-          variant="active"
+          variant="accent"
           size="sm"
           depth={3}
           disabled={authMutation.isPending}
@@ -311,7 +311,7 @@ function ServerRow(props: { server: ServerResponse }) {
         fallback={
           <div class="flex items-center gap-1">
             <Button
-              variant="danger"
+              variant="strong"
               size="sm"
               depth={3}
               disabled={deleteMutation.isPending}
@@ -320,7 +320,7 @@ function ServerRow(props: { server: ServerResponse }) {
               {deleteMutation.isPending ? 'Removing...' : 'Confirm'}
             </Button>
             <Button
-              variant="base"
+              variant="ghost"
               size="sm"
               depth={3}
               onClick={() => setConfirmDelete(false)}
@@ -331,7 +331,7 @@ function ServerRow(props: { server: ServerResponse }) {
         }
       >
         <Button
-          variant="base"
+          variant="outline"
           size="sm"
           depth={3}
           tooltip="Remove"
@@ -394,7 +394,7 @@ function FeaturedServerRow(props: { server: FeaturedMcpServer }) {
 }
 
 /**
- * The "MCP integrations" section of the Connections page: MCP servers the
+ * The "MCP integrations" section of the Connections/Integrations pages: MCP servers the
  * user has connected, followed by the preset suggestions they haven't, with
  * custom servers behind the "Add server" dialog.
  */
@@ -413,7 +413,7 @@ export function IntegrationsSection() {
       description="Connect MCP servers to give Macro's agent access to the tools your team already uses."
       actions={
         <Button
-          variant="base"
+          variant="outline"
           size="sm"
           depth={3}
           onClick={() => setShowAddDialog(true)}
@@ -428,7 +428,7 @@ export function IntegrationsSection() {
           <div class="px-6 py-8 text-center text-sm text-ink-muted">
             Failed to load integrations.
             <Button
-              variant="base"
+              variant="outline"
               size="sm"
               depth={3}
               onClick={() => serversQuery.refetch()}

@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./collab/*": "./src/collab/*.ts",
+    "./docx/*": "./src/docx/*.ts",
     "./sync-service/*": "./src/sync-service/*.ts",
     "./websocket": "./src/websocket/index.ts",
     "./websocket/*": "./src/websocket/*.ts"
@@ -39,7 +40,7 @@
     "typescript": "^5.9.3",
     "vite-plugin-solid": "^2.11.8",
     "vite-plugin-wasm": "^3.5.0",
-    "vitest": "^3.2.4",
+    "vitest": "5.0.1",
     "ws": "^8.18.0"
   }
 }

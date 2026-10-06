@@ -1,14 +1,22 @@
 import type { BlockAlias, BlockName } from '@core/block';
 import type { HotkeyToken } from '@core/hotkey/tokens';
 import type { HotkeyRegistrationOptions } from '@core/hotkey/types';
-import type { Component } from 'solid-js';
+
+export type CreatableName = BlockName | BlockAlias | 'initiative';
 
 export type CreatableBlock = Omit<HotkeyRegistrationOptions, 'scopeId'> & {
   label: string;
   launcherHint?: string;
-  blockName: BlockName | BlockAlias;
+  blockName: CreatableName;
   altHotkeyToken?: HotkeyToken;
-  animatedIcon?: Component<{ triggerAnimation?: boolean }>;
+  /**
+   * Whether the entry is available at all, for one behind a feature flag.
+   *
+   * Read by every surface that renders or binds these — `useCreateMenuBlocks`
+   * for the menus, `GlobalHotkeys` for the keys — so a gated entry cannot be
+   * shown in one and hidden in the other. Absent means always available.
+   */
+  enabled?: () => boolean;
 };
 
 export type CategoryFilter =

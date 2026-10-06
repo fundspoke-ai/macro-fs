@@ -50,7 +50,7 @@ function ReactionTooltipContent(props: {
   return (
     <span>
       {formatReactorNames(props.users, props.currentUserId)} reacted with{' '}
-      <span class="text-md">{props.emoji}</span>
+      <span class="text-base">{props.emoji}</span>
     </span>
   );
 }
@@ -78,6 +78,8 @@ export function ReactionChip(props: ReactionChipProps) {
           <Button
             data-message-reaction-chip
             data-emoji={props.emoji}
+            data-user-reacted={props.selected ? '' : undefined}
+            aria-pressed={!!props.selected}
             noTouchResize
             ref={(el) =>
               touchHandler(el, () => ({
@@ -88,17 +90,10 @@ export function ReactionChip(props: ReactionChipProps) {
               }))
             }
             size="sm"
-            variant="base"
+            variant={props.selected ? 'accent' : 'outline'}
             class={cn(
-              'flex flex-row items-center h-7 min-w-7 gap-2 rounded-sm',
-              {
-                'border-edge-muted hover:bg-hover hover:scale-105':
-                  props.interactive,
-                'border-edge-muted': !props.selected && !props.interactive,
-                'text-accent border-accent hover:bg-accent-hover':
-                  props.selected,
-                'pointer-events-auto': !props.interactive,
-              }
+              'flex flex-row items-center h-7 min-w-7 gap-1',
+              !props.interactive && 'pointer-events-auto'
             )}
             disabled={!props.interactive}
             onClick={(event) => {
@@ -108,13 +103,13 @@ export function ReactionChip(props: ReactionChipProps) {
           >
             <span class="text-lg leading-0">{props.emoji}</span>
             <Show when={props.count > 1}>
-              <span class="text-xs">{props.count}</span>
+              <span class="text-xs tabular-nums">{props.count}</span>
             </Show>
           </Button>
         </HoverCard>
       </Popover.Anchor>
       <Popover.Portal>
-        <Popover.Content class="z-modal border border-edge-muted bg-surface p-1.5 text-ink-muted text-xs rounded-sm">
+        <Popover.Content class="z-modal glass bg-menu-glass p-1.5 text-ink-muted text-xs rounded-lg">
           <ReactionTooltipContent
             users={props.users}
             currentUserId={props.currentUserId}

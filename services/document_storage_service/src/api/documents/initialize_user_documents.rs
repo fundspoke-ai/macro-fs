@@ -11,6 +11,7 @@ use model::{
     document::BasicDocument,
     response::{ErrorResponse, GenericErrorResponse, GenericSuccessResponse},
 };
+use model_owner::Owner;
 use models_permissions::share_permission::SharePermissionV2;
 use projects_hex::domain::events::{ProjectCreatedMetadata, ProjectMacroEvent};
 use reqwest::StatusCode;
@@ -76,8 +77,10 @@ pub async fn handler(
             .into_response()
     })?;
 
-    // Create default share permission
-    let share_permission = SharePermissionV2::new_project_share_permission();
+    // Create default share permission. Onboarding documents are created at
+    // signup, before team membership is meaningful, so the team default
+    // link-share preference intentionally does not apply.
+    let share_permission = SharePermissionV2::new_project_share_permission(None);
 
     let start_time = std::time::Instant::now();
     let project =
@@ -161,7 +164,7 @@ pub async fn handler(
             let s3_client = shared_s3_client.clone(); // Clone the client for parallel usage
             let markdown_template = shared_markdown_template.clone();
             let canvas_template = shared_canvas_template.clone();
-            let user_id = user_context.authorization.user.macro_user_id.clone();
+            let owner = Owner::User(user_context.authorization.user.macro_user_id.clone());
             async move {
                 let uri_document_name = urlencoding::encode(document.document_name.as_str());
                 let deref_file_type = document.file_type.as_deref();
@@ -172,7 +175,7 @@ pub async fn handler(
                 };
 
                 let target_key = build_cloud_storage_bucket_document_key(
-                    user_id.as_ref(),
+                    &owner,
                     &document.document_id,
                     document.document_version_id,
                 );
@@ -251,7 +254,7 @@ pub async fn handler(
         project.id.clone(),
         ProjectCreatedMetadata {
             project_id: project.id.clone(),
-            owner: user_context.authorization.user.macro_user_id.clone(),
+            owner: Owner::User(user_context.authorization.user.macro_user_id.clone()),
             name: PROJECT_NAME.to_string(),
             parent_project_id: None,
             created_at: project.created_at,

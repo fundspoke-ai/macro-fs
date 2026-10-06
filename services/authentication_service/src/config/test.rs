@@ -1,4 +1,126 @@
+use authentication_service::service::signup_policy::SignupPolicyDenial;
+
 use super::*;
+
+fn config_values() -> serde_json::Value {
+    let mut values = serde_json::json!({ "ENVIRONMENT": "local" });
+    for key in [
+        "BASE_URL",
+        "DATABASE_URL",
+        "REDIS_URI",
+        "FUSIONAUTH_API_KEY_SECRET_KEY",
+        "FUSIONAUTH_CLIENT_ID",
+        "FUSIONAUTH_CLIENT_SECRET_KEY",
+        "FUSIONAUTH_BASE_URL",
+        "FUSIONAUTH_OAUTH_REDIRECT_URI",
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET_KEY",
+        "MICROSOFT_CLIENT_ID",
+        "MICROSOFT_CLIENT_SECRET",
+        "MICROSOFT_TENANT_ID",
+        "MICROSOFT_TOKEN_KMS_KEY_ID",
+        "STRIPE_SECRET_KEY",
+        "SERVICE_INTERNAL_AUTH_KEY",
+        "GITHUB_CLIENT_ID",
+        "GITHUB_CLIENT_SECRET",
+        "GITHUB_IDP_ID",
+        "STRIPE_PRICE_ID",
+        "INTERNAL_API_KEY",
+        "KAFKA_BROKERS",
+    ] {
+        values[key] = serde_json::json!("test");
+    }
+    values["AI_USAGE_FREE_INCLUDED_ALLOWANCE_CENTS"] = serde_json::json!(500);
+    values["AI_USAGE_INCLUDED_ALLOWANCE_CENTS"] = serde_json::json!(2_000);
+    values["AI_USAGE_MAX_INCLUDED_ALLOWANCE_CENTS"] = serde_json::json!(10_000);
+    values["AI_USAGE_OVERAGE_MARKUP_PERCENT"] = serde_json::json!(5);
+    values
+}
+
+#[test]
+fn ai_pricing_is_mandatory_and_validated() {
+    use ai_billing::PlanTier;
+
+    let config: Config = serde_json::from_value(config_values()).unwrap();
+    let pricing = config.ai_pricing();
+    assert_eq!(pricing.included_allowance_cents_for(PlanTier::Free), 500);
+    assert_eq!(
+        pricing.included_allowance_cents_for(PlanTier::Premium),
+        2_000
+    );
+    assert_eq!(pricing.included_allowance_cents_for(PlanTier::Max), 10_000);
+    assert_eq!(pricing.overage_markup_percent(), 5);
+
+    for key in [
+        "AI_USAGE_FREE_INCLUDED_ALLOWANCE_CENTS",
+        "AI_USAGE_INCLUDED_ALLOWANCE_CENTS",
+        "AI_USAGE_MAX_INCLUDED_ALLOWANCE_CENTS",
+        "AI_USAGE_OVERAGE_MARKUP_PERCENT",
+    ] {
+        let mut values = config_values();
+        values.as_object_mut().unwrap().remove(key);
+        assert!(
+            serde_json::from_value::<Config>(values.clone()).is_err(),
+            "{key} must be mandatory"
+        );
+        values[key] = serde_json::json!("2000");
+        assert!(
+            serde_json::from_value::<Config>(values).is_err(),
+            "{key} must be an integer"
+        );
+    }
+    let mut values = config_values();
+    values["AI_USAGE_OVERAGE_MARKUP_PERCENT"] = serde_json::json!(100);
+    assert!(serde_json::from_value::<Config>(values).is_err());
+    for key in [
+        "AI_USAGE_FREE_INCLUDED_ALLOWANCE_CENTS",
+        "AI_USAGE_INCLUDED_ALLOWANCE_CENTS",
+        "AI_USAGE_MAX_INCLUDED_ALLOWANCE_CENTS",
+    ] {
+        let mut values = config_values();
+        values[key] = serde_json::json!(-1);
+        assert!(
+            serde_json::from_value::<Config>(values).is_err(),
+            "{key} must be non-negative"
+        );
+    }
+}
+
+#[test]
+fn billing_enforcement_config_defaults_off_and_requires_a_boolean() {
+    let mut values = config_values();
+    let config: Config = serde_json::from_value(values.clone()).unwrap();
+    assert_eq!(
+        config.enable_ai_usage_enforcement,
+        ai_billing::AiUsageEnforcement::Disabled
+    );
+    for enabled in [false, true] {
+        values["ENABLE_AI_USAGE_ENFORCEMENT"] = serde_json::json!(enabled);
+        let config: Config = serde_json::from_value(values.clone()).unwrap();
+        assert_eq!(config.enable_ai_usage_enforcement.is_enabled(), enabled);
+    }
+    values["ENABLE_AI_USAGE_ENFORCEMENT"] = serde_json::json!("invalid");
+    assert!(serde_json::from_value::<Config>(values).is_err());
+}
+
+#[test]
+fn billing_settlement_config_defaults_off_and_requires_a_boolean() {
+    let mut values = config_values();
+    let config: Config = serde_json::from_value(values.clone()).unwrap();
+    assert_eq!(
+        config.enable_ai_usage_billing,
+        ai_billing::AiUsageBilling::Disabled
+    );
+    for enabled in [false, true] {
+        values["ENABLE_AI_USAGE_BILLING"] = serde_json::json!(enabled);
+        let config: Config = serde_json::from_value(values.clone()).unwrap();
+        assert_eq!(config.enable_ai_usage_billing.is_enabled(), enabled);
+        // The two policies are independent.
+        assert!(!config.enable_ai_usage_enforcement.is_enabled());
+    }
+    values["ENABLE_AI_USAGE_BILLING"] = serde_json::json!("invalid");
+    assert!(serde_json::from_value::<Config>(values).is_err());
+}
 
 #[test]
 fn complete_microsoft_credentials_are_resolved() {
@@ -15,6 +137,7 @@ fn complete_microsoft_credentials_are_resolved() {
     assert_eq!(credentials.client_id, "microsoft-client-id");
     assert_eq!(credentials.client_secret, "microsoft-client-secret");
     assert_eq!(credentials.tenant_id, "microsoft-tenant-id");
+    assert_eq!(credentials.token_kms_key_id, "microsoft-kms-key");
 }
 
 #[test]
@@ -48,6 +171,30 @@ fn every_partial_microsoft_credential_combination_is_rejected() {
 }
 
 #[test]
+fn kms_key_is_required_when_microsoft_oauth_is_enabled() {
+    for kms_key_id in [None, Some(""), Some(" \t ")] {
+        let error = resolve_with_kms(
+            Some("microsoft-client-id"),
+            Some("microsoft-client-secret"),
+            Some("microsoft-tenant-id"),
+            kms_key_id,
+        )
+        .err()
+        .expect("a KMS key is required with Microsoft credentials");
+
+        assert!(error.to_string().contains("MICROSOFT_TOKEN_KMS_KEY_ID"));
+    }
+}
+
+#[test]
+fn kms_key_alone_does_not_enable_microsoft_oauth() {
+    let credentials = resolve_with_kms(None, None, None, Some("microsoft-kms-key"))
+        .expect("an unused KMS key should not enable Microsoft OAuth");
+
+    assert!(credentials.is_none());
+}
+
+#[test]
 fn blank_values_are_rejected_when_other_credentials_are_configured() {
     let partial_credentials = [
         (Some(" "), Some("client-secret"), Some("tenant-id")),
@@ -65,10 +212,25 @@ fn resolve(
     client_secret: Option<&'static str>,
     tenant_id: Option<&'static str>,
 ) -> anyhow::Result<Option<MicrosoftCredentials>> {
+    resolve_with_kms(
+        client_id,
+        client_secret,
+        tenant_id,
+        Some("microsoft-kms-key"),
+    )
+}
+
+fn resolve_with_kms(
+    client_id: Option<&'static str>,
+    client_secret: Option<&'static str>,
+    tenant_id: Option<&'static str>,
+    token_kms_key_id: Option<&'static str>,
+) -> anyhow::Result<Option<MicrosoftCredentials>> {
     resolve_microsoft_credentials(
         &microsoft_client_id(client_id),
         &microsoft_client_secret(client_secret),
         &microsoft_tenant_id(tenant_id),
+        &microsoft_token_kms_key_id(token_kms_key_id),
     )
 }
 
@@ -91,4 +253,181 @@ fn microsoft_tenant_id(value: Option<&'static str>) -> MicrosoftTenantId {
         Some(value) => MicrosoftTenantId::new_testing(value),
         None => MicrosoftTenantId::new_unset(),
     }
+}
+
+fn microsoft_token_kms_key_id(value: Option<&'static str>) -> MicrosoftTokenKmsKeyId {
+    match value {
+        Some(value) => MicrosoftTokenKmsKeyId::new_testing(value),
+        None => MicrosoftTokenKmsKeyId::new_unset(),
+    }
+}
+
+fn development_allowlist(value: Option<&'static str>) -> DevelopmentSignupAllowlistJson {
+    match value {
+        Some(value) => DevelopmentSignupAllowlistJson::new_testing(value),
+        None => DevelopmentSignupAllowlistJson::new_unset(),
+    }
+}
+
+const ALLOWLIST_SETTING_CASES: [Option<&str>; 5] = [
+    None,
+    Some(""),
+    Some(" \t "),
+    Some("not-json-with-secret@example.test"),
+    Some(r#"["allowed.user@example.test"]"#),
+];
+
+const UNLISTED_PUBLIC_EMAIL: &str = "unlisted.user@example.test";
+
+#[test]
+fn develop_config_temporarily_allows_unlisted_signups_regardless_of_bypass() {
+    for bypass in [None, Some(false), Some(true)] {
+        for allowlist in ALLOWLIST_SETTING_CASES {
+            let mut values = config_values();
+            values["ENVIRONMENT"] = serde_json::json!("develop");
+            if let Some(bypass) = bypass {
+                values["DEVELOPMENT_BYPASS_SIGNUP_ALLOWLIST"] = serde_json::json!(bypass);
+            }
+            if let Some(allowlist) = allowlist {
+                values["DEVELOPMENT_SIGNUP_ALLOWLIST_JSON"] = serde_json::json!(allowlist);
+            }
+            let config: Config = serde_json::from_value(values).unwrap();
+
+            // Exercise both runtime startup and the Doppler validator's entry point.
+            for policy in [
+                config.signup_policy().unwrap(),
+                config
+                    .signup_policy_for_environment(Environment::Develop)
+                    .unwrap(),
+            ] {
+                assert_eq!(policy.allowed_email_count(), None);
+                assert_eq!(policy.authorize_public_email(UNLISTED_PUBLIC_EMAIL), Ok(()));
+            }
+        }
+    }
+}
+
+#[test]
+fn develop_signup_policy_requires_configured_allowlist() {
+    for value in [None, Some(""), Some(" \t ")] {
+        let error =
+            resolve_signup_policy(Environment::Develop, false, &development_allowlist(value))
+                .expect_err("Develop should require a nonblank allowlist setting");
+
+        assert!(
+            error
+                .to_string()
+                .contains("DEVELOPMENT_SIGNUP_ALLOWLIST_JSON")
+        );
+    }
+}
+
+#[test]
+fn develop_signup_policy_uses_configured_allowlist() {
+    let policy = resolve_signup_policy(
+        Environment::Develop,
+        false,
+        &development_allowlist(Some(
+            r#"["Allowed.User@example.test", "allowed.user@example.test"]"#,
+        )),
+    )
+    .expect("valid Develop allowlist should resolve");
+
+    assert_eq!(policy.allowed_email_count(), Some(1));
+    policy
+        .authorize_public_email("allowed.user@example.test")
+        .expect("configured email should be allowed");
+    assert_eq!(
+        policy.authorize_public_email(UNLISTED_PUBLIC_EMAIL),
+        Err(SignupPolicyDenial::PublicEmailNotAllowed)
+    );
+}
+
+#[test]
+fn develop_signup_policy_rejects_malformed_allowlist_without_leaking_value() {
+    let configured_value = "not-json-with-secret@example.test";
+    let error = resolve_signup_policy(
+        Environment::Develop,
+        false,
+        &development_allowlist(Some(configured_value)),
+    )
+    .expect_err("malformed Develop allowlist should be rejected");
+    let message = error.to_string();
+
+    assert!(message.contains("DEVELOPMENT_SIGNUP_ALLOWLIST_JSON"));
+    assert!(!message.contains(configured_value));
+    assert!(!format!("{error:?}").contains(configured_value));
+}
+
+#[test]
+fn develop_signup_policy_bypass_ignores_allowlist_setting() {
+    for value in ALLOWLIST_SETTING_CASES {
+        let policy =
+            resolve_signup_policy(Environment::Develop, true, &development_allowlist(value))
+                .expect("Develop bypass should not parse the allowlist setting");
+
+        assert_eq!(policy.allowed_email_count(), None);
+        assert_eq!(policy.authorize_public_email(UNLISTED_PUBLIC_EMAIL), Ok(()));
+    }
+}
+
+#[test]
+fn production_and_local_signup_policy_ignore_allowlist_and_bypass() {
+    for environment in [Environment::Production, Environment::Local] {
+        for bypass in [false, true] {
+            for value in ALLOWLIST_SETTING_CASES {
+                let policy =
+                    resolve_signup_policy(environment, bypass, &development_allowlist(value))
+                        .expect("non-Develop environments should not parse the allowlist setting");
+
+                assert_eq!(policy.allowed_email_count(), None);
+                policy
+                    .authorize_public_email("anyone@example.test")
+                    .expect("non-Develop environments should allow all public signups");
+            }
+        }
+    }
+}
+
+#[test]
+fn cursor_kms_key_from_config_field() {
+    let configured = CursorApiKeyKmsKeyId::new_testing("arn:aws:kms:from-config");
+    assert_eq!(
+        resolve_cursor_api_key_kms_key_id(&configured, None).unwrap(),
+        "arn:aws:kms:from-config"
+    );
+}
+
+#[test]
+fn cursor_kms_key_from_process_env_when_config_unset() {
+    let configured = CursorApiKeyKmsKeyId::new_unset();
+    assert_eq!(
+        resolve_cursor_api_key_kms_key_id(&configured, Some("arn:aws:kms:from-env")).unwrap(),
+        "arn:aws:kms:from-env"
+    );
+}
+
+#[test]
+fn cursor_kms_key_prefers_config_over_process_env() {
+    let configured = CursorApiKeyKmsKeyId::new_testing("arn:aws:kms:from-config");
+    assert_eq!(
+        resolve_cursor_api_key_kms_key_id(&configured, Some("arn:aws:kms:from-env")).unwrap(),
+        "arn:aws:kms:from-config"
+    );
+}
+
+#[test]
+fn cursor_kms_key_blank_config_falls_back_to_process_env() {
+    let configured = CursorApiKeyKmsKeyId::new_testing("  ");
+    assert_eq!(
+        resolve_cursor_api_key_kms_key_id(&configured, Some("arn:aws:kms:from-env")).unwrap(),
+        "arn:aws:kms:from-env"
+    );
+}
+
+#[test]
+fn cursor_kms_key_required_when_both_absent() {
+    let configured = CursorApiKeyKmsKeyId::new_unset();
+    let error = resolve_cursor_api_key_kms_key_id(&configured, None).unwrap_err();
+    assert!(error.to_string().contains("CURSOR_API_KEY_KMS_KEY_ID"));
 }

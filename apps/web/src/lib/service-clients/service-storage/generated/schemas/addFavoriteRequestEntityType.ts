@@ -24,4 +24,9 @@ export type AddFavoriteRequestEntityType =
   | 'crm_company'
   | 'crm_contact'
   | 'reminder'
-  | 'skill';
+  | 'skill'
+  | 'agent_session'
+  | 'scheduled_action'
+  | 'initiative'
+  | 'database'
+  | 'database_row';

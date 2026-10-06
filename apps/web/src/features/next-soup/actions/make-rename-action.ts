@@ -1,8 +1,8 @@
 import { openBulkEditModal } from '@app/features/entity/bulk-edit/BulkEditEntityModal';
 import { toast } from '@core/component/Toast/Toast';
 import type { EntityData } from '@entity';
-import type { SoupState } from '../create-soup-state';
 import { restoreSoupFocus } from '../utils';
+import type { EntityActionListState } from './entity-action-context';
 
 type MakeRenameOptions = {
   userId: () => string | undefined;
@@ -12,7 +12,8 @@ export const makeRenameAction = (options: MakeRenameOptions) => {
   const { userId } = options;
 
   const canExecute = (entity: EntityData): boolean => {
-    if (entity.type === 'email') return false;
+    if (entity.type === 'agent_session' && entity.isArchived) return false;
+    if (entity.type === 'email' || entity.type === 'database') return false;
     if (entity.type === 'channel_message' || entity.type === 'channel_thread') {
       return false;
     }
@@ -20,7 +21,7 @@ export const makeRenameAction = (options: MakeRenameOptions) => {
 
     if (entity.type === 'channel') {
       if (entity.channelType === 'direct_message') return false;
-      return entity.ownerId === userId();
+      return entity.isParticipant !== false;
     }
 
     return entity.ownerId === userId();
@@ -38,7 +39,10 @@ export const makeRenameAction = (options: MakeRenameOptions) => {
     });
   };
 
-  const executeWithSoup = async (entities: EntityData[], soup: SoupState) => {
+  const executeWithSoup = async (
+    entities: EntityData[],
+    soup: EntityActionListState
+  ) => {
     const firstEntity = entities[0];
 
     openBulkEditModal({

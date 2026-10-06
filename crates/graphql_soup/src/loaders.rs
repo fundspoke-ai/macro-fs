@@ -16,29 +16,34 @@ use email::domain::{
 };
 use filter_ast::Expr;
 use futures::{future::BoxFuture, future::try_join_all};
-use item_filters::ast::{
-    EmailFilterAst, EntityFilterAst,
-    calendar_event::CalendarEventLiteral,
-    call::CallLiteral,
-    channel::{ChannelLiteral, ChannelThreadLiteral},
-    chat::ChatLiteral,
-    crm_company::CrmCompanyLiteral,
-    document::DocumentLiteral,
-    email::EmailLiteral,
-    foreign_entity::ForeignEntityLiteral,
-    project::ProjectLiteral,
-    reminder::ReminderLiteral,
+use item_filters::{
+    SharedEmailFilter,
+    ast::{
+        EmailFilterAst, EntityFilterAst,
+        agent_session::AgentSessionLiteral,
+        calendar_event::CalendarEventLiteral,
+        call::CallLiteral,
+        channel::{ChannelLiteral, ChannelThreadLiteral},
+        chat::ChatLiteral,
+        crm_company::CrmCompanyLiteral,
+        crm_contact::CrmContactLiteral,
+        database_row::DatabaseRowLiteral,
+        document::DocumentLiteral,
+        email::EmailLiteral,
+        foreign_entity::ForeignEntityLiteral,
+        initiative::InitiativeLiteral,
+        project::ProjectLiteral,
+    },
 };
 use macro_user_id::user_id::MacroUserIdStr;
 use model_entity::{Entity, EntityType};
 use models_pagination::SimpleSortMethod;
-use models_soup::item::SoupItem;
 use rootcause::{
     Report,
     markers::{Cloneable, Dynamic},
 };
 use soup::domain::{
-    models::{SoupQuery, SoupRequest, SoupSortDirection, SoupType},
+    models::{SoupProjectionHydration, SoupQuery, SoupRequest, SoupSortDirection, SoupType},
     ports::SoupService,
 };
 use uuid::Uuid;
@@ -118,7 +123,7 @@ where
         &self,
         user_id: MacroUserIdStr<'static>,
         entities: Vec<Entity<'static>>,
-    ) -> Result<HashMap<SoupItemLoaderKey, SoupItem<()>>, SoupItemLoaderError> {
+    ) -> Result<HashMap<SoupItemLoaderKey, SoupProjectionHydration>, SoupItemLoaderError> {
         let requested = entities.iter().cloned().collect::<HashSet<_>>();
         let needs_inboxes = entities
             .iter()
@@ -145,14 +150,14 @@ where
 
         let items = self
             .soup_service
-            .get_user_soup(request, None)
+            .get_user_soup_with_projection(request, None)
             .await
             .map_err(|error| rootcause::report!(error).into_dynamic().into_cloneable())?
-            .either(|page| page.items, |page| page.items);
+            .into_items();
 
         let mut loaded = HashMap::with_capacity(items.len());
-        for item in items {
-            let entity = item.entity();
+        for hydration in items {
+            let entity = hydration.item.entity();
             if !requested.contains(&entity) {
                 return Err(rootcause::report!(
                     "filtered Soup request returned unrequested entity {} {}",
@@ -162,7 +167,7 @@ where
                 .into_cloneable());
             }
             if loaded
-                .insert((user_id.clone(), entity.clone()), item)
+                .insert((user_id.clone(), entity.clone()), hydration)
                 .is_some()
             {
                 return Err(rootcause::report!(
@@ -187,7 +192,7 @@ where
     async fn load_keys(
         &self,
         keys: Vec<SoupItemLoaderKey>,
-    ) -> Result<HashMap<SoupItemLoaderKey, SoupItem<()>>, SoupItemLoaderError> {
+    ) -> Result<HashMap<SoupItemLoaderKey, SoupProjectionHydration>, SoupItemLoaderError> {
         let mut entities_by_user = HashMap::<MacroUserIdStr<'static>, Vec<Entity<'static>>>::new();
         for (user_id, entity) in keys {
             entities_by_user.entry(user_id).or_default().push(entity);
@@ -206,7 +211,7 @@ where
     S: SoupService,
     I: SoupInboxReader,
 {
-    type Value = SoupItem<()>;
+    type Value = SoupProjectionHydration;
     type Error = SoupItemLoaderError;
 
     async fn load(
@@ -231,7 +236,7 @@ where
     S: SoupService,
     I: SoupInboxReader,
 {
-    type Value = SoupItem<()>;
+    type Value = SoupProjectionHydration;
     type Error = SoupItemLoaderError;
 
     async fn load(
@@ -253,7 +258,7 @@ where
 /// Type-erased function that loads one Soup item through a concrete DataLoader.
 type LoadOne = dyn Fn(
         OwnedSoupItemLoaderKey,
-    ) -> BoxFuture<'static, Result<Option<SoupItem<()>>, SoupItemLoaderError>>
+    ) -> BoxFuture<'static, Result<Option<SoupProjectionHydration>, SoupItemLoaderError>>
     + Send
     + Sync;
 
@@ -261,7 +266,7 @@ type LoadOne = dyn Fn(
 async fn load_one_owned<S, I>(
     loader: Arc<DataLoader<SoupItemLoader<S, I>>>,
     key: OwnedSoupItemLoaderKey,
-) -> Result<Option<SoupItem<()>>, SoupItemLoaderError>
+) -> Result<Option<SoupProjectionHydration>, SoupItemLoaderError>
 where
     S: SoupService,
     I: SoupInboxReader,
@@ -278,7 +283,7 @@ pub struct SoupItemDataLoader {
 
 impl SoupItemDataLoader {
     /// Construct a type-erased DataLoader from a concrete loader implementation.
-    fn new<S, I>(loader: SoupItemLoader<S, I>) -> Self
+    pub fn new<S, I>(loader: SoupItemLoader<S, I>) -> Self
     where
         S: SoupService,
         I: SoupInboxReader,
@@ -299,7 +304,7 @@ impl SoupItemDataLoader {
     pub async fn load_one(
         &self,
         key: SoupItemLoaderKey,
-    ) -> Result<Option<SoupItem<()>>, SoupItemLoaderError> {
+    ) -> Result<Option<SoupProjectionHydration>, SoupItemLoaderError> {
         let (user_id, entity) = key;
         (self.load_one)(OwnedSoupItemLoaderKey { user_id, entity }).await
     }
@@ -333,14 +338,17 @@ fn entity_filter_ast(entities: &[Entity<'static>]) -> Result<EntityFilterAst, So
     let mut documents = Vec::new();
     let mut chats = Vec::new();
     let mut projects = Vec::new();
+    let mut initiatives = Vec::new();
     let mut email_threads = Vec::new();
     let mut channels = Vec::new();
     let mut channel_threads = Vec::new();
     let mut calls = Vec::new();
     let mut crm_companies = Vec::new();
+    let mut crm_contacts = Vec::new();
     let mut foreign_entities = Vec::new();
     let mut calendar_events = Vec::new();
-    let mut reminders = Vec::new();
+    let mut agent_sessions = Vec::new();
+    let mut database_rows = Vec::new();
 
     for entity in entities {
         let id = Uuid::parse_str(entity.entity_id.as_ref()).map_err(|error| {
@@ -355,6 +363,7 @@ fn entity_filter_ast(entities: &[Entity<'static>]) -> Result<EntityFilterAst, So
             EntityType::Document => documents.push(DocumentLiteral::Id(id)),
             EntityType::Chat => chats.push(ChatLiteral::ChatId(id)),
             EntityType::Project => projects.push(ProjectLiteral::ProjectIdSelf(id)),
+            EntityType::Initiative => initiatives.push(InitiativeLiteral::Id(id)),
             EntityType::EmailThread => email_threads.push(EmailLiteral::ThreadId(id)),
             EntityType::Channel => channels.push(ChannelLiteral::ChannelId(id)),
             EntityType::ChannelMessage => {
@@ -362,14 +371,18 @@ fn entity_filter_ast(entities: &[Entity<'static>]) -> Result<EntityFilterAst, So
             }
             EntityType::Call => calls.push(CallLiteral::CallId(id)),
             EntityType::CrmCompany => crm_companies.push(CrmCompanyLiteral::Id(id)),
+            EntityType::CrmContact => crm_contacts.push(CrmContactLiteral::Id(id)),
             EntityType::ForeignEntity => foreign_entities.push(ForeignEntityLiteral::Id(id)),
             EntityType::CalendarEvent => calendar_events.push(CalendarEventLiteral::Id(id)),
-            EntityType::Reminder => reminders.push(ReminderLiteral::Id(id)),
+            EntityType::AgentSession => agent_sessions.push(AgentSessionLiteral::Id(id)),
+            EntityType::DatabaseRow => database_rows.push(DatabaseRowLiteral::Id(id)),
             EntityType::User
             | EntityType::Team
             | EntityType::StaticFile
-            | EntityType::CrmContact
-            | EntityType::Skill => {
+            | EntityType::Skill
+            | EntityType::ScheduledAction
+            | EntityType::Reminder
+            | EntityType::Database => {
                 return Err(rootcause::report!(
                     "entity type {} is not represented in Soup",
                     entity.entity_type
@@ -381,12 +394,18 @@ fn entity_filter_ast(entities: &[Entity<'static>]) -> Result<EntityFilterAst, So
 
     let nil = Uuid::nil();
     Ok(EntityFilterAst {
+        favorites_only: None,
         calendar_event_filter: Some(literal_tree(calendar_events, CalendarEventLiteral::Id(nil))),
         document_filter: Some(literal_tree(documents, DocumentLiteral::Id(nil))),
         project_filter: Some(literal_tree(projects, ProjectLiteral::ProjectIdSelf(nil))),
         chat_filter: Some(literal_tree(chats, ChatLiteral::ChatId(nil))),
         email_filter: EmailFilterAst {
-            tree: Some(literal_tree(email_threads, EmailLiteral::ThreadId(nil))),
+            tree: Some(Arc::new(Expr::and(
+                literal_tree(email_threads, EmailLiteral::ThreadId(nil))
+                    .as_ref()
+                    .clone(),
+                Expr::val(EmailLiteral::Shared(SharedEmailFilter::Include)),
+            ))),
             crm_scope: None,
         },
         channel_filter: Some(literal_tree(channels, ChannelLiteral::ChannelId(nil))),
@@ -396,11 +415,16 @@ fn entity_filter_ast(entities: &[Entity<'static>]) -> Result<EntityFilterAst, So
         )),
         call_filter: Some(literal_tree(calls, CallLiteral::CallId(nil))),
         crm_company_filter: Some(literal_tree(crm_companies, CrmCompanyLiteral::Id(nil))),
+        crm_contact_filter: (!crm_contacts.is_empty())
+            .then(|| literal_tree(crm_contacts, CrmContactLiteral::Id(nil))),
         foreign_entity_filter: Some(literal_tree(
             foreign_entities,
             ForeignEntityLiteral::Id(nil),
         )),
-        reminder_filter: Some(literal_tree(reminders, ReminderLiteral::Id(nil))),
+        github_pull_request_filter: None,
+        agent_session_filter: Some(literal_tree(agent_sessions, AgentSessionLiteral::Id(nil))),
+        initiative_filter: Some(literal_tree(initiatives, InitiativeLiteral::Id(nil))),
+        database_row_filter: Some(literal_tree(database_rows, DatabaseRowLiteral::Id(nil))),
         properties_filter: None,
     })
 }

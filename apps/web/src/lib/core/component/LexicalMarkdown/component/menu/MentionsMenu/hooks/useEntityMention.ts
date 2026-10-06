@@ -34,26 +34,23 @@ export function useEntityMention(
     buckets: options.buckets,
     searchTerm: options.searchTerm,
   }) as QuickAccessList<EntityItem>;
+  const usesRankedList = () =>
+    quickAccess.usesRecordSelection() || quickAccess.usesSearchProjection();
   const entities = createLazyMemo(() => {
-    if (quickAccess.usesRecordSelection()) return entityList.items();
+    if (usesRankedList()) return entityList.items();
     return searchQuickAccessEntities(entityList.items(), options.searchTerm());
   });
 
   return {
     entities,
     totalCount: () =>
-      quickAccess.usesRecordSelection()
-        ? entityList.totalCount()
-        : entities().length,
-    hasMore: () => quickAccess.usesRecordSelection() && entityList.hasMore(),
+      usesRankedList() ? entityList.totalCount() : entities().length,
+    hasMore: () => usesRankedList() && entityList.hasMore(),
     isLoading: () =>
-      quickAccess.usesRecordSelection()
-        ? entityList.isLoading()
-        : quickAccess.isLoading(),
-    isLoadingMore: () =>
-      quickAccess.usesRecordSelection() && entityList.isLoadingMore(),
+      usesRankedList() ? entityList.isLoading() : quickAccess.isLoading(),
+    isLoadingMore: () => usesRankedList() && entityList.isLoadingMore(),
     loadMore: async () => {
-      if (quickAccess.usesRecordSelection()) await entityList.loadMore();
+      if (usesRankedList()) await entityList.loadMore();
     },
   };
 }

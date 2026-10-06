@@ -1,28 +1,98 @@
 //! Staged-progress UI, mirroring `tooling/scripts/lib/stage-ui.sh`.
 //!
 //! A bold `[+]` section header, then per-stage lines: an `indicatif` spinner
-//! that *resolves in place* into `✓ Done <elapsed>` / `✗ Failed <elapsed>` via
-//! the bar's own finish state (no clear-and-reprint), a captured-output dump on
-//! failure, and respect for `MACRO_LOCAL_VERBOSE`, `MACRO_LOCAL_DRY_RUN`, and
-//! `NO_COLOR`.
+//! that clears before its `✓ Done <elapsed>` / `✗ Failed <elapsed>` result is
+//! printed as ordinary scrollback, a captured-output dump on failure, and
+//! respect for `MACRO_LOCAL_VERBOSE`, `MACRO_LOCAL_DRY_RUN`, and `NO_COLOR`.
 //!
 //! Only the subprocess capture is hand-rolled, on purpose: stdout and stderr
 //! are drained on dedicated threads so a chatty child (e.g. `cargo zigbuild`)
 //! cannot deadlock by filling a pipe buffer while we wait. `indicatif` only
 //! animates — it never reads the child's pipes.
 
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use console::Style;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
+
+#[cfg(test)]
+mod test;
 
 const WIDTH: usize = 48;
+/// Keep animated output away from the terminal's moving right edge. Indicatif
+/// normally pads every draw to the reported terminal width and relies on that
+/// edge to wrap the next write; a concurrent resize makes that position stale.
+const SPINNER_MAX_WIDTH: u16 = 64;
 /// Braille spinner frames + a trailing space (indicatif's "final" tick, which
-/// we never show — stages resolve via `finish_with_message`).
+/// we never show — stages resolve via `finish_and_clear`).
 const TICK_CHARS: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ";
+
+/// An indicatif terminal that redraws only a short inline region. Delegating
+/// the cursor operations to `console::Term` preserves indicatif's clearing,
+/// while the capped width prevents its filler cells from reaching the edge
+/// that is changing during a resize.
+#[derive(Debug)]
+struct SpinnerTerm {
+    inner: console::Term,
+}
+
+impl SpinnerTerm {
+    fn stdout() -> Self {
+        Self {
+            inner: console::Term::buffered_stdout(),
+        }
+    }
+}
+
+impl TermLike for SpinnerTerm {
+    fn width(&self) -> u16 {
+        spinner_draw_width(self.inner.size().1)
+    }
+
+    fn height(&self) -> u16 {
+        self.inner.size().0
+    }
+
+    fn move_cursor_up(&self, n: usize) -> io::Result<()> {
+        self.inner.move_cursor_up(n)
+    }
+
+    fn move_cursor_down(&self, n: usize) -> io::Result<()> {
+        self.inner.move_cursor_down(n)
+    }
+
+    fn move_cursor_right(&self, n: usize) -> io::Result<()> {
+        self.inner.move_cursor_right(n)
+    }
+
+    fn move_cursor_left(&self, n: usize) -> io::Result<()> {
+        self.inner.move_cursor_left(n)
+    }
+
+    fn write_line(&self, s: &str) -> io::Result<()> {
+        self.inner.write_line(s)
+    }
+
+    fn write_str(&self, s: &str) -> io::Result<()> {
+        self.inner.write_str(s)
+    }
+
+    fn clear_line(&self) -> io::Result<()> {
+        self.inner.clear_line()
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn spinner_draw_width(terminal_width: u16) -> u16 {
+    terminal_width.clamp(1, SPINNER_MAX_WIDTH)
+}
 
 /// Drives staged output. Construct once with [`Stage::from_env`] and reuse.
 pub struct Stage {
@@ -33,6 +103,10 @@ pub struct Stage {
     /// notes are suppressed (commands still run + capture). Used to fold a
     /// multi-step action under a single parent spinner.
     quiet: bool,
+    /// Every resolved stage's label + elapsed, in completion order. Shared with
+    /// [`Stage::quiet`] children so folded sub-steps are recorded too, and with
+    /// the threads that run the background lanes.
+    timings: Arc<Mutex<Vec<(String, Duration)>>>,
 }
 
 impl Stage {
@@ -47,6 +121,7 @@ impl Stage {
             verbose: env_flag("MACRO_LOCAL_VERBOSE"),
             dry_run: env_flag("MACRO_LOCAL_DRY_RUN"),
             quiet: false,
+            timings: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -83,6 +158,85 @@ impl Stage {
             verbose: self.verbose,
             dry_run: self.dry_run,
             quiet: true,
+            timings: Arc::clone(&self.timings),
+        }
+    }
+
+    /// A handle that records into the same timing table from another thread
+    /// (the background teardown / frontend-build lanes). Output stays quiet:
+    /// a lane that races the foreground stages cannot share the spinner.
+    pub fn background(&self) -> Stage {
+        self.quiet()
+    }
+
+    fn record(&self, label: &str, elapsed: Duration) {
+        if let Ok(mut timings) = self.timings.lock() {
+            timings.push((label.to_owned(), elapsed));
+        }
+    }
+
+    /// Print the slowest stages of the run, and append a JSON line to
+    /// `MACRO_LOCAL_TIMINGS` when that env var names a file. This is how a
+    /// change to the bring-up is shown to be faster rather than argued to be.
+    // xtask is host tooling; reading the process environment directly is correct.
+    #[allow(clippy::disallowed_methods)]
+    pub fn print_timings(&self, title: &str) {
+        let Ok(timings) = self.timings.lock() else {
+            return;
+        };
+        if timings.is_empty() {
+            return;
+        }
+        const SUM_LABEL: &str = "sum of stages (lanes overlap)";
+        let total: Duration = timings.iter().map(|(_, d)| *d).sum();
+        let mut slowest: Vec<&(String, Duration)> = timings.iter().collect();
+        slowest.sort_by_key(|(_, d)| std::cmp::Reverse(*d));
+        let shown = &slowest[..slowest.len().min(10)];
+        // Labels run past the stage-line column ("Building search_processing…"),
+        // so size this table to its own longest row rather than clipping.
+        let width = shown
+            .iter()
+            .map(|(label, _)| label.chars().count())
+            .chain([SUM_LABEL.len(), WIDTH])
+            .max()
+            .unwrap_or(WIDTH);
+
+        self.section(&format!("{title} — slowest stages"));
+        for (label, elapsed) in shown {
+            println!(
+                "  {label:<width$} {:>8}",
+                Style::new().bold().apply_to(format_elapsed(*elapsed))
+            );
+        }
+        println!(
+            "  {:<width$} {:>8}",
+            Style::new().dim().apply_to(SUM_LABEL),
+            Style::new().dim().apply_to(format_elapsed(total)),
+        );
+
+        if let Some(path) = std::env::var_os("MACRO_LOCAL_TIMINGS") {
+            let entries: Vec<String> = timings
+                .iter()
+                .map(|(label, d)| {
+                    format!(
+                        "{{\"label\":{},\"seconds\":{:.3}}}",
+                        serde_json::Value::from(label.as_str()),
+                        d.as_secs_f64()
+                    )
+                })
+                .collect();
+            let line = format!("{{\"stages\":[{}]}}\n", entries.join(","));
+            if let Err(e) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .and_then(|mut f| f.write_all(line.as_bytes()))
+            {
+                self.note(&format!(
+                    "could not write MACRO_LOCAL_TIMINGS to {}: {e}",
+                    std::path::Path::new(&path).display()
+                ));
+            }
         }
     }
 
@@ -132,27 +286,34 @@ impl Stage {
         if !self.is_tty {
             return None;
         }
-        let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
+        let pb = ProgressBar::with_draw_target(
+            None,
+            ProgressDrawTarget::term_like_with_hz(Box::new(SpinnerTerm::stdout()), 20),
+        );
         pb.set_style(
-            ProgressStyle::with_template("  {spinner:.cyan} {prefix} {msg:.cyan}")
+            ProgressStyle::with_template("  {spinner:.cyan} {wide_msg}")
                 .expect("valid spinner template")
                 .tick_chars(TICK_CHARS),
         );
-        pb.set_prefix(format!("{label:<WIDTH$}"));
-        pb.set_message("Running");
+        pb.set_message(format!(
+            "{label:<WIDTH$} {}",
+            Style::new().cyan().apply_to("Running")
+        ));
         pb.enable_steady_tick(Duration::from_millis(80));
         Some(pb)
     }
 
-    /// Settle a stage to its final line: resolved in place if a spinner is live
-    /// (TTY), else printed plainly (non-TTY).
+    /// Settle a stage to its final line. Clear a live spinner first, then print
+    /// the result normally so it ends with a real newline. `indicatif` leaves
+    /// its cursor at the measured right edge and relies on the next write to
+    /// wrap; that edge becomes stale during a terminal resize and makes later
+    /// rows start in the middle of the screen.
     fn resolve(&self, spinner: Option<ProgressBar>, line: String) {
-        match spinner {
-            Some(pb) => {
-                pb.set_style(ProgressStyle::with_template("{msg}").expect("valid template"));
-                pb.finish_with_message(line);
-            }
-            None => println!("{line}"),
+        if let Some(pb) = spinner {
+            pb.finish_and_clear();
+            println!("\r{line}");
+        } else {
+            println!("{line}");
         }
     }
 
@@ -208,6 +369,7 @@ impl Stage {
         let mut captured = out_handle.join().unwrap_or_default();
         captured.extend(err_handle.join().unwrap_or_default());
         if self.quiet {
+            self.record(label, start.elapsed());
             // Silent on success; on failure bubble the captured output up in the
             // error so the parent stage can show it after its spinner clears.
             return match status {
@@ -239,11 +401,15 @@ impl Stage {
             return Ok(());
         }
         if self.quiet {
-            return f();
+            let start = Instant::now();
+            let result = f();
+            self.record(label, start.elapsed());
+            return result;
         }
         let start = Instant::now();
         let spinner = self.spinner(label);
         let result = f();
+        self.record(label, start.elapsed());
         let elapsed = format_elapsed(start.elapsed());
         match result {
             Ok(()) => {
@@ -283,6 +449,7 @@ impl Stage {
         program: &str,
         args: &[String],
     ) -> Result<()> {
+        self.record(label, start.elapsed());
         let elapsed = format_elapsed(start.elapsed());
         match outcome {
             Ok((status, _captured)) if status.success() => {

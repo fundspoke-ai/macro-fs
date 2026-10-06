@@ -3,6 +3,7 @@ use crate::types::request::CODE_EXECUTION_TOOL;
 use crate::types::response::ResponseContentKind;
 use crate::types::response::code_execution::BashCodeExecutionResponse;
 use ai_toolset::{AsyncTool, RequestContext, ServiceContext, ToolCallError, ToolResult};
+use ai_toolset::{ToolAnnotated, ToolAnnotations};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -18,6 +19,11 @@ pub struct BashCodeExecution {
     pub input: String,
 }
 
+impl ToolAnnotated for BashCodeExecution {
+    const ANNOTATIONS: ToolAnnotations =
+        ToolAnnotations::destructive("Run bash command").with_open_world();
+}
+
 #[async_trait]
 impl AsyncTool<AnthropicToolContext> for BashCodeExecution {
     type Output = BashCodeExecutionResponse;
@@ -26,12 +32,12 @@ impl AsyncTool<AnthropicToolContext> for BashCodeExecution {
     async fn call(
         &self,
         service_context: ServiceContext<AnthropicToolContext>,
-        _request_context: RequestContext,
+        request_context: RequestContext,
     ) -> ToolResult<Self::Output> {
         let ctx = &*service_context;
         let blocks = super::invoke_server_tool(
-            &ctx.client,
-            &ctx.model,
+            ctx,
+            &request_context,
             CODE_EXECUTION_TOOL.clone(),
             &self.input,
         )

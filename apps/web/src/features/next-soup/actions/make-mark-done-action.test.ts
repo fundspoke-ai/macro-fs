@@ -1,4 +1,3 @@
-import type { SplitHandle } from '@components/app/split-layout/layoutManager';
 import type { EntityData } from '@entity';
 import type { NotificationSource } from '@notifications';
 import { createRoot } from 'solid-js';
@@ -6,25 +5,36 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SoupState } from '../create-soup-state';
 
 const mocks = vi.hoisted(() => ({
-  controller: {
-    isControllerSplit: vi.fn(() => true),
+  splitHandle: {
+    content: vi.fn(() => ({ id: 'other' })),
+    referredFrom: vi.fn(() => undefined),
   },
-  mutateAsync: vi.fn(async () => {}),
+  executeMarkEntitiesDone: vi.fn(async () => [] as string[]),
+  executeMarkEntitiesUndone: vi.fn(async () => {}),
+  graphqlSoupEnabled: vi.fn(() => false),
+  mutateAsync: vi.fn(async (_variables: unknown) => {}),
   openEntityInSplitFromUnifiedList: vi.fn(async () => {}),
+  resolveMarkEntitiesDoneVariables: vi.fn(() => ({
+    emailIds: [] as string[],
+    notificationIds: [] as string[],
+  })),
+  toNotificationEntityRef: vi.fn(),
+  undoableOptionsFactory: vi.fn(),
 }));
 
 vi.mock('@components/app/split-layout/layoutUtils', () => ({
-  useSplitPanel: () => ({ handle: mocks.controller }),
-}));
-
-vi.mock('@app/lib/analytics/posthog', () => ({
-  useFeatureFlag: () => () => ({ enabled: false }),
+  useSplitPanel: () => ({ handle: mocks.splitHandle }),
 }));
 
 vi.mock('@core/constant/featureFlags', () => ({
-  ENABLE_NEW_INBOX_FLAG: 'new-inbox',
-  ENABLE_NEW_INBOX_OVERRIDE: undefined,
+  enableGraphqlSoup: { key: 'enable-graphql-soup' },
+  isFeatureEnabled: mocks.graphqlSoupEnabled,
 }));
+
+vi.mock(
+  '@phosphor-icons/core/regular/arrow-counter-clockwise.svg?component-solid',
+  () => ({ default: () => null })
+);
 
 vi.mock('@core/component/Toast/Toast', () => ({
   toast: {
@@ -34,25 +44,31 @@ vi.mock('@core/component/Toast/Toast', () => ({
   },
 }));
 
+vi.mock('@queries/notification/entity-mutations', () => ({
+  toNotificationEntityRef: mocks.toNotificationEntityRef,
+  updateNotificationsForEntities: vi.fn(),
+}));
+
 vi.mock('@queries/undo', () => ({
-  useUndoableMutation: () => ({
-    mutateAsync: mocks.mutateAsync,
-  }),
+  useUndoableMutation: (optionsFactory: () => unknown) => {
+    mocks.undoableOptionsFactory.mockImplementation(optionsFactory);
+    return { mutateAsync: mocks.mutateAsync };
+  },
 }));
 
 vi.mock('@app/features/next-soup/utils', () => ({
   applyEntitiesDoneOptimistic: vi.fn(),
-  executeMarkEntitiesDone: vi.fn(),
-  executeMarkEntitiesUndone: vi.fn(),
+  executeMarkEntitiesDone: mocks.executeMarkEntitiesDone,
+  executeMarkEntitiesUndone: mocks.executeMarkEntitiesUndone,
   openEntityInSplitFromUnifiedList: mocks.openEntityInSplitFromUnifiedList,
-  resolveMarkEntitiesDoneVariables: () => ({
-    emailIds: [],
-    notificationIds: [],
-  }),
+  resolveMarkEntitiesDoneVariables: mocks.resolveMarkEntitiesDoneVariables,
   restoreSoupFocus: vi.fn(),
 }));
 
-import { makeMarkDoneAction } from './make-mark-done-action';
+import {
+  canExecuteMarkDoneOnView,
+  makeMarkDoneAction,
+} from './make-mark-done-action';
 
 const currentEntity = {
   type: 'email',
@@ -62,6 +78,7 @@ const nextEntity = {
   type: 'email',
   id: 'next',
 } as EntityData;
+const notificationSource = {} as NotificationSource;
 
 function createSoup() {
   const focusSet = vi.fn();
@@ -92,44 +109,348 @@ function createSoup() {
 function createAction() {
   return createRoot((dispose) => ({
     action: makeMarkDoneAction({
-      notificationSource: () => ({}) as NotificationSource,
+      notificationSource: () => notificationSource,
     }),
     dispose,
   }));
 }
 
-describe('makeMarkDoneAction', () => {
-  beforeEach(() => {
-    mocks.controller.isControllerSplit.mockReturnValue(true);
-    mocks.mutateAsync.mockClear();
-    mocks.openEntityInSplitFromUnifiedList.mockClear();
+describe('canExecuteMarkDoneOnView', () => {
+  it('allows mark done on every thread-listing mail tab', () => {
+    for (const tab of [
+      'important',
+      'noise',
+      'favorites',
+      'calendar',
+      'shared',
+      'all',
+    ]) {
+      expect(canExecuteMarkDoneOnView('mail', tab)).toBe(true);
+    }
   });
 
-  it('opens the next focused entity in an engaged Preview Controller', async () => {
-    const { soup, focusSet } = createSoup();
+  it('keeps mark done off tabs whose rows are not triaged', () => {
+    expect(canExecuteMarkDoneOnView('mail', 'drafts')).toBe(false);
+    expect(canExecuteMarkDoneOnView('mail', 'sent')).toBe(false);
+  });
+
+  it('allows mark done on the archived tab', () => {
+    expect(canExecuteMarkDoneOnView('mail', 'archived')).toBe(true);
+  });
+});
+
+describe('makeMarkDoneAction', () => {
+  beforeEach(() => {
+    mocks.splitHandle.content.mockReturnValue({ id: 'other' });
+    mocks.splitHandle.referredFrom.mockReturnValue(undefined);
+    mocks.executeMarkEntitiesDone.mockClear();
+    mocks.executeMarkEntitiesDone.mockResolvedValue([]);
+    mocks.executeMarkEntitiesUndone.mockClear();
+    mocks.graphqlSoupEnabled.mockReturnValue(false);
+    mocks.mutateAsync.mockReset();
+    mocks.mutateAsync.mockResolvedValue(undefined);
+    mocks.openEntityInSplitFromUnifiedList.mockClear();
+    mocks.resolveMarkEntitiesDoneVariables.mockReset();
+    mocks.resolveMarkEntitiesDoneVariables.mockReturnValue({
+      emailIds: [],
+      notificationIds: [],
+    });
+    mocks.toNotificationEntityRef.mockReset();
+  });
+
+  it('allows mark done on agent-session rows', () => {
     const { action, dispose } = createAction();
 
-    await action.executeWithSoup([currentEntity], soup);
+    expect(
+      action.canExecute({
+        type: 'agent_session',
+        id: 'session-1',
+      } as EntityData)
+    ).toBe(true);
+    expect(
+      action.canExecute({ type: 'channel_message', id: 'msg-1' } as EntityData)
+    ).toBe(false);
+    dispose();
+  });
 
-    expect(focusSet).toHaveBeenCalledWith('next-row');
-    expect(mocks.openEntityInSplitFromUnifiedList).toHaveBeenCalledWith(
-      nextEntity,
-      {
-        splitHandle: mocks.controller as unknown as SplitHandle,
-        mergeHistory: true,
-      }
+  it('uses the agent-session entity target while GraphQL Soup is enabled', async () => {
+    mocks.graphqlSoupEnabled.mockReturnValue(true);
+    mocks.resolveMarkEntitiesDoneVariables.mockReturnValue({
+      emailIds: [],
+      notificationIds: ['agent-notification'],
+    });
+    mocks.toNotificationEntityRef.mockReturnValue({
+      type: 'agent_session',
+      id: 'session-1',
+    });
+    const session = { type: 'agent_session', id: 'session-1' } as EntityData;
+    const { action, dispose } = createAction();
+
+    await action.execute([session]);
+
+    expect(mocks.toNotificationEntityRef).toHaveBeenCalledWith(session);
+    expect(mocks.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        exactNotificationIds: { current: [] },
+        notificationEntities: [{ type: 'agent_session', id: 'session-1' }],
+        optimisticNotificationIds: ['agent-notification'],
+      })
     );
     dispose();
   });
 
-  it('does not open the next entity when the split is not a Controller', async () => {
-    mocks.controller.isControllerSplit.mockReturnValue(false);
+  it('moves list focus without opening the next entity', async () => {
     const { soup } = createSoup();
     const { action, dispose } = createAction();
 
     await action.executeWithSoup([currentEntity], soup);
 
     expect(mocks.openEntityInSplitFromUnifiedList).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it('uses an explicit navigation handler to open the next entity', async () => {
+    const { soup } = createSoup();
+    const onNavigate = vi.fn();
+    const { action, dispose } = createAction();
+
+    await action.executeWithSoup([currentEntity], soup, onNavigate);
+
+    expect(onNavigate).toHaveBeenCalledWith({
+      actionId: 'mark-done',
+      entity: nextEntity,
+    });
+    expect(mocks.openEntityInSplitFromUnifiedList).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it('passes no target to the navigation handler when no item remains', async () => {
+    const { soup, focusSet } = createSoup();
+    soup.navigate.peekOffset = vi.fn(() => undefined);
+    const onNavigate = vi.fn();
+    const { action, dispose } = createAction();
+
+    await action.executeWithSoup([currentEntity], soup, onNavigate);
+
+    expect(focusSet).toHaveBeenCalledWith(undefined);
+    expect(onNavigate).toHaveBeenCalledWith({
+      actionId: 'mark-done',
+      entity: undefined,
+    });
+    dispose();
+  });
+
+  it('keeps notification writes ID-scoped while GraphQL Soup is disabled', async () => {
+    mocks.resolveMarkEntitiesDoneVariables.mockReturnValue({
+      emailIds: ['current'],
+      notificationIds: ['notification-1'],
+    });
+    const { action, dispose } = createAction();
+
+    await action.execute([currentEntity]);
+
+    expect(mocks.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        exactNotificationIds: { current: ['notification-1'] },
+        notificationEntities: [],
+        optimisticNotificationIds: ['notification-1'],
+      })
+    );
+    expect(mocks.toNotificationEntityRef).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it('uses entity targets while GraphQL Soup is enabled', async () => {
+    mocks.graphqlSoupEnabled.mockReturnValue(true);
+    mocks.resolveMarkEntitiesDoneVariables.mockReturnValue({
+      emailIds: ['current'],
+      notificationIds: ['notification-1'],
+    });
+    mocks.toNotificationEntityRef.mockReturnValue({
+      type: 'email',
+      id: 'current',
+    });
+    const { action, dispose } = createAction();
+
+    await action.execute([currentEntity]);
+
+    expect(mocks.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        exactNotificationIds: { current: [] },
+        notificationEntities: [{ type: 'email', id: 'current' }],
+        optimisticNotificationIds: ['notification-1'],
+      })
+    );
+    dispose();
+  });
+
+  it('keeps whole-channel inbox writes ID-based to exclude thread rows', async () => {
+    mocks.graphqlSoupEnabled.mockReturnValue(true);
+    mocks.splitHandle.content.mockReturnValue({ id: 'home' });
+    mocks.resolveMarkEntitiesDoneVariables.mockReturnValue({
+      emailIds: [],
+      notificationIds: ['channel-notification'],
+    });
+    mocks.toNotificationEntityRef.mockReturnValue({
+      type: 'channel',
+      id: 'channel-1',
+    });
+    const channel = { type: 'channel', id: 'channel-1' } as EntityData;
+    const { action, dispose } = createAction();
+
+    await action.execute([channel]);
+
+    expect(mocks.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        exactNotificationIds: { current: ['channel-notification'] },
+        notificationEntities: [],
+      })
+    );
+    dispose();
+  });
+
+  it('uses the canonical message entity for inbox channel-thread rows', async () => {
+    mocks.graphqlSoupEnabled.mockReturnValue(true);
+    mocks.splitHandle.content.mockReturnValue({ id: 'home' });
+    mocks.resolveMarkEntitiesDoneVariables.mockReturnValue({
+      emailIds: [],
+      notificationIds: ['thread-notification'],
+    });
+    mocks.toNotificationEntityRef.mockReturnValue({
+      type: 'channel_thread',
+      id: 'root-message',
+      messageId: 'root-message',
+    });
+    const thread = {
+      type: 'channel_thread',
+      id: 'root-message',
+      messageId: 'root-message',
+    } as EntityData;
+    const { action, dispose } = createAction();
+
+    await action.execute([thread]);
+
+    expect(mocks.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        exactNotificationIds: { current: [] },
+        notificationEntities: [
+          {
+            type: 'channel_thread',
+            id: 'root-message',
+            messageId: 'root-message',
+          },
+        ],
+      })
+    );
+    dispose();
+  });
+
+  it('applies Undo before its server reply and settles only afterwards', async () => {
+    const { dispose } = createAction();
+    const variables = {
+      emailIds: ['current'],
+      exactNotificationIds: { current: ['exact-id'] },
+    };
+    const context = {
+      applyUndone: vi.fn(),
+      reapply: vi.fn(),
+      settle: vi.fn(),
+      releaseGraphql: vi.fn(),
+    };
+    const options = mocks.undoableOptionsFactory() as {
+      undoFn: (input: typeof variables, ctx: typeof context) => Promise<void>;
+    };
+    let finish!: () => void;
+    mocks.executeMarkEntitiesUndone.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        })
+    );
+    const undo = options.undoFn(variables, context);
+    expect(context.applyUndone).toHaveBeenCalledOnce();
+    expect(context.settle).not.toHaveBeenCalled();
+    finish();
+    await undo;
+    expect(context.settle).toHaveBeenCalledWith(['exact-id']);
+    dispose();
+  });
+
+  it('does not pin guessed GraphQL state after a partially failed reversal', async () => {
+    const { dispose } = createAction();
+    const variables = {
+      emailIds: ['current'],
+      exactNotificationIds: { current: ['exact-id'] },
+    };
+    const context = {
+      applyUndone: vi.fn(),
+      reapply: vi.fn(),
+      settle: vi.fn(),
+      releaseGraphql: vi.fn(),
+    };
+    const options = mocks.undoableOptionsFactory() as {
+      undoFn: (input: typeof variables, ctx: typeof context) => Promise<void>;
+    };
+    mocks.executeMarkEntitiesUndone.mockRejectedValueOnce(
+      new Error('partial failure')
+    );
+    await expect(options.undoFn(variables, context)).rejects.toThrow(
+      'partial failure'
+    );
+    expect(context.reapply).toHaveBeenCalledOnce();
+    expect(context.releaseGraphql).toHaveBeenCalledOnce();
+    expect(context.settle).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it('retains authoritative entity results for exact undo and ID-scoped redo', async () => {
+    mocks.graphqlSoupEnabled.mockReturnValue(true);
+    mocks.resolveMarkEntitiesDoneVariables.mockReturnValue({
+      emailIds: ['current'],
+      notificationIds: ['optimistic-notification'],
+    });
+    mocks.toNotificationEntityRef.mockReturnValue({
+      type: 'email',
+      id: 'current',
+    });
+    mocks.executeMarkEntitiesDone.mockResolvedValue([
+      'authoritative-notification',
+    ]);
+    const { action, dispose } = createAction();
+    await action.execute([currentEntity]);
+    const variables = mocks.mutateAsync.mock.calls[0]?.[0] as {
+      emailIds: string[];
+      exactNotificationIds: { current: string[] };
+      notificationEntities: Array<{ type: string; id: string }>;
+    };
+    const mutationOptions = mocks.undoableOptionsFactory() as {
+      mutationFn: (input: typeof variables) => Promise<void>;
+      redoFn: (input: typeof variables, context: undefined) => Promise<void>;
+      undoFn: (input: typeof variables, context: undefined) => Promise<void>;
+    };
+
+    await mutationOptions.mutationFn(variables);
+    expect(mocks.executeMarkEntitiesDone).toHaveBeenCalledWith({
+      emailIds: ['current'],
+      notificationIds: [],
+      notificationEntities: [{ type: 'email', id: 'current' }],
+    });
+    expect(variables.exactNotificationIds.current).toEqual([
+      'authoritative-notification',
+    ]);
+
+    await mutationOptions.undoFn(variables, undefined);
+    expect(mocks.executeMarkEntitiesUndone).toHaveBeenCalledWith({
+      emailIds: ['current'],
+      notificationIds: ['authoritative-notification'],
+    });
+
+    mocks.executeMarkEntitiesDone.mockClear();
+    await mutationOptions.redoFn(variables, undefined);
+    expect(mocks.executeMarkEntitiesDone).toHaveBeenCalledWith({
+      emailIds: ['current'],
+      notificationIds: ['authoritative-notification'],
+    });
     dispose();
   });
 });

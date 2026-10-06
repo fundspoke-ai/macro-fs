@@ -1,13 +1,29 @@
 //! General entity property query helpers.
 
+#[cfg(test)]
+mod test;
+
+use anyhow::Context as _;
 use models_properties::service::{entity_property::EntityProperty, property_value::PropertyValue};
 use models_properties::{EntityReference, EntityType};
-use sqlx::{Pool, Postgres};
+use sqlx::{PgExecutor, Pool, Postgres};
 use uuid::Uuid;
 
+use super::query_error::PropertyQueryError;
+
+use crate::domain::error::InvalidStoredPropertyValue;
 use crate::domain::model::{
     EntityPropertyMutationSnapshot, EntityPropertyOptionSelection, EntityPropertyOptionUpdate,
 };
+
+pub(super) fn decode_stored_property_value(
+    value: Option<serde_json::Value>,
+) -> anyhow::Result<Option<PropertyValue>> {
+    value
+        .filter(|value| !value.is_null())
+        .map(|value| serde_json::from_value(value).context(InvalidStoredPropertyValue))
+        .transpose()
+}
 
 pub(super) struct EntityPropertyMutationRow {
     pub(super) id: Uuid,
@@ -15,16 +31,23 @@ pub(super) struct EntityPropertyMutationRow {
     pub(super) entity_type: EntityType,
     pub(super) property_definition_id: Uuid,
     pub(super) value: Option<serde_json::Value>,
+    pub(super) previous: Option<serde_json::Value>,
     pub(super) created_at: chrono::DateTime<chrono::Utc>,
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl EntityPropertyMutationRow {
-    pub(super) fn into_snapshot(self) -> anyhow::Result<EntityPropertyMutationSnapshot> {
+    pub(super) fn into_snapshot(self) -> Result<EntityPropertyMutationSnapshot, serde_json::Error> {
         let value = match self.value {
             Some(value) if !value.is_null() => Some(serde_json::from_value(value)?),
             Some(_) | None => None,
         };
+        // The pre-write value supports display metadata and change triggers.
+        // Treat undecodable legacy values as absent so a mutation can fix them.
+        let previous_value = self
+            .previous
+            .filter(|value| !value.is_null())
+            .and_then(|value| serde_json::from_value(value).ok());
 
         Ok(EntityPropertyMutationSnapshot {
             property: EntityProperty {
@@ -36,20 +59,168 @@ impl EntityPropertyMutationRow {
                 updated_at: self.updated_at,
             },
             value,
+            previous_value,
         })
     }
 }
 
+/// What entities of one type hold, inside a caller's transaction: every
+/// property with a value, or only those of `definitions` when given.
+/// Undecodable values are left out.
+pub async fn entity_values_in_transaction(
+    tx: &mut sqlx::PgConnection,
+    entity_type: EntityType,
+    entity_ids: &[String],
+    definitions: Option<&[Uuid]>,
+) -> Result<Vec<(String, Uuid, PropertyValue)>, PropertyQueryError> {
+    if entity_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query!(
+        r#"
+        SELECT entity_id, property_definition_id, values as "values: serde_json::Value"
+        FROM entity_properties
+        WHERE entity_type = $1 AND entity_id = ANY($2)
+          AND ($3::uuid[] IS NULL OR property_definition_id = ANY($3))
+          AND values IS NOT NULL
+        "#,
+        entity_type as EntityType,
+        entity_ids,
+        definitions as Option<&[Uuid]>,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let value = row.values.filter(|value| !value.is_null())?;
+            let value = serde_json::from_value(value).ok()?;
+            Some((row.entity_id, row.property_definition_id, value))
+        })
+        .collect())
+}
+
 /// Upsert an entity property value (insert or update).
 /// If the property doesn't exist, it will be created and attached to the entity.
-/// If it exists, the value will be updated.
+/// If it exists, the value will be updated. The returned snapshot carries the
+/// pre-write value captured after serializing concurrent writes, so consumers
+/// can distinguish newly assigned agents from unchanged values.
 pub async fn upsert_entity_property(
     pool: &Pool<Postgres>,
     entity_id: &str,
     entity_type: EntityType,
     property_definition_id: Uuid,
     value: Option<PropertyValue>,
-) -> anyhow::Result<EntityProperty> {
+) -> Result<EntityPropertyMutationSnapshot, PropertyQueryError> {
+    let mut tx = pool.begin().await?;
+    let snapshot = upsert_entity_property_in_transaction(
+        &mut tx,
+        entity_id,
+        entity_type,
+        property_definition_id,
+        value,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(snapshot)
+}
+
+/// [`upsert_entity_property`] inside a caller's transaction, so the write
+/// commits or rolls back with the caller's other statements. The serializing
+/// locks are held until that transaction ends.
+pub async fn upsert_entity_property_in_transaction(
+    tx: &mut sqlx::PgConnection,
+    entity_id: &str,
+    entity_type: EntityType,
+    property_definition_id: Uuid,
+    value: Option<PropertyValue>,
+) -> Result<EntityPropertyMutationSnapshot, PropertyQueryError> {
+    if let Some(PropertyValue::SelectOption(options)) = &value {
+        super::property_option_queries::hold_selected_options(tx, property_definition_id, options)
+            .await?;
+    }
+    mutate_entity_property_in_transaction(
+        tx,
+        entity_id,
+        entity_type,
+        property_definition_id,
+        |_| Ok(value),
+    )
+    .await
+}
+
+/// Append references under the same locks as replacement writes so concurrent
+/// task assignments cannot overwrite each other's assignees.
+pub async fn add_entity_property_references(
+    pool: &Pool<Postgres>,
+    entity_id: &str,
+    entity_type: EntityType,
+    property_definition_id: Uuid,
+    references: Vec<EntityReference>,
+) -> anyhow::Result<EntityPropertyMutationSnapshot> {
+    let mut tx = pool.begin().await?;
+    let snapshot = mutate_entity_property_in_transaction(
+        &mut tx,
+        entity_id,
+        entity_type,
+        property_definition_id,
+        |previous| -> anyhow::Result<Option<PropertyValue>> {
+            let mut current = match decode_stored_property_value(previous)? {
+                Some(PropertyValue::EntityRef(current)) => current,
+                None => Vec::new(),
+                Some(_) => return Err(InvalidStoredPropertyValue.into()),
+            };
+            for reference in references {
+                if !current.contains(&reference) {
+                    current.push(reference);
+                }
+            }
+            Ok(Some(PropertyValue::EntityRef(current)))
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(snapshot)
+}
+
+async fn mutate_entity_property_in_transaction<Error>(
+    tx: &mut sqlx::PgConnection,
+    entity_id: &str,
+    entity_type: EntityType,
+    property_definition_id: Uuid,
+    update: impl FnOnce(Option<serde_json::Value>) -> Result<Option<PropertyValue>, Error>,
+) -> Result<EntityPropertyMutationSnapshot, Error>
+where
+    Error: From<sqlx::Error> + From<serde_json::Error>,
+{
+    // Serialize first assignments even when no row exists to lock yet. Keep
+    // this separate from the UPSERT so its statement snapshot starts after
+    // the preceding writer commits, rather than before waiting for that row.
+    sqlx::query!(
+        r#"SELECT pg_advisory_xact_lock(hashtextextended($1, 0))"#,
+        format!("entity_property:{entity_type}:{entity_id}:{property_definition_id}"),
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Other property operations use row locks rather than this advisory lock.
+    // Wait for those writers too before the UPSERT captures its previous value.
+    let previous = sqlx::query_scalar!(
+        r#"
+            SELECT values as "values: serde_json::Value"
+            FROM entity_properties
+            WHERE entity_id = $1 AND entity_type = $2 AND property_definition_id = $3
+            FOR UPDATE
+            "#,
+        entity_id,
+        entity_type as EntityType,
+        property_definition_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let value = update(previous.flatten())?;
+
     let id = macro_uuid::generate_uuid_v7();
 
     // Serialize PropertyValue to JSONB (or NULL if None)
@@ -60,11 +231,14 @@ pub async fn upsert_entity_property(
 
     tracing::debug!(value_json = ?value_json, "upserting entity property");
 
-    // Single UPSERT operation - handles both INSERT and UPDATE cases.
-    // RETURNING yields the canonical assignment for both branches without a second query.
-    let property = sqlx::query_as!(
-        EntityProperty,
+    // The locks above make this fresh statement snapshot authoritative.
+    let row = sqlx::query_as!(
+        EntityPropertyMutationRow,
         r#"
+        WITH previous AS (
+            SELECT values FROM entity_properties
+            WHERE entity_id = $2 AND entity_type = $3 AND property_definition_id = $4
+        )
         INSERT INTO entity_properties (id, entity_id, entity_type, property_definition_id, values)
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (entity_id, entity_type, property_definition_id)
@@ -76,6 +250,8 @@ pub async fn upsert_entity_property(
             entity_id,
             entity_type as "entity_type: EntityType",
             property_definition_id,
+            values as "value: serde_json::Value",
+            (SELECT values FROM previous) as "previous: serde_json::Value",
             created_at,
             updated_at
         "#,
@@ -85,12 +261,12 @@ pub async fn upsert_entity_property(
         property_definition_id,
         value_json
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
     tracing::debug!("successfully upserted entity property");
 
-    Ok(property)
+    Ok(row.into_snapshot()?)
 }
 
 /// Atomically add one option to a multi-select entity property value, creating
@@ -106,11 +282,22 @@ pub async fn add_entity_property_option(
     property_definition_id: Uuid,
     option_id: Uuid,
 ) -> anyhow::Result<EntityPropertyMutationSnapshot> {
+    let mut tx = pool.begin().await?;
+    super::property_option_queries::hold_selected_options(
+        &mut tx,
+        property_definition_id,
+        &[option_id],
+    )
+    .await?;
     let id = macro_uuid::generate_uuid_v7();
 
     let row = sqlx::query_as!(
         EntityPropertyMutationRow,
         r#"
+        WITH previous AS (
+            SELECT values FROM entity_properties
+            WHERE entity_id = $2 AND entity_type = $3 AND property_definition_id = $4
+        )
         INSERT INTO entity_properties (id, entity_id, entity_type, property_definition_id, values)
         VALUES (
             $1, $2, $3, $4,
@@ -137,6 +324,7 @@ pub async fn add_entity_property_option(
             entity_type as "entity_type: EntityType",
             property_definition_id,
             values as "value: serde_json::Value",
+            (SELECT values FROM previous) as "previous: serde_json::Value",
             created_at,
             updated_at
         "#,
@@ -146,10 +334,11 @@ pub async fn add_entity_property_option(
         property_definition_id,
         option_id.to_string(),
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
-    row.into_snapshot()
+    tx.commit().await?;
+    Ok(row.into_snapshot()?)
 }
 
 /// Atomically remove one option from a multi-select entity property value. A
@@ -166,6 +355,10 @@ pub async fn remove_entity_property_option(
     let row = sqlx::query_as!(
         EntityPropertyMutationRow,
         r#"
+        WITH previous AS (
+            SELECT values FROM entity_properties
+            WHERE entity_id = $1 AND entity_type = $2 AND property_definition_id = $3
+        )
         UPDATE entity_properties
         SET values = jsonb_set(
                 values,
@@ -191,6 +384,7 @@ pub async fn remove_entity_property_option(
             entity_type as "entity_type: EntityType",
             property_definition_id,
             values as "value: serde_json::Value",
+            (SELECT values FROM previous) as "previous: serde_json::Value",
             created_at,
             updated_at
         "#,
@@ -202,8 +396,9 @@ pub async fn remove_entity_property_option(
     .fetch_optional(pool)
     .await?;
 
-    row.map(EntityPropertyMutationRow::into_snapshot)
-        .transpose()
+    Ok(row
+        .map(EntityPropertyMutationRow::into_snapshot)
+        .transpose()?)
 }
 
 /// Apply option deltas to several of an entity's multi-select property values in
@@ -231,6 +426,12 @@ pub async fn bulk_update_entity_property_options(
     ordered.sort_by_key(|update| update.property_definition_id);
 
     for update in ordered {
+        super::property_option_queries::hold_selected_options(
+            &mut tx,
+            update.property_definition_id,
+            &update.add_option_ids,
+        )
+        .await?;
         let has_additions = !update.add_option_ids.is_empty();
 
         // Attach the property only when adding options. A concurrent creator
@@ -272,12 +473,14 @@ pub async fn bulk_update_entity_property_options(
         .await?;
 
         let row_exists = existing.is_some();
-        let current_ids = match existing.flatten() {
-            Some(value) => match serde_json::from_value::<PropertyValue>(value) {
-                Ok(PropertyValue::SelectOption(ids)) => ids,
-                _ => Vec::new(),
-            },
-            None => Vec::new(),
+        // The locked pre-write value doubles as the activity transition's
+        // "from" side.
+        let previous_value: Option<PropertyValue> = existing
+            .flatten()
+            .and_then(|value| serde_json::from_value(value).ok());
+        let current_ids = match &previous_value {
+            Some(PropertyValue::SelectOption(ids)) => ids.clone(),
+            _ => Vec::new(),
         };
 
         let final_ids = apply_option_delta(
@@ -304,6 +507,7 @@ pub async fn bulk_update_entity_property_options(
                     entity_type as "entity_type: EntityType",
                     property_definition_id,
                     values as "value: serde_json::Value",
+                    NULL as "previous: serde_json::Value",
                     created_at,
                     updated_at
                 "#,
@@ -314,7 +518,11 @@ pub async fn bulk_update_entity_property_options(
             )
             .fetch_one(&mut *tx)
             .await?;
-            Some(row.into_snapshot()?)
+            // The FOR UPDATE read above is the authoritative pre-write value;
+            // the query returns a NULL placeholder for it.
+            let mut snapshot = row.into_snapshot()?;
+            snapshot.previous_value = previous_value;
+            Some(snapshot)
         } else {
             None
         };
@@ -387,9 +595,9 @@ pub async fn delete_entity_property(
 }
 
 /// Deletes all properties attached to an entity.
-#[tracing::instrument(skip(pool))]
+#[tracing::instrument(skip(executor))]
 pub async fn delete_entity_properties(
-    pool: &Pool<Postgres>,
+    executor: impl PgExecutor<'_>,
     entity_reference: &EntityReference,
 ) -> anyhow::Result<()> {
     sqlx::query!(
@@ -397,7 +605,7 @@ pub async fn delete_entity_properties(
         entity_reference.entity_id,
         entity_reference.entity_type as _,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(())

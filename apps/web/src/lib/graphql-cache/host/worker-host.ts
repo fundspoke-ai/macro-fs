@@ -1,27 +1,71 @@
 /**
- * Browser CacheHost: talks to the single cache engine in a SharedWorker.
- * Platforms without SharedWorker support receive a storage-free no-op host.
+ * Browser CacheHost: routes cache RPC through the SharedWorker coordinator to
+ * the currently elected dedicated cache engine. Unsupported browsers receive
+ * a storage-free no-op host.
  */
 
+import { deleteLegacyNormalizedCacheIdb } from '../legacy-idb-cleanup';
 import {
+  ADMITTED_ENQUEUE_UNCERTAIN_ERROR_CODE,
+  type AffectedOperationsResult,
   type CachedQueryInstanceWire,
   type CachedQueryVariantWire,
-  type CacheNotice,
   type CacheRequest,
+  type CacheResponseErrorCode,
+  type CacheRevision,
   type ClaimedMutation,
+  type CommitOptimisticWriteResult,
+  type DeferOptimisticWriteResult,
   type EnqueueOptimisticMutationResult,
+  type EntityFilterCacheArgs,
+  type EntityFilterCacheResult,
+  type HydrationResult,
   isCachePush,
+  isCacheResponse,
   type MutationClaim,
   type MutationSettlement,
-  type ReadRecordsArgs,
+  OWNER_EPOCH_LOST_ERROR_CODE,
+  OWNER_LOCK_UNAVAILABLE_ERROR_CODE,
+  parseStorageGeneration,
+  type ReadRecordsByKeysArgs,
+  type ReadRecordsByKeysResult,
   type ReadResult,
-  type SelectedRecordPageWire,
-  validateRecordSelectionLimit,
+  type RollbackOptimisticWriteResult,
+  type SearchCacheArgs,
+  type SearchCachePage,
+  validateCacheSearchArgs,
+  validateRecordSelectionKeys,
   type WorkerMessage,
   type WriteResult,
 } from '../protocol';
+import { quarantineCacheScope } from '../scope';
+import {
+  type CacheRolloutCohort,
+  type CacheTelemetryRecorderLike,
+  type CacheTelemetrySink,
+  classifyCacheError,
+  isolateCacheTelemetry,
+  operationCategoryForRequest,
+} from '../telemetry';
+import { createPageCacheTelemetry } from '../telemetry-relay';
+import {
+  type CacheCoordinatorPageAdapter,
+  createCacheCoordinatorPageAdapter,
+} from '../worker/coordinator-page-adapter';
+import type { EngineOpenOutcome } from '../worker/coordinator-protocol';
+import { isUnambiguousCacheScope } from '../worker/stale-databases';
+import {
+  CacheBootstrapExhaustedError,
+  COORDINATOR_CONNECT_ATTEMPTS,
+  COORDINATOR_CONNECT_TIMEOUT_MS,
+  STARTUP_RESPONSE_GRACE_MS,
+} from '../worker/startup';
+import { CacheNavigationError } from './navigation-error';
 import { createNoopCacheHost } from './noop-host';
 import type {
+  CacheChangeListener,
+  CacheChangeOptions,
+  CacheGenerationChange,
   CacheHost,
   CacheReadArgs,
   CacheWriteArgs,
@@ -34,8 +78,22 @@ import type {
 type Pending = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  kind: CacheRequest['kind'];
+  opKey?: number;
+  admitted: boolean;
+  startedAt: number;
   timer?: ReturnType<typeof setTimeout>;
 };
+
+type HostState =
+  | 'idle'
+  | 'initializing'
+  | 'awaiting-replacement'
+  | 'ready'
+  | 'suspended'
+  | 'disposing'
+  | 'failed'
+  | 'disposed';
 
 /** `Omit` that distributes over union members. */
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
@@ -51,36 +109,210 @@ export interface WorkerHostOptions {
    * operation that may already have completed durably.
    */
   requestTimeoutMs?: number;
-  /** Reports an asynchronous durable-storage initialization failure. */
+  /**
+   * Overrides each startup-phase timeout (primarily for tests). By default,
+   * registration has its own budget and engine startup follows the coordinator's
+   * asset/open deadlines, with a response grace period.
+   */
+  initializationTimeoutMs?: number;
+  /** Reports terminal initialization or coordinator-transport failure. */
   onInitializationError?: (error: Error) => void;
+  /** A newer app build took the local cache over. The host has already
+   * retired to the network; the app should reload the page into that build. */
+  onSuperseded?: () => void;
+  /** Allowlisted rollout cohort attached to browser-cache telemetry. */
+  rolloutCohort?: CacheRolloutCohort;
+  /** Injectable recorder for deterministic tests or alternate exporters. */
+  telemetry?: CacheTelemetryRecorderLike;
+  /** Injectable final sink; defaults to anonymous OpenTelemetry spans. */
+  telemetrySink?: CacheTelemetrySink;
+  /** Test seams for bounded origin-storage-pressure sampling. */
+  storageHealthIntervalMs?: number;
+  setInterval?: typeof globalThis.setInterval;
+  clearInterval?: typeof globalThis.clearInterval;
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_STORAGE_HEALTH_INTERVAL_MS = 5 * 60_000;
+const MIN_STORAGE_HEALTH_INTERVAL_MS = 1_000;
+const MAX_STORAGE_HEALTH_INTERVAL_MS = 15 * 60_000;
+
+function unsupportedBrowserReason(): string | undefined {
+  if (typeof SharedWorker !== 'function') {
+    return 'SharedWorker is not supported by this browser';
+  }
+  if (typeof Worker !== 'function') {
+    return 'DedicatedWorker is not supported by this browser';
+  }
+  if (typeof MessageChannel !== 'function') {
+    return 'MessageChannel is not supported by this browser';
+  }
+  if (
+    typeof navigator === 'undefined' ||
+    !navigator.locks ||
+    typeof navigator.locks.request !== 'function'
+  ) {
+    return 'Web Locks are not supported by this browser';
+  }
+  if (
+    !navigator.storage ||
+    typeof navigator.storage.getDirectory !== 'function'
+  ) {
+    return 'OPFS is not supported by this browser';
+  }
+  // Do not probe createSyncAccessHandle here: Chromium and Firefox expose it
+  // only inside DedicatedWorker. Engine initialization reports that async
+  // capability failure through the normal terminal-init path.
+  return undefined;
+}
+
+const asError = (error: unknown): Error =>
+  error instanceof Error ? error : new Error(String(error));
+
+class CacheResponseError extends Error {
+  constructor(
+    message: string,
+    readonly errorCode?: CacheResponseErrorCode
+  ) {
+    super(message);
+    this.name = 'CacheResponseError';
+  }
+}
+
+const isOwnerEpochLoss = (error: unknown): error is CacheResponseError =>
+  error instanceof CacheResponseError &&
+  error.errorCode === OWNER_EPOCH_LOST_ERROR_CODE;
+
+const isOwnerLockUnavailable = (error: unknown): error is CacheResponseError =>
+  error instanceof CacheResponseError &&
+  error.errorCode === OWNER_LOCK_UNAVAILABLE_ERROR_CODE;
 
 export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
-  if (typeof SharedWorker !== 'function') {
-    return createNoopCacheHost('SharedWorker is not supported by this browser');
+  let pageTelemetry = options.telemetry
+    ? undefined
+    : createPageCacheTelemetry({
+        rolloutCohort: options.rolloutCohort ?? 'unknown',
+        sink: options.telemetrySink,
+      });
+  let telemetry = isolateCacheTelemetry(
+    options.telemetry ?? pageTelemetry?.recorder
+  );
+  const now = (): number => globalThis.performance?.now() ?? Date.now();
+  const unsupportedReason =
+    unsupportedBrowserReason() ??
+    (isUnambiguousCacheScope(options.scope)
+      ? undefined
+      : 'cache scope must not end with -wal');
+  if (unsupportedReason) {
+    telemetry?.record({
+      name: 'graphql_cache.host_ready',
+      operationCategory: 'initialization',
+      outcome: 'error',
+      errorCode: 'unsupported',
+    });
+    telemetry?.flush();
+    console.warn(`[graphql-cache] disabled: ${unsupportedReason}`);
+    return createNoopCacheHost();
   }
 
   const clientId = crypto.randomUUID();
   const pending = new Map<number, Pending>();
+  const activeOpKeys = new Set<number>();
+  const registeredOpKeys = new Set<number>();
+  const lostRegisteredOpKeys = new Set<number>();
+  const replacementReadOpKeys = new Set<number>();
   const affectedSubscribers = new Set<(opKeys: number[]) => void>();
-  const cacheChangeSubscribers = new Set<() => void>();
+  const cacheChangeSubscribers = new Set<CacheChangeListener>();
+  const hydrationSubscribers = new Set<CacheChangeListener>();
+  const generationChangeSubscribers = new Set<
+    (change: CacheGenerationChange) => void
+  >();
   const settlementSubscribers = new Set<
     (settlement: MutationSettlement) => void
   >();
   const requestTimeoutMs =
     options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  let initializationTimeoutMs =
+    options.initializationTimeoutMs ?? COORDINATOR_CONNECT_TIMEOUT_MS;
+  let registrationInProgress = false;
+  let cancelRegistration: ((error: Error) => void) | undefined;
   let nextRequestId = 1;
+  let state: HostState = 'idle';
+  let initialization: Promise<void> | undefined;
+  let initializationAttempt = 0;
+  let navigationGeneration = 0;
+  let suspension: Promise<void> | undefined;
+  let initializationError: Error | undefined;
+  let replacementError: CacheResponseError | undefined;
+  let recoveryInProgress = false;
+  let latestReplacementEpoch = 0;
+  let failureReported = false;
+  let terminalFailureHandled = false;
+  let superseded = false;
+  let adapter: CacheCoordinatorPageAdapter | undefined;
+  let registeredAdapter: CacheCoordinatorPageAdapter | undefined;
+  let adapterDisposePromise: Promise<void> | undefined;
+  let adapterDisposeWasGraceful = false;
+  let adapterDisposalStarted = false;
+  let disposalMode: 'graceful' | 'navigation' | 'abrupt' | undefined;
+  let pagehideRegistered = false;
+  let legacyIdbDeletionStarted = false;
+  let telemetryRelayStarted = false;
+  let telemetryFinished = false;
+  let initializationStartedAt = 0;
+  let storageHealthTimer: ReturnType<typeof setInterval> | undefined;
+  const setIntervalFn =
+    options.setInterval ?? globalThis.setInterval.bind(globalThis);
+  const clearIntervalFn =
+    options.clearInterval ?? globalThis.clearInterval.bind(globalThis);
+  const storageHealthIntervalMs = Math.min(
+    Math.max(
+      options.storageHealthIntervalMs ?? DEFAULT_STORAGE_HEALTH_INTERVAL_MS,
+      MIN_STORAGE_HEALTH_INTERVAL_MS
+    ),
+    MAX_STORAGE_HEALTH_INTERVAL_MS
+  );
 
-  let post: (msg: CacheRequest) => void;
-  let dispose: () => void;
+  const recordRequestOutcome = (
+    entry: Pending,
+    outcome: 'success' | 'error',
+    error?: unknown
+  ): void => {
+    telemetry?.record({
+      name: 'graphql_cache.host_request',
+      operationCategory: operationCategoryForRequest({ kind: entry.kind }),
+      outcome,
+      errorCode: outcome === 'error' ? classifyCacheError(error) : 'none',
+      durationMs: now() - entry.startedAt,
+    });
+  };
 
   const onMessage = (event: MessageEvent<WorkerMessage>) => {
     const msg = event.data;
     if (isCachePush(msg)) {
+      if (msg.kind === 'cache-hydrated') {
+        for (const cb of hydrationSubscribers) {
+          if (msg.searchChangedBuckets === undefined) cb(msg.revision);
+          else
+            cb(msg.revision, {
+              searchChangedBuckets: msg.searchChangedBuckets,
+            });
+        }
+        return;
+      }
       if (msg.kind === 'cache-changed') {
-        for (const cb of cacheChangeSubscribers) cb();
+        if (msg.reset) {
+          for (const cb of generationChangeSubscribers)
+            cb({ storage: 'reset' });
+        }
+        for (const cb of cacheChangeSubscribers) {
+          if (msg.reset || msg.searchChangedBuckets === undefined)
+            cb(msg.revision);
+          else
+            cb(msg.revision, {
+              searchChangedBuckets: msg.searchChangedBuckets,
+            });
+        }
         return;
       }
       if (msg.kind === 'mutation-settled') {
@@ -88,147 +320,953 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
         return;
       }
       const prefix = `${clientId}:`;
-      const opKeys = msg.opIds
-        .filter((id) => id.startsWith(prefix))
-        .map((id) => Number(id.slice(prefix.length)))
-        .filter((n) => Number.isFinite(n));
+      const opKeys = [
+        ...new Set(
+          msg.opIds.flatMap((id) => {
+            if (!id.startsWith(prefix)) return [];
+            const suffix = id.slice(prefix.length);
+            const opKey = Number(suffix);
+            return Number.isSafeInteger(opKey) && String(opKey) === suffix
+              ? [opKey]
+              : [];
+          })
+        ),
+      ];
       if (opKeys.length > 0) {
         for (const cb of affectedSubscribers) cb(opKeys);
       }
       return;
     }
+    if (!isCacheResponse(msg)) return;
     const entry = pending.get(msg.id);
     if (!entry) return;
+    if (!msg.ok) {
+      const error = new CacheResponseError(msg.error, msg.errorCode);
+      if (isOwnerEpochLoss(error)) observeOwnerEpochLoss(error);
+      pending.delete(msg.id);
+      if (entry.timer !== undefined) clearTimeout(entry.timer);
+      recordRequestOutcome(entry, 'error', error);
+      entry.reject(error);
+      if (isOwnerLockUnavailable(error)) retireUnavailable(msg.error);
+      finishGracefulDisposeIfDrained();
+      return;
+    }
     pending.delete(msg.id);
     if (entry.timer !== undefined) clearTimeout(entry.timer);
-    if (msg.ok) {
-      entry.resolve(msg.result);
-    } else {
-      entry.reject(new Error(msg.error));
+    if (
+      (entry.kind === 'read' || entry.kind === 'write') &&
+      entry.opKey !== undefined &&
+      activeOpKeys.has(entry.opKey)
+    ) {
+      registeredOpKeys.add(entry.opKey);
     }
+    recordRequestOutcome(entry, 'success');
+    entry.resolve(msg.result);
+    finishGracefulDisposeIfDrained();
   };
 
-  let worker: SharedWorker;
-  try {
-    worker = new SharedWorker(
-      new URL('../worker/cache.shared-worker.ts', import.meta.url),
-      { type: 'module', name: `graphql-cache:${options.scope}` }
-    );
-    worker.port.onmessage = onMessage;
-    worker.port.start();
-  } catch {
-    return createNoopCacheHost('SharedWorker could not be initialized');
-  }
-  post = (msg) => worker.port.postMessage(msg);
-  dispose = () => {
-    // Tell the SharedWorker to drop our port — there is no platform
-    // disconnect event, and stale ports would otherwise accumulate.
-    const notice: CacheNotice = { kind: 'disconnect' };
-    worker.port.postMessage(notice);
-    worker.port.close();
-  };
-
-  // Best-effort cleanup when the page goes away (bfcache-safe: a restored
-  // page gets a fresh host on next use anyway).
-  if (typeof addEventListener === 'function') {
-    addEventListener('pagehide', dispose, { once: true });
+  function beginRecoveryGeneration(): void {
+    if (recoveryInProgress) return;
+    recoveryInProgress = true;
+    lostRegisteredOpKeys.clear();
+    for (const opKey of registeredOpKeys) lostRegisteredOpKeys.add(opKey);
+    registeredOpKeys.clear();
   }
 
-  function request(
-    msg: DistributiveOmit<CacheRequest, 'id'>
-  ): Promise<unknown> {
-    const id = nextRequestId++;
-    return new Promise((resolve, reject) => {
-      const entry: Pending = { resolve, reject };
+  function markPendingRegistrations(target: Set<number>): void {
+    for (const entry of pending.values()) {
       if (
-        msg.kind === 'read' ||
-        msg.kind === 'read-records' ||
-        msg.kind === 'inspect-query' ||
-        msg.kind === 'inspect-query-variants'
+        (entry.kind === 'read' || entry.kind === 'write') &&
+        entry.opKey !== undefined
       ) {
-        entry.timer = setTimeout(() => {
-          if (pending.delete(id)) {
-            reject(new Error(`cache worker timeout: ${msg.kind}`));
-          }
-        }, requestTimeoutMs);
+        target.add(entry.opKey);
       }
-      pending.set(id, entry);
-      post({ ...msg, id } as CacheRequest);
+    }
+  }
+
+  function emitAffectedKeys(opKeys: number[]): void {
+    if (opKeys.length === 0) return;
+    for (const cb of affectedSubscribers) cb(opKeys);
+  }
+
+  function onEngineReplaced(
+    ownerEpoch: number,
+    openOutcome: EngineOpenOutcome
+  ): void {
+    if (
+      state === 'failed' ||
+      state === 'suspended' ||
+      state === 'disposing' ||
+      state === 'disposed'
+    )
+      return;
+    if (ownerEpoch <= latestReplacementEpoch) return;
+    latestReplacementEpoch = ownerEpoch;
+    // Initial readiness completes the already-running first handshake.
+    if (state === 'initializing' && !recoveryInProgress) return;
+    const change: CacheGenerationChange = {
+      storage: openOutcome === 'opened-existing' ? 'preserved' : 'reset',
+    };
+    for (const cb of generationChangeSubscribers) cb(change);
+    if (state === 'ready') {
+      beginRecoveryGeneration();
+      // No old response put this host into recovery. Requests still pending at
+      // replacement broadcast were queued by the coordinator while resetting
+      // and will be routed exactly once to this replacement generation.
+      markPendingRegistrations(replacementReadOpKeys);
+    }
+    if (state !== 'ready' && state !== 'awaiting-replacement') return;
+    void startInitialization().catch(() => undefined);
+  }
+
+  function observeOwnerEpochLoss(error: CacheResponseError): void {
+    if (
+      state === 'failed' ||
+      state === 'suspended' ||
+      state === 'disposing' ||
+      state === 'disposed'
+    )
+      return;
+    beginRecoveryGeneration();
+    // A rejected old-epoch read may have registered dependencies before its
+    // response was lost. It belongs to the lost generation, not replacement.
+    markPendingRegistrations(lostRegisteredOpKeys);
+    replacementError = error;
+    initialization = undefined;
+    state = 'awaiting-replacement';
+  }
+
+  function unregisterPagehide(): void {
+    if (!pagehideRegistered || typeof removeEventListener !== 'function') {
+      return;
+    }
+    removeEventListener('pagehide', onPagehide);
+    removeEventListener('pageshow', onPageshow);
+    pagehideRegistered = false;
+  }
+
+  function registerPagehide(): void {
+    if (pagehideRegistered || typeof addEventListener !== 'function') return;
+    pagehideRegistered = true;
+    addEventListener('pagehide', onPagehide);
+    addEventListener('pageshow', onPageshow);
+  }
+
+  function getAdapter(): CacheCoordinatorPageAdapter {
+    if (adapter) return adapter;
+    if (!telemetryRelayStarted) {
+      telemetryRelayStarted = true;
+      pageTelemetry?.relay.start();
+    }
+    const created = createCacheCoordinatorPageAdapter({
+      scope: options.scope,
+      hotCapacity: options.hotCapacity,
+      onEngineReplaced: (epoch, outcome) => {
+        if (adapter === created) onEngineReplaced(epoch, outcome);
+      },
+      onStartupProgress: (progress) => {
+        if (adapter !== created) return;
+        initializationTimeoutMs =
+          options.initializationTimeoutMs ??
+          progress.timeoutMs + STARTUP_RESPONSE_GRACE_MS;
+        for (const [id, entry] of pending) {
+          if (entry.kind === 'init')
+            armRequestTimeout(id, entry, initializationTimeoutMs);
+        }
+      },
+      onTerminalError: (error) => {
+        // start() also rejects; let the bounded registration loop retry before
+        // reporting a terminal failure or quarantining any cache scope.
+        if (adapter === created && !registrationInProgress && !suspension)
+          failTransport(error);
+      },
+      onCacheUnavailable: (reason) => {
+        if (adapter === created) retireUnavailable(reason);
+      },
+      onCacheSuperseded: (reason) => {
+        if (adapter !== created || superseded) return;
+        superseded = true;
+        retireUnavailable(reason, true);
+        options.onSuperseded?.();
+      },
+      telemetry,
+    });
+    created.onmessage = (event) => {
+      if (adapter === created && state !== 'suspended') onMessage(event);
+    };
+    adapter = created;
+    registerPagehide();
+    return created;
+  }
+
+  async function registerAdapter(initializationId: number): Promise<void> {
+    registrationInProgress = true;
+    try {
+      for (
+        let attempt = 0;
+        attempt < COORDINATOR_CONNECT_ATTEMPTS;
+        attempt += 1
+      ) {
+        const current = getAdapter();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            current.start(),
+            new Promise<never>((_resolve, reject) => {
+              cancelRegistration = reject;
+              timer = setTimeout(
+                () => reject(new Error('cache worker timeout: registration')),
+                options.initializationTimeoutMs ??
+                  COORDINATOR_CONNECT_TIMEOUT_MS
+              );
+            }),
+          ]);
+          if (initializationId !== initializationAttempt)
+            throw new CacheNavigationError();
+          if (state !== 'initializing')
+            throw new Error('cache worker host was disposed during startup');
+          registeredAdapter = current;
+          return;
+        } catch (error) {
+          current.onmessage = null;
+          await current.dispose({ graceful: false });
+          if (adapter === current) adapter = undefined;
+          if (
+            initializationId !== initializationAttempt ||
+            state !== 'initializing' ||
+            attempt + 1 === COORDINATOR_CONNECT_ATTEMPTS
+          )
+            throw error;
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+          cancelRegistration = undefined;
+        }
+      }
+    } finally {
+      registrationInProgress = false;
+    }
+  }
+
+  function startLegacyIdbDeletion(): void {
+    if (legacyIdbDeletionStarted) return;
+    legacyIdbDeletionStarted = true;
+    // Cutover cleanup must never delay cache startup or any cache RPC.
+    void deleteLegacyNormalizedCacheIdb(options.scope);
+  }
+
+  function rejectPending(error: Error, transportUncertain = false): void {
+    const entries = [...pending.values()];
+    pending.clear();
+    for (const entry of entries) {
+      if (entry.timer !== undefined) clearTimeout(entry.timer);
+      recordRequestOutcome(entry, 'error', error);
+      if (
+        transportUncertain &&
+        entry.admitted &&
+        entry.kind === 'enqueue-optimistic-mutation'
+      ) {
+        entry.reject(
+          new CacheResponseError(
+            `${error.message}: admitted optimistic enqueue outcome is uncertain`,
+            ADMITTED_ENQUEUE_UNCERTAIN_ERROR_CODE
+          )
+        );
+      } else {
+        entry.reject(error);
+      }
+    }
+  }
+
+  function disposeAdapter(
+    graceful: boolean,
+    preserveDatabase = false
+  ): Promise<void> {
+    if (adapterDisposePromise) {
+      if (!graceful && adapterDisposeWasGraceful && adapter) {
+        adapterDisposeWasGraceful = false;
+        try {
+          // A pagehide during graceful retirement must reach the adapter so it
+          // can terminate immediately without classifying navigation as loss.
+          void adapter.dispose(
+            preserveDatabase
+              ? { graceful: false, preserveDatabase: true }
+              : { graceful: false }
+          );
+        } catch {
+          // The original disposal promise still owns final settlement.
+        }
+      }
+      return adapterDisposePromise;
+    }
+    if (!adapter) return Promise.resolve();
+    adapterDisposeWasGraceful = graceful;
+    try {
+      adapterDisposePromise = adapter
+        .dispose(
+          preserveDatabase ? { graceful, preserveDatabase: true } : { graceful }
+        )
+        .catch(() => undefined);
+    } catch {
+      // The host is already closed and cannot safely retry disposal.
+      adapterDisposePromise = Promise.resolve();
+    }
+    return adapterDisposePromise;
+  }
+
+  function clearSubscribers(): void {
+    affectedSubscribers.clear();
+    cacheChangeSubscribers.clear();
+    hydrationSubscribers.clear();
+    generationChangeSubscribers.clear();
+    settlementSubscribers.clear();
+  }
+
+  function reportFailure(error: Error): void {
+    if (failureReported) return;
+    failureReported = true;
+    options.onInitializationError?.(error);
+  }
+
+  function failInitialization(error: Error): void {
+    if (
+      state === 'failed' ||
+      state === 'suspended' ||
+      state === 'disposing' ||
+      state === 'disposed' ||
+      state === 'ready'
+    )
+      return;
+    telemetry?.record({
+      name: 'graphql_cache.host_ready',
+      operationCategory: 'initialization',
+      outcome: 'error',
+      errorCode: classifyCacheError(error),
+      durationMs:
+        initializationStartedAt > 0 ? now() - initializationStartedAt : 0,
+    });
+    stopForSession(error);
+    reportFailure(error);
+  }
+
+  /**
+   * Fails this host for the rest of the page session: pending requests reject
+   * (an admitted enqueue as uncertain when `uncertain`), subscribers are
+   * dropped, and the coordinator connection closes.
+   */
+  function stopForSession(
+    error: Error,
+    { uncertain = false, preserveDatabase = false } = {}
+  ): void {
+    state = 'failed';
+    initialization = undefined;
+    initializationError = error;
+    rejectPending(error, uncertain);
+    clearSubscribers();
+    unregisterPagehide();
+    void disposeAdapter(false, preserveDatabase).then(finishTelemetry);
+  }
+
+  /**
+   * Another context, usually a tab on another deployed build, holds the
+   * database, and the coordinator touched no storage. Nothing is quarantined:
+   * this page stops using the cache until it reloads, and a later page load
+   * tries again. A page handing the database to a newer build leaves like a
+   * navigating page: its engine stops without counting as a lost owner, and
+   * an enqueue already sent may have reached the durable queue, so it is
+   * reported uncertain rather than sent again.
+   */
+  function retireUnavailable(reason: string, leaveForNewerBuild = false): void {
+    if (
+      terminalFailureHandled ||
+      state === 'failed' ||
+      state === 'suspended' ||
+      state === 'disposing' ||
+      state === 'disposed'
+    )
+      return;
+    terminalFailureHandled = true;
+    const error = new CacheResponseError(
+      reason,
+      OWNER_LOCK_UNAVAILABLE_ERROR_CODE
+    );
+    if (state === 'initializing') {
+      telemetry?.record({
+        name: 'graphql_cache.host_ready',
+        operationCategory: 'initialization',
+        outcome: 'error',
+        errorCode: 'lock',
+        durationMs:
+          initializationStartedAt > 0 ? now() - initializationStartedAt : 0,
+      });
+    }
+    stopStorageHealthSampling();
+    stopForSession(error, {
+      uncertain: leaveForNewerBuild,
+      preserveDatabase: leaveForNewerBuild,
+    });
+    reportFailure(error);
+  }
+
+  function hasAdmittedEnqueue(): boolean {
+    return [...pending.values()].some(
+      (entry) => entry.admitted && entry.kind === 'enqueue-optimistic-mutation'
+    );
+  }
+
+  function failTransport(error: Error): void {
+    if (terminalFailureHandled || state === 'suspended') return;
+    const storageWasUntouched = error instanceof CacheBootstrapExhaustedError;
+    stopStorageHealthSampling();
+    const admittedWorkIsUncertain = [...pending.values()].some(
+      (entry) => entry.admitted
+    );
+    if (state === 'disposed' && !admittedWorkIsUncertain) return;
+    terminalFailureHandled = true;
+    stopForSession(error, { uncertain: true });
+    // Product failure handling may immediately construct another host. Make
+    // the matching old scope unreachable before invoking that callback.
+    const quarantine = storageWasUntouched
+      ? Promise.resolve()
+      : quarantineCacheScope(options.scope);
+    void quarantine.then(() => {
+      try {
+        reportFailure(error);
+      } catch {
+        // Failure reporting cannot reopen or invalidate completed quarantine.
+      }
     });
   }
 
-  const ready = request({
-    kind: 'init',
-    scope: options.scope,
-    hotCapacity: options.hotCapacity,
-  });
-  void (async () => {
+  function stopStorageHealthSampling(): void {
+    if (storageHealthTimer === undefined) return;
+    clearIntervalFn(storageHealthTimer);
+    storageHealthTimer = undefined;
+  }
+
+  function finishTelemetry(): void {
+    if (telemetryFinished) return;
+    stopStorageHealthSampling();
+    telemetryFinished = true;
+    telemetry?.flush();
+    pageTelemetry?.relay.dispose();
+  }
+
+  function startAdapterDisposal(
+    graceful: boolean,
+    preserveDatabase = false
+  ): void {
+    if (adapterDisposalStarted) {
+      if (!graceful) void disposeAdapter(false, preserveDatabase);
+      return;
+    }
+    adapterDisposalStarted = true;
+    void disposeAdapter(graceful, preserveDatabase).then(() => {
+      if (state !== 'disposing') return;
+      state = 'disposed';
+      unregisterPagehide();
+      finishTelemetry();
+    });
+  }
+
+  function finishGracefulDisposeIfDrained(): void {
+    if (
+      state !== 'disposing' ||
+      disposalMode !== 'graceful' ||
+      pending.size > 0
+    ) {
+      return;
+    }
+    startAdapterDisposal(true);
+  }
+
+  function disposeHost(graceful: boolean, preserveDatabase = false): void {
+    cancelRegistration?.(
+      preserveDatabase
+        ? new CacheNavigationError()
+        : new Error('cache worker host was disposed during startup')
+    );
+    stopStorageHealthSampling();
+    if (state === 'disposed') return;
+    if (state === 'disposing') {
+      if (
+        graceful ||
+        disposalMode === 'abrupt' ||
+        (preserveDatabase && disposalMode === 'navigation')
+      ) {
+        return;
+      }
+      if (preserveDatabase) {
+        disposalMode = 'navigation';
+        clearSubscribers();
+        rejectPending(new CacheNavigationError(), true);
+        startAdapterDisposal(false, true);
+        return;
+      }
+      disposalMode = 'abrupt';
+      const quarantine = hasAdmittedEnqueue();
+      clearSubscribers();
+      if (quarantine) void quarantineCacheScope(options.scope);
+      rejectPending(new Error('cache worker host was abruptly disposed'), true);
+      startAdapterDisposal(false);
+      return;
+    }
+    if (graceful && state === 'ready') {
+      // Stop admission first, but keep the requester/standby connected until
+      // every already-admitted RPC has a response or its existing read timer.
+      // Mutations deliberately have no arbitrary disposal timeout.
+      state = 'disposing';
+      disposalMode = 'graceful';
+      clearSubscribers();
+      // Keep pagehide armed through coordinator retirement so navigation can
+      // terminate the worker without converting the handoff into a wipe.
+      finishGracefulDisposeIfDrained();
+      return;
+    }
+
+    state = 'disposing';
+    clearSubscribers();
+    if (preserveDatabase) {
+      disposalMode = 'navigation';
+      rejectPending(new CacheNavigationError(), true);
+      startAdapterDisposal(false, true);
+      return;
+    }
+
+    const quarantine = hasAdmittedEnqueue();
+    disposalMode = 'abrupt';
+    if (quarantine) void quarantineCacheScope(options.scope);
+    rejectPending(new Error('cache worker host was abruptly disposed'), true);
+    startAdapterDisposal(false);
+  }
+
+  async function finishSuspension(
+    startup: Promise<void> | undefined,
+    retirement: Promise<void>
+  ): Promise<void> {
+    // A canceled registration must unwind before a replacement can publish its
+    // adapter. Never let the old startup's finally block clear the new one.
     try {
-      await ready;
-    } catch (error) {
-      options.onInitializationError?.(
-        error instanceof Error ? error : new Error(String(error))
+      await startup;
+    } catch {
+      // Navigation already settled startup callers.
+    }
+    await retirement;
+  }
+
+  function onPagehide(event: PageTransitionEvent): void {
+    if (
+      !event.persisted ||
+      state === 'failed' ||
+      state === 'disposing' ||
+      state === 'disposed'
+    ) {
+      disposeHost(false, true);
+      return;
+    }
+    if (state === 'suspended') return;
+    state = 'suspended';
+    navigationGeneration += 1;
+    initializationAttempt += 1;
+    beginRecoveryGeneration();
+    // All active operations need fresh dependencies after reconnect, including
+    // reads that never reached the old engine before the page was frozen.
+    for (const key of activeOpKeys) lostRegisteredOpKeys.add(key);
+    replacementReadOpKeys.clear();
+    cancelRegistration?.(new CacheNavigationError());
+    rejectPending(new CacheNavigationError(), true);
+    if (adapter) adapter.onmessage = null;
+    suspension = finishSuspension(initialization, disposeAdapter(false, true));
+    finishTelemetry();
+  }
+
+  async function resumeAfterNavigation(): Promise<void> {
+    try {
+      // Keep the host and all its subscribers alive; only the page transport is
+      // replaced. Initialization waits for the suspended startup to unwind.
+      await startInitialization();
+    } catch {
+      // Non-navigation failures already invoke the normal product fallback.
+    }
+  }
+
+  function onPageshow(event: PageTransitionEvent): void {
+    if (!event.persisted || state !== 'suspended') return;
+    void resumeAfterNavigation();
+  }
+
+  function navigationError(): CacheNavigationError | undefined {
+    if (state === 'suspended' || disposalMode === 'navigation') {
+      return new CacheNavigationError();
+    }
+  }
+
+  function armRequestTimeout(
+    id: number,
+    entry: Pending,
+    timeoutMs: number
+  ): void {
+    if (entry.timer !== undefined) clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => {
+      if (pending.delete(id)) {
+        const error = new Error(`cache worker timeout: ${entry.kind}`);
+        recordRequestOutcome(entry, 'error', error);
+        entry.reject(error);
+        finishGracefulDisposeIfDrained();
+      }
+    }, timeoutMs);
+  }
+
+  function request(
+    msg: DistributiveOmit<CacheRequest, 'id'>,
+    opKey?: number
+  ): Promise<unknown> {
+    if (state === 'failed') {
+      return Promise.reject(
+        initializationError ?? new Error('cache worker initialization failed')
       );
     }
-  })();
+    const canceled = navigationError();
+    if (canceled) return Promise.reject(canceled);
+    if (state === 'disposing' || state === 'disposed') {
+      return Promise.reject(new Error('cache worker host was disposed'));
+    }
+
+    const id = nextRequestId++;
+    return new Promise((resolve, reject) => {
+      const entry: Pending = {
+        resolve,
+        reject,
+        kind: msg.kind,
+        opKey,
+        admitted: false,
+        startedAt: now(),
+      };
+      const timeoutMs =
+        msg.kind === 'init'
+          ? initializationTimeoutMs
+          : msg.kind === 'current-revision' ||
+              msg.kind === 'current-storage-generation' ||
+              msg.kind === 'read' ||
+              msg.kind === 'read-records-by-keys' ||
+              msg.kind === 'search' ||
+              msg.kind === 'entity-filter' ||
+              msg.kind === 'inspect-query' ||
+              msg.kind === 'inspect-query-variants'
+            ? requestTimeoutMs
+            : undefined;
+      if (timeoutMs !== undefined) {
+        armRequestTimeout(id, entry, timeoutMs);
+      }
+      pending.set(id, entry);
+      try {
+        getAdapter().postMessage({ ...msg, id } as CacheRequest);
+        // The first accepted coordinator send is the browser Turso host's
+        // actual lazy start. Only then begin fire-and-forget legacy cleanup.
+        startLegacyIdbDeletion();
+        if (pending.has(id)) entry.admitted = true;
+      } catch (error) {
+        if (pending.delete(id) && entry.timer !== undefined) {
+          clearTimeout(entry.timer);
+        }
+        const requestError = asError(error);
+        recordRequestOutcome(entry, 'error', requestError);
+        reject(requestError);
+      }
+    });
+  }
+
+  async function observeStorageHealth(): Promise<void> {
+    try {
+      const storage = navigator.storage;
+      const [estimate, persisted] = await Promise.all([
+        storage.estimate(),
+        typeof storage.persisted === 'function'
+          ? storage.persisted()
+          : Promise.resolve(undefined),
+      ]);
+      const usageBytes = estimate.usage;
+      const quotaBytes = estimate.quota;
+      telemetry?.record({
+        name: 'graphql_cache.origin_storage_pressure',
+        operationCategory: 'storage',
+        outcome: 'success',
+        persistence:
+          persisted === true
+            ? 'granted'
+            : persisted === false
+              ? 'denied'
+              : 'unknown',
+        usageBytes,
+        quotaBytes,
+        ratio:
+          usageBytes !== undefined && quotaBytes !== undefined && quotaBytes > 0
+            ? usageBytes / quotaBytes
+            : undefined,
+      });
+    } catch (error) {
+      telemetry?.record({
+        name: 'graphql_cache.origin_storage_pressure',
+        operationCategory: 'storage',
+        outcome: 'error',
+        errorCode: classifyCacheError(error),
+        persistence: 'unknown',
+      });
+    }
+  }
+
+  function startStorageHealthSampling(): void {
+    void observeStorageHealth();
+    storageHealthTimer ??= setIntervalFn(() => {
+      void observeStorageHealth();
+    }, storageHealthIntervalMs);
+  }
+
+  function startInitialization(): Promise<void> {
+    state = 'initializing';
+    replacementError = undefined;
+    initializationStartedAt = now();
+    const sendInit = () =>
+      request({
+        kind: 'init',
+        scope: options.scope,
+        hotCapacity: options.hotCapacity,
+      });
+    const attempt = ++initializationAttempt;
+    const suspended = suspension;
+    const ready = (async () => {
+      if (suspended) {
+        await suspended;
+        if (attempt !== initializationAttempt) throw new CacheNavigationError();
+        if (state !== 'initializing')
+          throw new Error('cache worker host was disposed');
+        suspension = undefined;
+        adapter = undefined;
+        registeredAdapter = undefined;
+        adapterDisposePromise = undefined;
+        adapterDisposeWasGraceful = false;
+        adapterDisposalStarted = false;
+        latestReplacementEpoch = 0;
+        initializationTimeoutMs =
+          options.initializationTimeoutMs ?? COORDINATOR_CONNECT_TIMEOUT_MS;
+        telemetryFinished = false;
+        telemetryRelayStarted = false;
+        pageTelemetry = options.telemetry
+          ? undefined
+          : createPageCacheTelemetry({
+              rolloutCohort: options.rolloutCohort ?? 'unknown',
+              sink: options.telemetrySink,
+            });
+        telemetry = isolateCacheTelemetry(
+          options.telemetry ?? pageTelemetry?.recorder
+        );
+      }
+      if (!adapter || registeredAdapter !== adapter)
+        await registerAdapter(attempt);
+      if (attempt !== initializationAttempt) throw new CacheNavigationError();
+      return await sendInit();
+    })();
+    const handshake = ready.then(
+      () => {
+        if (attempt !== initializationAttempt || state !== 'initializing')
+          return;
+        state = 'ready';
+        initialization = undefined;
+        if (suspended) {
+          // A surviving coordinator need not send engine-replaced to a late
+          // joiner. Resets while frozen are unknowable, so conservatively
+          // invalidate local checkpoints as well as revision/dependency state.
+          for (const cb of generationChangeSubscribers)
+            cb({ storage: 'reset' });
+        }
+        telemetry?.record({
+          name: 'graphql_cache.host_ready',
+          operationCategory: 'initialization',
+          outcome: 'success',
+          errorCode: 'none',
+          durationMs: now() - initializationStartedAt,
+        });
+        startStorageHealthSampling();
+        if (recoveryInProgress) {
+          const opKeys = [...lostRegisteredOpKeys].filter(
+            (opKey) =>
+              activeOpKeys.has(opKey) && !replacementReadOpKeys.has(opKey)
+          );
+          recoveryInProgress = false;
+          lostRegisteredOpKeys.clear();
+          replacementReadOpKeys.clear();
+          emitAffectedKeys(opKeys);
+        }
+      },
+      (error: unknown) => {
+        const initializationFailure = asError(error);
+        if (attempt !== initializationAttempt) throw initializationFailure;
+        initialization = undefined;
+        if (isOwnerEpochLoss(initializationFailure)) {
+          observeOwnerEpochLoss(initializationFailure);
+        } else {
+          failInitialization(initializationFailure);
+        }
+        throw initializationFailure;
+      }
+    );
+    initialization = handshake;
+    return handshake;
+  }
+
+  function ensureInitialized(): Promise<void> {
+    if (state === 'ready') return Promise.resolve();
+    if (state === 'initializing' && initialization) return initialization;
+    if (state === 'awaiting-replacement') {
+      return Promise.reject(
+        replacementError ?? new Error('cache worker is awaiting replacement')
+      );
+    }
+    if (state === 'failed') {
+      return Promise.reject(
+        initializationError ?? new Error('cache worker initialization failed')
+      );
+    }
+    const canceled = navigationError();
+    if (canceled) return Promise.reject(canceled);
+    if (state === 'disposing' || state === 'disposed') {
+      return Promise.reject(new Error('cache worker host was disposed'));
+    }
+    return startInitialization();
+  }
+
+  async function initializedRequest(
+    msg: DistributiveOmit<CacheRequest, 'id'>,
+    opKey?: number
+  ): Promise<unknown> {
+    const generation = navigationGeneration;
+    await ensureInitialized();
+    // Do not admit an old-page operation to a newly restored transport.
+    if (generation !== navigationGeneration) throw new CacheNavigationError();
+    return await request(msg, opKey);
+  }
+
+  function trackActiveOperation(opKey: number): void {
+    activeOpKeys.add(opKey);
+    if (state === 'suspended') lostRegisteredOpKeys.add(opKey);
+    else if (recoveryInProgress) replacementReadOpKeys.add(opKey);
+  }
 
   const opId = (opKey: number) => `${clientId}:${opKey}`;
 
   return {
     clientId,
 
-    async readQuery(args: CacheReadArgs): Promise<ReadResult> {
-      await ready;
-      return (await request({
-        kind: 'read',
-        opId: args.opKey === undefined ? undefined : opId(args.opKey),
-        query: args.query,
-        operationName: args.operationName,
-        variables: args.variables,
-        priority: args.priority,
-        entityResolvers: args.entityResolvers,
-      })) as ReadResult;
+    async currentRevision(): Promise<CacheRevision> {
+      return (await initializedRequest({
+        kind: 'current-revision',
+      })) as CacheRevision;
     },
 
-    async readRecords(args: ReadRecordsArgs): Promise<SelectedRecordPageWire> {
-      const limit = validateRecordSelectionLimit(args.limit);
-      await ready;
-      return (await request({
-        kind: 'read-records',
+    async currentStorageGeneration(): Promise<string> {
+      await ensureInitialized();
+      return parseStorageGeneration(
+        await request({ kind: 'current-storage-generation' })
+      );
+    },
+
+    async readQuery(args: CacheReadArgs): Promise<ReadResult> {
+      if (args.opKey !== undefined) trackActiveOperation(args.opKey);
+      return (await initializedRequest(
+        {
+          kind: 'read',
+          opId: args.opKey === undefined ? undefined : opId(args.opKey),
+          query: args.query,
+          operationName: args.operationName,
+          variables: args.variables,
+          priority: args.priority,
+          entityResolvers: args.entityResolvers,
+        },
+        args.opKey
+      )) as ReadResult;
+    },
+
+    async readRecordsByKeys(
+      args: ReadRecordsByKeysArgs
+    ): Promise<ReadRecordsByKeysResult> {
+      const keys = validateRecordSelectionKeys(args.keys);
+      return (await initializedRequest({
+        kind: 'read-records-by-keys',
         document: args.document,
         fragmentName: args.fragmentName,
-        cursor: args.cursor,
-        limit,
-      })) as SelectedRecordPageWire;
+        keys,
+      })) as ReadRecordsByKeysResult;
+    },
+
+    async search(args: SearchCacheArgs): Promise<SearchCachePage> {
+      const requestArgs = validateCacheSearchArgs(args);
+      return (await initializedRequest({
+        kind: 'search',
+        request: requestArgs,
+      })) as SearchCachePage;
+    },
+
+    async entityFilter(
+      args: EntityFilterCacheArgs
+    ): Promise<EntityFilterCacheResult> {
+      return (await initializedRequest({
+        kind: 'entity-filter',
+        request: args,
+      })) as EntityFilterCacheResult;
     },
 
     async writeQuery(args: CacheWriteArgs): Promise<WriteResult> {
-      await ready;
-      return (await request({
-        kind: 'write',
-        originOpId: args.opKey === undefined ? undefined : opId(args.opKey),
+      if (args.registerDependencies && args.opKey !== undefined) {
+        trackActiveOperation(args.opKey);
+      }
+      return (await initializedRequest(
+        {
+          kind: 'write',
+          originOpId: args.opKey === undefined ? undefined : opId(args.opKey),
+          registration:
+            args.registerDependencies && args.opKey !== undefined
+              ? {
+                  opId: opId(args.opKey),
+                  entityResolvers: args.entityResolvers,
+                }
+              : undefined,
+          query: args.query,
+          operationName: args.operationName,
+          variables: args.variables,
+          data: args.data,
+          identity: args.identity,
+        },
+        args.registerDependencies ? args.opKey : undefined
+      )) as WriteResult;
+    },
+
+    async hydrateQuery(
+      args: Omit<CacheWriteArgs, 'opKey'>
+    ): Promise<HydrationResult> {
+      return (await initializedRequest({
+        kind: 'hydrate',
         query: args.query,
         operationName: args.operationName,
         variables: args.variables,
         data: args.data,
         identity: args.identity,
-      })) as WriteResult;
+      })) as HydrationResult;
     },
 
     async enqueueOptimisticMutation(
       args: EnqueueOptimisticMutationArgs,
       claim: InitialMutationClaimArgs
     ): Promise<EnqueueOptimisticMutationResult> {
-      await ready;
-      return (await request({
+      return (await initializedRequest({
         kind: 'enqueue-optimistic-mutation',
         originOpId: args.opKey === undefined ? undefined : opId(args.opKey),
+        uuid: args.uuid,
         query: args.query,
         operationName: args.operationName,
         variables: args.variables,
         data: args.data,
         linkPatches: args.linkPatches,
         revalidations: args.revalidations,
+        identityBindings: args.identityBindings,
         createdAtMs: claim.nowMs,
         owner: claim.owner,
         nowMs: claim.nowMs,
@@ -239,8 +1277,7 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
     async inspectQueryVariants(
       args: InspectQueryVariantsArgs
     ): Promise<CachedQueryVariantWire[]> {
-      await ready;
-      return (await request({
+      return (await initializedRequest({
         kind: 'inspect-query-variants',
         query: args.query,
         operationName: args.operationName,
@@ -251,8 +1288,7 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
     async inspectQuery(
       args: InspectQueryArgs
     ): Promise<CachedQueryInstanceWire[]> {
-      await ready;
-      return (await request({
+      return (await initializedRequest({
         kind: 'inspect-query',
         query: args.query,
         operationName: args.operationName,
@@ -266,8 +1302,7 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
       nowMs: number,
       leaseExpiresAtMs: number
     ): Promise<ClaimedMutation | undefined> {
-      await ready;
-      return (await request({
+      return (await initializedRequest({
         kind: 'claim-next-mutation',
         owner,
         nowMs,
@@ -280,25 +1315,23 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
       claim: MutationClaim,
       nextAttemptAtMs: number,
       error: string
-    ): Promise<void> {
-      await ready;
-      await request({
+    ) {
+      return (await initializedRequest({
         kind: 'defer-optimistic-write',
         transactionId,
         leaseOwner: claim.owner,
         leaseGeneration: claim.generation,
         nextAttemptAtMs,
         error,
-      });
+      })) as DeferOptimisticWriteResult;
     },
 
     async commitOptimisticWrite(
       transactionId: string,
       claim: MutationClaim,
       args: CacheWriteArgs
-    ): Promise<WriteResult> {
-      await ready;
-      return (await request({
+    ): Promise<CommitOptimisticWriteResult> {
+      return (await initializedRequest({
         kind: 'commit-optimistic-write',
         transactionId,
         leaseOwner: claim.owner,
@@ -307,42 +1340,72 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
         operationName: args.operationName,
         variables: args.variables,
         data: args.data,
-      })) as WriteResult;
+      })) as CommitOptimisticWriteResult;
     },
 
     async rollbackOptimisticWrite(
       transactionId: string,
       claim: MutationClaim,
-      error: string
-    ): Promise<WriteResult> {
-      await ready;
-      return (await request({
+      error: string,
+      errorCode?: string
+    ): Promise<RollbackOptimisticWriteResult> {
+      return (await initializedRequest({
         kind: 'rollback-optimistic-write',
         transactionId,
         leaseOwner: claim.owner,
         leaseGeneration: claim.generation,
         error,
-      })) as WriteResult;
+        ...(errorCode === undefined ? {} : { errorCode }),
+      })) as RollbackOptimisticWriteResult;
     },
 
-    async invalidate(keys: string[]): Promise<string[]> {
-      await ready;
-      return (await request({ kind: 'invalidate', keys })) as string[];
+    async invalidate(keys: string[]): Promise<AffectedOperationsResult> {
+      return (await initializedRequest({
+        kind: 'invalidate',
+        keys,
+      })) as AffectedOperationsResult;
     },
 
-    async deleteRecords(keys: string[]): Promise<string[]> {
-      await ready;
-      return (await request({ kind: 'delete-records', keys })) as string[];
+    async deleteRecords(keys: string[]): Promise<AffectedOperationsResult> {
+      return (await initializedRequest({
+        kind: 'delete-records',
+        keys,
+      })) as AffectedOperationsResult;
     },
 
     async teardown(opKey: number): Promise<void> {
-      await ready;
+      activeOpKeys.delete(opKey);
+      registeredOpKeys.delete(opKey);
+      lostRegisteredOpKeys.delete(opKey);
+      replacementReadOpKeys.delete(opKey);
+      // urql emits teardown while initialization-failure fallback is
+      // unsubscribing operations. Local registration cleanup is sufficient
+      // when no usable engine generation remains.
+      if (state !== 'ready' && state !== 'initializing') return;
+      if (state === 'initializing') {
+        try {
+          await ensureInitialized();
+        } catch {
+          return;
+        }
+      }
+      // Disposal or owner loss can win while an initialization await yields.
+      if (state !== 'ready') return;
       await request({ kind: 'teardown', opId: opId(opKey) });
     },
 
-    async clear(): Promise<void> {
-      await ready;
-      await request({ kind: 'clear' });
+    async clear(): Promise<CacheRevision> {
+      const revision = (await initializedRequest({
+        kind: 'clear',
+      })) as CacheRevision;
+      telemetry?.record({
+        name: 'graphql_cache.logical_reset',
+        operationCategory: 'lifecycle',
+        outcome: 'success',
+        errorCode: 'none',
+        resetReason: 'explicit-clear',
+      });
+      return revision;
     },
 
     onOpsAffected(cb: (opKeys: number[]) => void): () => void {
@@ -350,9 +1413,23 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
       return () => affectedSubscribers.delete(cb);
     },
 
-    onCacheChanged(cb: () => void): () => void {
+    onCacheChanged(
+      cb: CacheChangeListener,
+      options?: CacheChangeOptions
+    ): () => void {
       cacheChangeSubscribers.add(cb);
-      return () => cacheChangeSubscribers.delete(cb);
+      if (options?.includeHydration) hydrationSubscribers.add(cb);
+      return () => {
+        cacheChangeSubscribers.delete(cb);
+        hydrationSubscribers.delete(cb);
+      };
+    },
+
+    onCacheGenerationChanged(
+      cb: (change: CacheGenerationChange) => void
+    ): () => void {
+      generationChangeSubscribers.add(cb);
+      return () => generationChangeSubscribers.delete(cb);
     },
 
     onMutationSettled(
@@ -363,10 +1440,7 @@ export function createWorkerCacheHost(options: WorkerHostOptions): CacheHost {
     },
 
     dispose() {
-      affectedSubscribers.clear();
-      cacheChangeSubscribers.clear();
-      settlementSubscribers.clear();
-      dispose();
+      disposeHost(true);
     },
   };
 }

@@ -22,24 +22,27 @@ use uuid::Uuid;
 #[cfg(test)]
 mod test;
 
-/// Per-user iOS push delivery targets.
+/// Per-user push delivery targets. Legacy names preserve queued iOS messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserApnsEndpoints {
     /// The iOS device endpoint ARNs for this user.
     pub endpoints: Vec<String>,
+    /// Android endpoints share the user's delivery/fallback decision with iOS.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub android_endpoints: Vec<String>,
     /// State machine data if the ingress decision was indeterminate for this user.
     #[serde(default)]
     pub digest_state: Option<Box<BatchSend<PushNotificationsEnabled>>>,
 }
 
-/// APNS push notification targets.
+/// Mobile push targets using the existing APNS content template and queue format.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct APNSTargets<T> {
     /// The APNS notification payload.
     pub notif: APNSPushNotification<T>,
     /// The APNS message attributes.
     pub attributes: MessageAttributes,
-    /// Per-user iOS device endpoints and optional state machine data.
+    /// Per-user iOS/Android endpoints and one shared fallback decision.
     pub ios_device_endpoints: HashMap<MacroUserIdStr<'static>, UserApnsEndpoints>,
 }
 
@@ -125,8 +128,8 @@ pub struct RealtimeNotif<T> {
     pub entity: Entity<'static>,
     /// Whether the notification has been sent.
     pub sent: bool,
-    /// Whether the notification is marked as done.
-    pub done: bool,
+    /// The authoritative lifecycle state, independent of viewing timestamps.
+    pub state: super::NotificationState,
     /// When the notification was created.
     pub created_at: DateTime<Utc>,
     /// When the notification was viewed/seen.
@@ -168,7 +171,7 @@ impl<'a, T: Clone> ConnGatewayNotification<'a, T> {
                 notification_event_type: req.req.notification.tag.as_ref().to_string(),
                 entity: req.req.notification_entity.clone().into_owned(),
                 sent: true,
-                done: false,
+                state: super::NotificationState::Unseen,
                 created_at: Utc::now(),
                 viewed_at: None,
                 updated_at: Utc::now(),
@@ -192,7 +195,7 @@ impl<'a, T: Notification> ConnGatewayNotification<'a, T> {
                     notification_event_type,
                     entity,
                     sent,
-                    done,
+                    state,
                     created_at,
                     viewed_at,
                     updated_at,
@@ -209,7 +212,7 @@ impl<'a, T: Notification> ConnGatewayNotification<'a, T> {
                 notification_event_type,
                 entity,
                 sent,
-                done,
+                state,
                 created_at,
                 viewed_at,
                 updated_at,
@@ -228,7 +231,7 @@ impl<'a, T: Notification> ConnGatewayNotification<'a, T> {
 /// The delivery channel variants.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum NotificationChannel<'a, T, U> {
-    /// Delivering to an iOS device with APNS.
+    /// Mobile push delivery; the legacy variant name preserves queued messages.
     Ios(Box<APNSTargets<U>>),
     /// Delivering to a user's email inbox.
     Email(EmailNotification<'a>),
@@ -250,7 +253,7 @@ impl<'a, T, U> NotificationChannel<'a, T, U> {
                         notification_event_type,
                         entity,
                         sent,
-                        done,
+                        state,
                         created_at: _,
                         viewed_at,
                         updated_at: _,
@@ -265,7 +268,7 @@ impl<'a, T, U> NotificationChannel<'a, T, U> {
                     notification_event_type,
                     entity,
                     sent,
-                    done,
+                    state,
                     created_at,
                     viewed_at,
                     updated_at,
@@ -435,6 +438,8 @@ pub struct RawQueueMessage {
 pub enum DeliverySuccess {
     /// Delivered via iOS push.
     Ios,
+    /// Delivered via Android push.
+    Android,
     /// Delivered via connection gateway (WebSocket).
     ConnGateway,
     /// Delivered via email.
@@ -450,9 +455,9 @@ pub enum DeliveryFailure {
     /// a timeout limit was reached trying to deliver the notif
     #[error("A timeout was reached")]
     Timeout,
-    /// a delivery error occurred with apns
-    #[error("An apns delivery error occurred")]
-    Ios,
+    /// A mobile push delivery error occurred with APNS or FCM.
+    #[error("A mobile push delivery error occurred")]
+    Mobile,
     /// A delivery error occurred.
     #[error("A delivery error occured")]
     Other,

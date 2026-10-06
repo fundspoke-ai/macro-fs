@@ -65,6 +65,18 @@ pub enum EntityType {
     /// The entity is an AI skill: either a skill document or a built-in
     /// system skill (see the `system_skills` crate)
     Skill,
+    /// The entity is an AI coding agent session (see the `agent_session`
+    /// crate)
+    AgentSession,
+    /// The entity is a scheduled action (see the `scheduled_action` service)
+    ScheduledAction,
+    /// The entity is an initiative (a named grouping of tasks)
+    Initiative,
+    /// The entity is a Macro Database: a collection of user-defined tables
+    /// (see the `databases` crate)
+    Database,
+    /// The entity is a row of a table in a Macro Database
+    DatabaseRow,
 }
 
 impl EntityType {
@@ -98,6 +110,24 @@ impl EntityType {
             // Skill refs are access-checked against the underlying document
             // (system skills are visible to everyone).
             EntityType::Skill => false,
+            // Agent sessions hold `entity_access` rows - the owner with
+            // owner, the channel the bot was mentioned in as editor - but
+            // are not something you file into a project.
+            EntityType::AgentSession => false,
+            // Scheduled actions are owner-scoped and are not something you
+            // file into a project. Access currently resolves from the owner
+            // column, not from a row in the `entity_access` table.
+            EntityType::ScheduledAction => false,
+            // Initiatives hold `entity_access` rows but are not something
+            // you file into a project.
+            EntityType::Initiative => false,
+            // A database's permissions are `entity_access` rows - the creator
+            // as owner, plus whoever it is later shared with - but, like agent
+            // sessions, a database is not something you file into a project.
+            EntityType::Database => false,
+            // Rows carry no `entity_access` rows of their own; access
+            // resolves through the parent database.
+            EntityType::DatabaseRow => false,
         }
     }
     /// provide an entity string slice to upgrade this type into an [Entity]

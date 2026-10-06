@@ -3,6 +3,7 @@ use crate::types::request::WEB_SEARCH_TOOL;
 use crate::types::response::ResponseContentKind;
 use crate::types::response::web_search::WebSearchResponse;
 use ai_toolset::{AsyncTool, RequestContext, ServiceContext, ToolCallError, ToolResult};
+use ai_toolset::{ToolAnnotated, ToolAnnotations};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -18,6 +19,12 @@ pub struct WebSearch {
     pub input: String,
 }
 
+impl ToolAnnotated for WebSearch {
+    const ANNOTATIONS: ToolAnnotations = ToolAnnotations::read_only("Search the web")
+        .with_open_world()
+        .without_idempotent();
+}
+
 #[async_trait]
 impl AsyncTool<AnthropicToolContext> for WebSearch {
     type Output = WebSearchResponse;
@@ -26,16 +33,12 @@ impl AsyncTool<AnthropicToolContext> for WebSearch {
     async fn call(
         &self,
         service_context: ServiceContext<AnthropicToolContext>,
-        _request_context: RequestContext,
+        request_context: RequestContext,
     ) -> ToolResult<Self::Output> {
         let ctx = &*service_context;
-        let blocks = super::invoke_server_tool(
-            &ctx.client,
-            &ctx.model,
-            WEB_SEARCH_TOOL.clone(),
-            &self.input,
-        )
-        .await?;
+        let blocks =
+            super::invoke_server_tool(ctx, &request_context, WEB_SEARCH_TOOL.clone(), &self.input)
+                .await?;
 
         blocks
             .into_iter()

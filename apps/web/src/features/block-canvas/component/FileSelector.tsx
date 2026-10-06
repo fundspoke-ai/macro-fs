@@ -13,7 +13,7 @@ import { Dropdown } from '@ui';
 import { createEffect, createSignal, Show } from 'solid-js';
 import { VList } from 'virtua/solid';
 import { Tools } from '../constants';
-import { selectedFileSignal } from '../operation/file';
+import { useCanvasDocument } from '../context/canvas-document-context';
 import { useSelect } from '../operation/select';
 import { useToolManager } from '../signal/toolManager';
 
@@ -24,11 +24,11 @@ type FileItem = {
 };
 
 function ItemOption(props: { file: FileItem; type: ItemType }) {
-  const setSelectedFile = selectedFileSignal.set;
+  const [, setSelectedFile] = useCanvasDocument().state.signals.selectedFile;
   const toolManager = useToolManager();
   const select = useSelect();
 
-  const selectFile = (e: MouseEvent | TouchEvent) => {
+  const selectFile = (e: Event) => {
     e.stopPropagation();
     e.preventDefault();
     select.abort();
@@ -59,7 +59,7 @@ function ItemOption(props: { file: FileItem; type: ItemType }) {
 
 export function FileSelector() {
   const [userFiles, setUserFiles] = createSignal<
-    { file: FileItem; type: string }[]
+    { file: FileItem; type: ItemType }[]
   >([]);
   const historyQuery = useHistoryQuery();
   const { focusCanvas } = useToolManager();
@@ -67,7 +67,7 @@ export function FileSelector() {
   const [fileSelectorOpen, setFileSelectorOpen] = createSignal(false);
 
   createEffect(async () => {
-    const files: { file: FileItem; type: string }[] = [];
+    const files: { file: FileItem; type: ItemType }[] = [];
     (historyQuery.data ?? []).forEach((item) => {
       if (
         item.type === 'document' &&
@@ -93,7 +93,7 @@ export function FileSelector() {
     <Dropdown open={fileSelectorOpen()} onOpenChange={setFileSelectorOpen}>
       <Dropdown.Trigger
         variant="ghost"
-        size="icon-md"
+        size="icon-sm"
         label="File"
         tabIndex={-1}
       >
@@ -116,10 +116,7 @@ export function FileSelector() {
                 >
                   {(item) => (
                     <Dropdown.Item>
-                      <ItemOption
-                        file={item.file}
-                        type={item.type as ItemType}
-                      />
+                      <ItemOption file={item.file} type={item.type} />
                     </Dropdown.Item>
                   )}
                 </VList>

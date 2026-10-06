@@ -1,0 +1,838 @@
+import {
+  type CachePush,
+  type CacheRequest,
+  type CacheResponse,
+  type CacheResponseErrorCode,
+  OWNER_EPOCH_LOST_ERROR_CODE,
+  OWNER_LOCK_UNAVAILABLE_ERROR_CODE,
+} from '../protocol';
+import type {
+  DatabaseAction,
+  DatabaseActionProof,
+  EngineOpenOutcome,
+  EngineStartupPhase,
+  OwnerEpoch,
+  RouteId,
+} from './coordinator-protocol';
+
+export type CoordinatorState =
+  | { kind: 'waiting-for-tab'; nextDatabaseAction: DatabaseAction }
+  | {
+      kind: 'activating';
+      tabId: string;
+      ownerEpoch: OwnerEpoch;
+      databaseAction: DatabaseAction;
+      phase: EngineStartupPhase;
+    }
+  | { kind: 'active'; tabId: string; ownerEpoch: OwnerEpoch }
+  | { kind: 'draining'; tabId: string; ownerEpoch: OwnerEpoch }
+  | {
+      kind: 'resetting-after-loss';
+      previousTabId: string;
+      previousEpoch: OwnerEpoch;
+      nextEpoch: OwnerEpoch;
+      databaseAction: DatabaseAction;
+      reason: string;
+    }
+  | { kind: 'failed'; reason: string; storageUntouched?: true };
+
+export type CoordinatorSnapshot = {
+  scope: string;
+  state: CoordinatorState;
+  tabIds: string[];
+  ownerEpoch: OwnerEpoch;
+  queuedRequestCount: number;
+  inFlightRequestCount: number;
+  staleMessageDrops: number;
+  protocolViolations: number;
+  activeOwnerCount: 0 | 1;
+};
+
+type QueuedRequest = {
+  tabId: string;
+  request: CacheRequest;
+};
+
+type InFlightRequest = QueuedRequest & {
+  routeId: RouteId;
+  ownerEpoch: OwnerEpoch;
+};
+
+export type CoordinatorAction =
+  | {
+      kind: 'elect-owner';
+      tabId: string;
+      ownerEpoch: OwnerEpoch;
+      databaseAction: DatabaseAction;
+    }
+  | {
+      kind: 'route-request';
+      ownerTabId: string;
+      requesterTabId: string;
+      ownerEpoch: OwnerEpoch;
+      routeId: RouteId;
+      request: CacheRequest;
+    }
+  | { kind: 'deliver-response'; tabId: string; response: CacheResponse }
+  | { kind: 'broadcast-push'; push: CachePush }
+  | {
+      kind: 'reject-request';
+      tabId: string;
+      requestId: number;
+      error: string;
+      errorCode?: CacheResponseErrorCode;
+    }
+  | { kind: 'drain-owner'; tabId: string; ownerEpoch: OwnerEpoch }
+  | { kind: 'close-engine-route'; tabId: string; ownerEpoch: OwnerEpoch }
+  | { kind: 'drop-tab'; tabId: string }
+  | { kind: 'retire-tab'; tabId: string; ownerEpoch: OwnerEpoch }
+  | { kind: 'schedule-reset-activation' }
+  | { kind: 'broadcast-cache-unavailable'; reason: string }
+  | { kind: 'broadcast-cache-superseded'; reason: string }
+  | { kind: 'notify-cache-unavailable'; tabId: string; reason: string }
+  | {
+      kind: 'broadcast-engine-replaced';
+      ownerEpoch: OwnerEpoch;
+      openOutcome: EngineOpenOutcome;
+    }
+  | {
+      kind: 'drop-stale-engine-message';
+      ownerEpoch: OwnerEpoch;
+      routeId?: RouteId;
+      reason: 'stale-epoch' | 'unknown-route' | 'inactive-engine';
+    }
+  | { kind: 'protocol-violation'; error: string }
+  | { kind: 'terminal-failure'; error: string; storageUntouched?: true };
+
+export type EngineReady = {
+  tabId: string;
+  ownerEpoch: OwnerEpoch;
+  ownerLockName: string;
+  expectedOwnerLockName: string;
+  ownerLockHeld: true;
+  databaseActionProof: DatabaseActionProof;
+  openOutcome: EngineOpenOutcome;
+};
+
+const proofFor = (outcome: EngineOpenOutcome): DatabaseActionProof =>
+  outcome.startsWith('reset-') ? 'wiped-before-open' : 'opened-existing';
+
+/** Only `opening-database` follows the storage grant; earlier phases, including
+ * waiting for the owner lock, cannot have changed OPFS. */
+export const startupPhaseMayTouchStorage = (
+  phase: EngineStartupPhase
+): boolean => phase === 'opening-database';
+
+const OWNER_LOCK_UNAVAILABLE_REASON =
+  'cache database owner lock is held by another context, such as another app version';
+const STORAGE_BUSY_REASON =
+  'cache database files are still open in another context, such as a closing tab';
+const SUPERSEDED_REASON =
+  'a newer version of the app took over the local cache';
+
+/** Pure election, epoch, routing, drain, and abrupt-loss state machine. */
+export class CoordinatorCore {
+  private stateValue: CoordinatorState = {
+    kind: 'waiting-for-tab',
+    nextDatabaseAction: 'open-existing',
+  };
+  private readonly tabs: string[] = [];
+  private readonly retiringTabs = new Set<string>();
+  /** Tabs told the database is unavailable, with the reason they were given;
+   * their pages stay uncached. */
+  private readonly unavailableTabs = new Map<string, string>();
+  /** Set once a newer app build took the database over; never cleared. */
+  private supersededReason: string | undefined;
+  private readonly queuedRequests: QueuedRequest[] = [];
+  private readonly inFlight = new Map<RouteId, InFlightRequest>();
+  private currentEpoch = 0;
+  private nextRouteId = 1;
+  private staleMessageDrops = 0;
+  private protocolViolations = 0;
+
+  constructor(readonly scope: string) {
+    if (scope.length === 0) throw new Error('scope must not be empty');
+  }
+
+  get state(): CoordinatorState {
+    return { ...this.stateValue };
+  }
+
+  snapshot(): CoordinatorSnapshot {
+    return {
+      scope: this.scope,
+      state: this.state,
+      tabIds: [...this.tabs],
+      ownerEpoch: this.currentEpoch,
+      queuedRequestCount: this.queuedRequests.length,
+      inFlightRequestCount: this.inFlight.size,
+      staleMessageDrops: this.staleMessageDrops,
+      protocolViolations: this.protocolViolations,
+      activeOwnerCount: this.stateValue.kind === 'active' ? 1 : 0,
+    };
+  }
+
+  /** Whether a newer app build took the database over. */
+  get superseded(): boolean {
+    return this.supersededReason !== undefined;
+  }
+
+  registerTab(tabId: string): CoordinatorAction[] {
+    if (this.tabs.includes(tabId)) return [];
+    this.tabs.push(tabId);
+    if (this.supersededReason !== undefined) {
+      // A page of this build loaded after the handover, as after a rollback
+      // or from stale HTML. Reloading could land on this build again, so it
+      // only runs uncached.
+      this.unavailableTabs.set(tabId, this.supersededReason);
+      return [
+        {
+          kind: 'notify-cache-unavailable',
+          tabId,
+          reason: this.supersededReason,
+        },
+      ];
+    }
+    if (this.stateValue.kind === 'failed') {
+      return [
+        {
+          kind: 'terminal-failure',
+          error: this.stateValue.reason,
+          ...(this.stateValue.storageUntouched
+            ? { storageUntouched: true as const }
+            : {}),
+        },
+      ];
+    }
+    if (this.stateValue.kind !== 'waiting-for-tab') return [];
+    return this.activateNext(this.stateValue.nextDatabaseAction);
+  }
+
+  request(tabId: string, request: CacheRequest): CoordinatorAction[] {
+    if (!this.tabs.includes(tabId)) {
+      return [
+        this.reject(tabId, request.id, 'requester tab is not registered'),
+      ];
+    }
+    if (this.retiringTabs.has(tabId)) {
+      return [this.reject(tabId, request.id, 'requester tab is retiring')];
+    }
+    if (this.stateValue.kind === 'failed') {
+      return [this.reject(tabId, request.id, this.stateValue.reason)];
+    }
+    const unavailable = this.unavailableTabs.get(tabId);
+    if (unavailable !== undefined) {
+      return [this.rejectUnavailable(tabId, request.id, unavailable)];
+    }
+
+    const queued = { tabId, request };
+    if (this.stateValue.kind !== 'active') {
+      this.queuedRequests.push(queued);
+      return [];
+    }
+    return [this.route(queued, this.stateValue)];
+  }
+
+  /** The engine loaded its assets and tries to take the database owner lock.
+   * Trying grants no storage access. */
+  beginOwnerLockWait(tabId: string, ownerEpoch: OwnerEpoch): boolean {
+    const state = this.stateValue;
+    if (
+      state.kind !== 'activating' ||
+      state.tabId !== tabId ||
+      state.ownerEpoch !== ownerEpoch ||
+      state.phase !== 'loading-assets'
+    )
+      return false;
+    this.stateValue = { ...state, phase: 'awaiting-owner-lock' };
+    return true;
+  }
+
+  /**
+   * Another context, usually another deployed build, keeps the database owner
+   * lock. Stop without touching storage: refuse every queued request and tell
+   * every tab registered now to stay uncached for the rest of its page
+   * session. Only a tab that registers later starts a new attempt.
+   */
+  ownerLockUnavailable(
+    tabId: string,
+    ownerEpoch: OwnerEpoch
+  ): CoordinatorAction[] {
+    const state = this.stateValue;
+    if (
+      state.kind !== 'activating' ||
+      state.tabId !== tabId ||
+      state.ownerEpoch !== ownerEpoch ||
+      startupPhaseMayTouchStorage(state.phase)
+    )
+      return [];
+    return this.failClosed(
+      tabId,
+      ownerEpoch,
+      state.databaseAction,
+      OWNER_LOCK_UNAVAILABLE_REASON
+    );
+  }
+
+  /**
+   * The engine held the owner lock, but another context kept the database
+   * files open through the engine's bounded wait, usually a predecessor worker
+   * that is still being torn down. Wiping cannot remove files that are open,
+   * and they need no repair, so fail closed like an unavailable owner lock.
+   * The attempt's database action carries over: an open changed nothing, and
+   * a wipe that removed one file must still finish.
+   */
+  storageBusy(tabId: string, ownerEpoch: OwnerEpoch): CoordinatorAction[] {
+    const state = this.stateValue;
+    if (
+      state.kind !== 'activating' ||
+      state.tabId !== tabId ||
+      state.ownerEpoch !== ownerEpoch ||
+      state.phase !== 'opening-database'
+    )
+      return [];
+    return this.failClosed(
+      tabId,
+      ownerEpoch,
+      state.databaseAction,
+      STORAGE_BUSY_REASON
+    );
+  }
+
+  /** Grant storage access only once the engine holds the owner lock. Before
+   * this grant an abandoned worker cannot have changed OPFS, so its successor
+   * preserves it.
+   */
+  beginEngineOpen(tabId: string, ownerEpoch: OwnerEpoch): boolean {
+    const state = this.stateValue;
+    if (
+      state.kind !== 'activating' ||
+      state.tabId !== tabId ||
+      state.ownerEpoch !== ownerEpoch ||
+      state.phase !== 'awaiting-owner-lock'
+    )
+      return false;
+    this.stateValue = { ...state, phase: 'opening-database' };
+    return true;
+  }
+
+  engineReady(ready: EngineReady): CoordinatorAction[] {
+    const state = this.stateValue;
+    if (
+      state.kind !== 'activating' ||
+      state.tabId !== ready.tabId ||
+      state.ownerEpoch !== ready.ownerEpoch ||
+      state.phase !== 'opening-database'
+    ) {
+      return this.recordProtocolViolation(
+        `unexpected engine-ready from ${ready.tabId} at epoch ${ready.ownerEpoch}`
+      );
+    }
+
+    let error: string | undefined;
+    if (!ready.ownerLockHeld) {
+      error = 'engine became ready without the exclusive owner lock';
+    } else if (ready.ownerLockName !== ready.expectedOwnerLockName) {
+      error = 'engine reported the wrong physical owner lock';
+    } else if (ready.databaseActionProof !== proofFor(ready.openOutcome)) {
+      error = `engine proof does not match open outcome ${ready.openOutcome}`;
+    }
+    if (error) {
+      return [
+        ...this.recordProtocolViolation(error),
+        ...this.transitionToAbruptLoss(state.tabId, state.ownerEpoch, error),
+      ];
+    }
+
+    this.stateValue = {
+      kind: 'active',
+      tabId: state.tabId,
+      ownerEpoch: state.ownerEpoch,
+    };
+    const actions: CoordinatorAction[] = [];
+    if (state.ownerEpoch > 1) {
+      actions.push({
+        kind: 'broadcast-engine-replaced',
+        ownerEpoch: state.ownerEpoch,
+        openOutcome: ready.openOutcome,
+      });
+    }
+    while (this.queuedRequests.length > 0) {
+      const queued = this.queuedRequests.shift();
+      if (queued && this.tabs.includes(queued.tabId)) {
+        actions.push(this.route(queued, this.stateValue));
+      }
+    }
+    this.assertInvariants();
+    return actions;
+  }
+
+  engineResponse(
+    ownerEpoch: OwnerEpoch,
+    routeId: RouteId,
+    response: CacheResponse
+  ): CoordinatorAction[] {
+    if (!this.acceptsEngineMessages(ownerEpoch)) {
+      return [this.dropStale(ownerEpoch, routeId, 'stale-epoch')];
+    }
+    const request = this.inFlight.get(routeId);
+    if (!request || request.ownerEpoch !== ownerEpoch) {
+      return [this.dropStale(ownerEpoch, routeId, 'unknown-route')];
+    }
+
+    this.inFlight.delete(routeId);
+    return [
+      {
+        kind: 'deliver-response',
+        tabId: request.tabId,
+        response: { ...response, id: request.request.id },
+      },
+    ];
+  }
+
+  enginePush(ownerEpoch: OwnerEpoch, push: CachePush): CoordinatorAction[] {
+    if (!this.acceptsEngineMessages(ownerEpoch)) {
+      return [this.dropStale(ownerEpoch, undefined, 'stale-epoch')];
+    }
+    return [{ kind: 'broadcast-push', push }];
+  }
+
+  beginGracefulDeparture(
+    tabId: string,
+    ownerEpoch: OwnerEpoch
+  ): CoordinatorAction[] {
+    const state = this.stateValue;
+    if (
+      state.kind !== 'active' ||
+      state.tabId !== tabId ||
+      state.ownerEpoch !== ownerEpoch
+    ) {
+      return this.recordProtocolViolation(
+        `unexpected graceful departure from ${tabId} at epoch ${ownerEpoch}`
+      );
+    }
+    this.retiringTabs.add(tabId);
+    this.stateValue = { kind: 'draining', tabId, ownerEpoch };
+    return [{ kind: 'drain-owner', tabId, ownerEpoch }];
+  }
+
+  engineDrained(tabId: string, ownerEpoch: OwnerEpoch): CoordinatorAction[] {
+    const state = this.stateValue;
+    if (
+      state.kind !== 'draining' ||
+      state.tabId !== tabId ||
+      state.ownerEpoch !== ownerEpoch
+    ) {
+      return this.recordProtocolViolation(
+        `unexpected engine-drained from ${tabId} at epoch ${ownerEpoch}`
+      );
+    }
+
+    const actions = this.rejectEpochRequests(
+      ownerEpoch,
+      'engine drained before delivering its response'
+    );
+    this.removeTabRecord(tabId);
+    this.retiringTabs.delete(tabId);
+    actions.push(
+      { kind: 'close-engine-route', tabId, ownerEpoch },
+      { kind: 'retire-tab', tabId, ownerEpoch }
+    );
+    this.stateValue = {
+      kind: 'waiting-for-tab',
+      nextDatabaseAction: 'open-existing',
+    };
+    actions.push(...this.activateNext('open-existing'));
+    this.assertInvariants();
+    return actions;
+  }
+
+  ownerLost(
+    tabId: string,
+    ownerEpoch: OwnerEpoch,
+    reason: string
+  ): CoordinatorAction[] {
+    return this.transitionToAbruptLoss(tabId, ownerEpoch, reason);
+  }
+
+  /**
+   * A newer app build takes the database over. Every tab registered now stops
+   * using the cache and moves to that build; a tab that registers later only
+   * runs uncached. The owner's page leaves the way a navigating page does,
+   * which stops its engine and frees the database, and nothing is elected
+   * afterwards. Refused while an engine is starting, recovering, or draining,
+   * because its files may be changing.
+   */
+  supersede(): CoordinatorAction[] {
+    const { kind } = this.stateValue;
+    if (
+      this.supersededReason !== undefined ||
+      (kind !== 'active' && kind !== 'waiting-for-tab' && kind !== 'failed')
+    ) {
+      return [];
+    }
+    const reason = SUPERSEDED_REASON;
+    this.supersededReason = reason;
+    const actions: CoordinatorAction[] = this.queuedRequests
+      .splice(0)
+      .map(({ tabId, request }) =>
+        this.rejectUnavailable(tabId, request.id, reason)
+      );
+    for (const tabId of this.tabs) this.unavailableTabs.set(tabId, reason);
+    actions.push({ kind: 'broadcast-cache-superseded', reason });
+    this.assertInvariants();
+    return actions;
+  }
+
+  /** Stops owner recovery and fails every current or future page connection. */
+  terminalFailure(reason: string): CoordinatorAction[] {
+    if (this.stateValue.kind === 'failed') return [];
+    const storageUntouched =
+      this.stateValue.kind === 'resetting-after-loss' &&
+      this.stateValue.databaseAction === 'open-existing';
+    this.queuedRequests.length = 0;
+    this.inFlight.clear();
+    this.stateValue = {
+      kind: 'failed',
+      reason,
+      ...(storageUntouched ? { storageUntouched: true as const } : {}),
+    };
+    this.assertInvariants();
+    return [
+      {
+        kind: 'terminal-failure',
+        error: reason,
+        ...(storageUntouched ? { storageUntouched: true as const } : {}),
+      },
+    ];
+  }
+
+  departForNavigation(
+    tabId: string,
+    ownerEpoch: OwnerEpoch,
+    reason: string
+  ): CoordinatorAction[] {
+    const state = this.stateValue;
+    if (
+      (state.kind !== 'active' &&
+        state.kind !== 'activating' &&
+        state.kind !== 'draining') ||
+      state.tabId !== tabId ||
+      state.ownerEpoch !== ownerEpoch
+    ) {
+      return this.recordProtocolViolation(
+        `unexpected navigation departure from ${tabId} at epoch ${ownerEpoch}`
+      );
+    }
+
+    const nextDatabaseAction: DatabaseAction =
+      state.kind === 'activating' ? state.databaseAction : 'open-existing';
+    const actions = this.rejectEpochRequests(
+      ownerEpoch,
+      `owner epoch ${ownerEpoch} departed for navigation: ${reason}`,
+      OWNER_EPOCH_LOST_ERROR_CODE
+    );
+    this.removeTabRecord(tabId);
+    this.retiringTabs.delete(tabId);
+    actions.push(
+      { kind: 'close-engine-route', tabId, ownerEpoch },
+      { kind: 'drop-tab', tabId }
+    );
+    this.stateValue = {
+      kind: 'waiting-for-tab',
+      nextDatabaseAction,
+    };
+    actions.push(...this.activateNext(nextDatabaseAction));
+    this.assertInvariants();
+    return actions;
+  }
+
+  tabLost(
+    tabId: string,
+    reason = 'tab liveness lock was released'
+  ): CoordinatorAction[] {
+    if (!this.tabs.includes(tabId)) return [];
+    const state = this.stateValue;
+    const wasOwner =
+      (state.kind === 'active' ||
+        state.kind === 'activating' ||
+        state.kind === 'draining') &&
+      state.tabId === tabId;
+
+    const actions: CoordinatorAction[] = [{ kind: 'drop-tab', tabId }];
+    if (wasOwner) {
+      actions.push(
+        ...this.transitionToAbruptLoss(tabId, state.ownerEpoch, reason)
+      );
+    }
+    this.removeTabRecord(tabId);
+    this.retiringTabs.delete(tabId);
+    this.assertInvariants();
+    return actions;
+  }
+
+  resumeAfterLoss(): CoordinatorAction[] {
+    const state = this.stateValue;
+    if (state.kind !== 'resetting-after-loss') return [];
+    const candidate = this.chooseCandidate(state.previousTabId);
+    if (!candidate) {
+      this.stateValue = {
+        kind: 'waiting-for-tab',
+        nextDatabaseAction: state.databaseAction,
+      };
+      return [];
+    }
+    this.currentEpoch = state.nextEpoch;
+    this.stateValue = {
+      kind: 'activating',
+      tabId: candidate,
+      ownerEpoch: state.nextEpoch,
+      databaseAction: state.databaseAction,
+      phase: 'loading-assets',
+    };
+    return [
+      {
+        kind: 'elect-owner',
+        tabId: candidate,
+        ownerEpoch: state.nextEpoch,
+        databaseAction: state.databaseAction,
+      },
+    ];
+  }
+
+  expectsEngine(tabId: string, ownerEpoch: OwnerEpoch): boolean {
+    return (
+      this.stateValue.kind === 'activating' &&
+      this.stateValue.tabId === tabId &&
+      this.stateValue.ownerEpoch === ownerEpoch
+    );
+  }
+
+  private transitionToAbruptLoss(
+    tabId: string,
+    ownerEpoch: OwnerEpoch,
+    reason: string
+  ): CoordinatorAction[] {
+    const state = this.stateValue;
+    if (
+      (state.kind !== 'active' &&
+        state.kind !== 'activating' &&
+        state.kind !== 'draining') ||
+      state.tabId !== tabId ||
+      state.ownerEpoch !== ownerEpoch
+    ) {
+      return [];
+    }
+
+    const actions = this.rejectEpochRequests(
+      ownerEpoch,
+      `owner epoch ${ownerEpoch} was lost: ${reason}`,
+      OWNER_EPOCH_LOST_ERROR_CODE
+    );
+    actions.push(
+      { kind: 'close-engine-route', tabId, ownerEpoch },
+      { kind: 'schedule-reset-activation' }
+    );
+    this.stateValue = {
+      kind: 'resetting-after-loss',
+      previousTabId: tabId,
+      previousEpoch: ownerEpoch,
+      nextEpoch: this.currentEpoch + 1,
+      databaseAction:
+        state.kind === 'activating' && !startupPhaseMayTouchStorage(state.phase)
+          ? state.databaseAction
+          : 'wipe-before-open',
+      reason,
+    };
+    this.assertInvariants();
+    return actions;
+  }
+
+  private rejectEpochRequests(
+    ownerEpoch: OwnerEpoch,
+    error: string,
+    errorCode?: CacheResponseErrorCode
+  ): CoordinatorAction[] {
+    const actions: CoordinatorAction[] = [];
+    for (const [routeId, request] of this.inFlight) {
+      if (request.ownerEpoch !== ownerEpoch) continue;
+      this.inFlight.delete(routeId);
+      actions.push(
+        this.reject(request.tabId, request.request.id, error, errorCode)
+      );
+    }
+    return actions;
+  }
+
+  private activateNext(databaseAction: DatabaseAction): CoordinatorAction[] {
+    const candidate = this.chooseCandidate();
+    if (!candidate) {
+      this.stateValue = {
+        kind: 'waiting-for-tab',
+        nextDatabaseAction: databaseAction,
+      };
+      return [];
+    }
+    this.currentEpoch += 1;
+    this.stateValue = {
+      kind: 'activating',
+      tabId: candidate,
+      ownerEpoch: this.currentEpoch,
+      databaseAction,
+      phase: 'loading-assets',
+    };
+    return [
+      {
+        kind: 'elect-owner',
+        tabId: candidate,
+        ownerEpoch: this.currentEpoch,
+        databaseAction,
+      },
+    ];
+  }
+
+  private chooseCandidate(avoid?: string): string | undefined {
+    const eligible = this.tabs.filter(
+      (tabId) =>
+        !this.retiringTabs.has(tabId) && !this.unavailableTabs.has(tabId)
+    );
+    return eligible.find((tabId) => tabId !== avoid) ?? eligible[0];
+  }
+
+  private route(
+    queued: QueuedRequest,
+    state: Extract<CoordinatorState, { kind: 'active' }>
+  ): Extract<CoordinatorAction, { kind: 'route-request' }> {
+    if (!Number.isSafeInteger(this.nextRouteId)) {
+      throw new Error('coordinator route id space exhausted');
+    }
+    const routeId = this.nextRouteId++;
+    this.inFlight.set(routeId, {
+      ...queued,
+      routeId,
+      ownerEpoch: state.ownerEpoch,
+    });
+    return {
+      kind: 'route-request',
+      ownerTabId: state.tabId,
+      requesterTabId: queued.tabId,
+      ownerEpoch: state.ownerEpoch,
+      routeId,
+      request: { ...queued.request, id: routeId },
+    };
+  }
+
+  private removeTabRecord(tabId: string): void {
+    const index = this.tabs.indexOf(tabId);
+    if (index >= 0) this.tabs.splice(index, 1);
+    this.unavailableTabs.delete(tabId);
+    for (let index = this.queuedRequests.length - 1; index >= 0; index -= 1) {
+      if (this.queuedRequests[index]?.tabId === tabId) {
+        this.queuedRequests.splice(index, 1);
+      }
+    }
+    for (const [routeId, request] of this.inFlight) {
+      if (request.tabId === tabId) this.inFlight.delete(routeId);
+    }
+  }
+
+  private acceptsEngineMessages(ownerEpoch: OwnerEpoch): boolean {
+    return (
+      (this.stateValue.kind === 'active' ||
+        this.stateValue.kind === 'draining') &&
+      this.stateValue.ownerEpoch === ownerEpoch
+    );
+  }
+
+  private reject(
+    tabId: string,
+    requestId: number,
+    error: string,
+    errorCode?: CacheResponseErrorCode
+  ): Extract<CoordinatorAction, { kind: 'reject-request' }> {
+    return {
+      kind: 'reject-request',
+      tabId,
+      requestId,
+      error,
+      ...(errorCode === undefined ? {} : { errorCode }),
+    };
+  }
+
+  /** Refuses queued work, keeps every registered tab uncached, and waits for
+   * a tab that registers later to try again. */
+  private failClosed(
+    tabId: string,
+    ownerEpoch: OwnerEpoch,
+    nextDatabaseAction: DatabaseAction,
+    reason: string
+  ): CoordinatorAction[] {
+    const actions: CoordinatorAction[] = this.queuedRequests
+      .splice(0)
+      .map(({ tabId: requester, request }) =>
+        this.rejectUnavailable(requester, request.id, reason)
+      );
+    for (const registered of this.tabs) {
+      this.unavailableTabs.set(registered, reason);
+    }
+    actions.push(
+      { kind: 'close-engine-route', tabId, ownerEpoch },
+      { kind: 'broadcast-cache-unavailable', reason }
+    );
+    this.stateValue = { kind: 'waiting-for-tab', nextDatabaseAction };
+    this.assertInvariants();
+    return actions;
+  }
+
+  private rejectUnavailable(
+    tabId: string,
+    requestId: number,
+    reason: string
+  ): Extract<CoordinatorAction, { kind: 'reject-request' }> {
+    return this.reject(
+      tabId,
+      requestId,
+      reason,
+      OWNER_LOCK_UNAVAILABLE_ERROR_CODE
+    );
+  }
+
+  private dropStale(
+    ownerEpoch: OwnerEpoch,
+    routeId: RouteId | undefined,
+    reason: Extract<
+      CoordinatorAction,
+      { kind: 'drop-stale-engine-message' }
+    >['reason']
+  ): Extract<CoordinatorAction, { kind: 'drop-stale-engine-message' }> {
+    this.staleMessageDrops += 1;
+    return {
+      kind: 'drop-stale-engine-message',
+      ownerEpoch,
+      routeId,
+      reason,
+    };
+  }
+
+  private recordProtocolViolation(error: string): CoordinatorAction[] {
+    this.protocolViolations += 1;
+    return [{ kind: 'protocol-violation', error }];
+  }
+
+  private assertInvariants(): void {
+    if (
+      this.stateValue.kind !== 'active' &&
+      this.stateValue.kind !== 'draining'
+    ) {
+      if (this.inFlight.size > 0) {
+        throw new Error('invariant: requests are in flight without an owner');
+      }
+      return;
+    }
+    for (const request of this.inFlight.values()) {
+      if (request.ownerEpoch !== this.stateValue.ownerEpoch) {
+        throw new Error('invariant: in-flight request has a stale owner epoch');
+      }
+    }
+  }
+}

@@ -57,6 +57,11 @@ impl SendMessageRequest {
             headers_json: msg.headers_json,
             send_time: None,
             include_signature: msg.include_signature,
+            // The actor comes from the transport's auth context, never the
+            // request body; the handler fills it in.
+            actor: None,
+            draft_client_binding: None,
+            thread_client_binding: None,
         }
     }
 }

@@ -33,29 +33,6 @@ impl TryFrom<&str> for GithubInstallationSetupAction {
     }
 }
 
-/// Github key used for tracking tasks
-#[derive(Debug, Clone)]
-pub struct GithubKey(String);
-
-impl GithubKey {
-    /// Create a new github key
-    pub fn new(org: &str, repo: &str, pr: u64) -> Self {
-        Self(format!("{org}/{repo}/pull/{pr}"))
-    }
-}
-
-impl fmt::Display for GithubKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl AsRef<str> for GithubKey {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
 /// OAuth access token returned after exchanging a GitHub App setup code.
 #[derive(Clone, Deserialize)]
 pub struct GithubSetupAccessToken {
@@ -98,12 +75,40 @@ pub struct GithubUserInstallationsPage {
 }
 
 /// GitHub App installation access token response
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct GithubInstallationAccessToken {
     /// The installation access token
     pub token: String,
-    /// When the token expires
+    /// When the token expires, as GitHub sent it (RFC 3339).
     pub expires_at: String,
+}
+
+impl std::fmt::Debug for GithubInstallationAccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GithubInstallationAccessToken")
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl GithubInstallationAccessToken {
+    /// When this token expires.
+    ///
+    /// Parsed here rather than by callers: the field is a string because that
+    /// is how GitHub sends it, and a caller that has to know the format in
+    /// order to cache the token would be the second place that knowledge
+    /// lives.
+    pub fn expires_at(&self) -> Result<chrono::DateTime<chrono::Utc>, GithubError> {
+        chrono::DateTime::parse_from_rfc3339(&self.expires_at)
+            .map(|expiry| expiry.with_timezone(&chrono::Utc))
+            .map_err(|error| {
+                GithubError::Internal(anyhow::anyhow!(
+                    "github sent an unparseable token expiry {:?}: {error}",
+                    self.expires_at
+                ))
+            })
+    }
 }
 
 /// Source that grants a GitHub App installation access to Macro sync data.

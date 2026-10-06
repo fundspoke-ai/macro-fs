@@ -1,0 +1,54 @@
+import { copyCalendarEventMentionTarget } from '@app/features/calendar-view/copy-event-mention';
+import { toast } from '@core/component/Toast/Toast';
+import { buildSimpleEntityUrl } from '@core/util/url';
+import {
+  getChannelNotificationParams,
+  type UnifiedNotification,
+} from '@notifications';
+import { projectRouteId } from '../../projects/core/route';
+
+/**
+ * Copy the link to whatever a notification points at.
+ *
+ * The calendar is a singleton block, so an event has no `/app/calendar_event`
+ * route to address it by id — a reminder copies the calendar's deep link for
+ * the occurrence it fired for, with the mention flavor behind it so a paste
+ * into an editor stays a live mention.
+ */
+export async function copyNotificationLink(notification: UnifiedNotification) {
+  const metadata = notification.notification_metadata;
+  if (metadata.tag === 'calendar_event_reminder') {
+    await copyCalendarEventMentionTarget({
+      eventId: metadata.content.eventId,
+      title: metadata.content.title,
+      occurrenceKey: metadata.content.occurrenceKey,
+    });
+    return;
+  }
+  if (metadata.tag === 'reminder') {
+    if (notification.entity_type !== 'email_thread') return;
+    await navigator.clipboard.writeText(
+      buildSimpleEntityUrl({ type: 'email', id: notification.entity_id })
+    );
+    toast.success('Link copied to clipboard');
+    return;
+  }
+
+  const { params } = getChannelNotificationParams(notification);
+  await navigator.clipboard.writeText(
+    buildSimpleEntityUrl(
+      metadata.tag === 'initiative_discussion'
+        ? {
+            type: 'component',
+            id: projectRouteId({
+              id: notification.entity_id,
+              section: 'overview',
+              discussionId: metadata.content.messageId,
+            }),
+          }
+        : { type: notification.entity_type, id: notification.entity_id },
+      params
+    )
+  );
+  toast.success('Link copied to clipboard');
+}

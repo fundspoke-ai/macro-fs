@@ -1,81 +1,25 @@
-import { useSplitLayout } from '@components/app/split-layout/layout';
-import { toast } from '@core/component/Toast/Toast';
-import { useUserId } from '@core/context/user';
-import { useIsConnectedSecondaryInbox } from '@core/user';
-import WideChat from '@icon/wide-chat.svg';
-import WideCopy from '@icon/wide-copy.svg';
-import WideTask from '@icon/wide-task.svg';
 import IconCheck from '@phosphor/check.svg';
-import { useGetOrCreateDirectMessageMutation } from '@queries/channel/get-or-create-dm';
 import { debounce } from '@solid-primitives/scheduled';
-import { cn, Surface } from '@ui';
-import { createSignal, type JSX, Show } from 'solid-js';
+import { Surface } from '@ui';
+import { createSignal, For, Show } from 'solid-js';
+import { Dynamic } from 'solid-js/web';
 import { UserIcon } from './UserIcon';
+import {
+  type UserCardAction,
+  type UserCardTarget,
+  useUserCardActions,
+} from './userCardActions';
 
-type UserTooltipProps = {
-  displayName: string;
-  email?: string;
-  id?: string;
-  isDeleted?: boolean;
+type UserTooltipProps = UserCardTarget & {
   onClose?: () => void;
-  photoUrl?: string;
 };
 
+/**
+ * The user card as a hover surface. `UserCardDrawer` renders the same card
+ * from the same actions for touch devices, which never hover.
+ */
 export function UserTooltip(props: UserTooltipProps) {
-  const [copied, setCopied] = createSignal(false);
-  const resetCopied = debounce(() => setCopied(false), 800);
-
-  function handleCopyEmail(e: MouseEvent) {
-    e.stopPropagation();
-    const email = props.email;
-    if (!email) return;
-    setCopied(true);
-    navigator.clipboard.writeText(email);
-    toast.success('Email copied');
-    resetCopied();
-    props.onClose?.();
-  }
-  const currentUserId = useUserId();
-  const isConnectedSecondaryInbox = useIsConnectedSecondaryInbox();
-  const canTreatAsUser = () =>
-    !!props.id && !props.isDeleted && !isConnectedSecondaryInbox(props.id);
-  const { openWithSplit, popoverSplit } = useSplitLayout();
-  const getOrCreateDmMutation = useGetOrCreateDirectMessageMutation({
-    onError: () => toast.failure('Failed to open direct message'),
-  });
-
-  const openDM = async (e: MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!props.id) return;
-    const preferNewSplit = e.shiftKey;
-    try {
-      const { channel_id } = await getOrCreateDmMutation.mutateAsync({
-        recipient_id: props.id,
-      });
-      openWithSplit(
-        { type: 'channel', id: channel_id },
-        { preferNewSplit, reopen: 'latest' }
-      );
-    } catch {
-      // The mutation's onError callback handles the toast.
-    } finally {
-      props.onClose?.();
-    }
-  };
-
-  const openTaskComposer = (e: MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    props.onClose?.();
-    if (props.id) {
-      popoverSplit({
-        type: 'component',
-        id: 'task-compose',
-        params: { initialAssigneeIds: [props.id] },
-      });
-    }
-  };
+  const actions = useUserCardActions(() => props);
 
   // Determine avatar props based on what we have
   const avatarProps = () => {
@@ -110,31 +54,14 @@ export function UserTooltip(props: UserTooltipProps) {
           </div>
         </div>
 
-        <Show when={props.email || props.id}>
+        <Show when={actions().length > 0}>
           <div class="border-t border-edge"></div>
           <div class="p-1.5 flex flex-col gap-0.5">
-            <Show when={props.email}>
-              <ActionItem onClick={handleCopyEmail}>
-                {copied() ? (
-                  <IconCheck class="size-3.5" />
-                ) : (
-                  <WideCopy class="size-3.5" />
-                )}
-                Copy email
-              </ActionItem>
-            </Show>
-            <Show when={canTreatAsUser() && props.id !== currentUserId()}>
-              <ActionItem onClick={openDM}>
-                <WideChat class="size-3.5" />
-                DM
-              </ActionItem>
-            </Show>
-            <Show when={canTreatAsUser()}>
-              <ActionItem onClick={openTaskComposer}>
-                <WideTask class="size-3.5" />
-                Assign task
-              </ActionItem>
-            </Show>
+            <For each={actions()}>
+              {(action) => (
+                <ActionItem action={action} onClose={props.onClose} />
+              )}
+            </For>
           </div>
         </Show>
       </div>
@@ -142,21 +69,37 @@ export function UserTooltip(props: UserTooltipProps) {
   );
 }
 
-function ActionItem(props: {
-  children: JSX.Element;
-  onClick: JSX.EventHandler<HTMLButtonElement, MouseEvent>;
-  class?: string;
-}) {
+function ActionItem(props: { action: UserCardAction; onClose?: () => void }) {
+  const [copied, setCopied] = createSignal(false);
+  const resetCopied = debounce(() => setCopied(false), 800);
+
+  const handleClick = async (event: MouseEvent) => {
+    try {
+      await props.action.onSelect(event);
+    } catch {
+      // The action reports the failure; leave the card ready to retry.
+      return;
+    }
+    // A copy keeps the card open long enough to show that it landed; anything
+    // that navigates has already taken the user elsewhere.
+    if (props.action.copies) {
+      setCopied(true);
+      resetCopied();
+      return;
+    }
+    props.onClose?.();
+  };
+
   return (
     <button
       type="button"
-      class={cn(
-        'group rounded-lg w-full flex items-center gap-2 px-2 h-8 text-left font-medium text-xs cursor-default outline-none hover:bg-ink/5 focus:bg-ink/5 data-highlighted:bg-ink/5 data-disabled:opacity-50 data-disabled:cursor-not-allowed',
-        props.class
-      )}
-      onClick={props.onClick}
+      class="group rounded-lg w-full flex items-center gap-2 px-2 h-8 text-left font-medium text-xs cursor-default outline-none hover:bg-ink/5 focus:bg-ink/5 data-highlighted:bg-ink/5 data-disabled:opacity-50 data-disabled:cursor-not-allowed"
+      onClick={handleClick}
     >
-      {props.children}
+      <Show when={!copied()} fallback={<IconCheck class="size-3.5" />}>
+        <Dynamic component={props.action.icon} class="size-3.5" />
+      </Show>
+      {props.action.label}
     </button>
   );
 }

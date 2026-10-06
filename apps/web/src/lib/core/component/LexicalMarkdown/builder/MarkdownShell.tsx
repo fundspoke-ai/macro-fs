@@ -43,11 +43,14 @@ import {
   createFilesReadyHandler,
   getDragDropPosition,
 } from '../utils/fileUploadUtils';
+import { MarkdownShellContent } from './MarkdownShellContent';
 import type { EditorBuilder, EditorComponentProps } from './types';
 
-export const MarkdownShell: Component<
-  { config: EditorBuilder } & EditorComponentProps
-> = (props) => {
+export type MarkdownShellProps = EditorComponentProps & {
+  config: EditorBuilder;
+};
+
+export const MarkdownShell: Component<MarkdownShellProps> = (props) => {
   const handle = props.config.buildHandle();
   const state = handle._internal;
   const {
@@ -195,11 +198,17 @@ export const MarkdownShell: Component<
     <LexicalWrapperContext.Provider value={lexicalWrapper}>
       <div
         class={cn(
-          'relative h-full overflow-y-auto min-h-8 scrollbar-hidden',
+          'relative h-full overflow-y-auto min-h-8 scrollbar-hidden text-base',
           props.class
         )}
         on:keydown={(e) => e.stopPropagation()}
         on:click={(e) => {
+          // Embedded controls own focus and need Solid's delegated clicks.
+          if (
+            e.target instanceof Element &&
+            e.target.closest('[data-lexical-interactive]')
+          )
+            return;
           e.stopPropagation();
           if (!isMobile()) editor.focus();
         }}
@@ -214,16 +223,17 @@ export const MarkdownShell: Component<
             : undefined
         }
       >
-        {/* Content Editable */}
-        <div
-          ref={(el) => {
-            onElementConnect(el, () => {
-              editor.setRootElement(el);
+        <MarkdownShellContent
+          connectRoot={(element) => {
+            onElementConnect(element, () => {
+              editor.setRootElement(element);
               onConnect();
             });
-            props.refFn?.(el);
+            props.refFn?.(element);
           }}
-          contentEditable={!props.disabled}
+          disabled={!!props.disabled}
+          showPlaceholder={showPlaceholder()}
+          placeholder={props.placeholder}
         />
 
         <DecoratorRenderer editor={editor} />
@@ -231,14 +241,6 @@ export const MarkdownShell: Component<
         {/* Node Accessories (code blocks) */}
         <Show when={state.accessoryStore}>
           {(store) => <NodeAccessoryRenderer editor={editor} store={store()} />}
-        </Show>
-
-        <Show when={showPlaceholder()}>
-          <div class="pointer-events-none text-ink-placeholder absolute top-0">
-            <p class="my-1.5 pointer-events-none">
-              {props.placeholder ?? '...'}
-            </p>
-          </div>
         </Show>
 
         <Show when={state.dragInsertStore}>
@@ -347,6 +349,21 @@ export const MarkdownShell: Component<
           )}
         </Show>
 
+        {/* Agent Commands Menu */}
+        <Show when={state.agentCommandsMenuOps}>
+          {(menu) => (
+            <SkillsMenu
+              editor={editor}
+              menu={menu()}
+              agentCommands={
+                builderConfig.agentCommands?.commands ?? (() => [])
+              }
+              useBlockBoundary={false}
+              portalScope={props.portalScope}
+            />
+          )}
+        </Show>
+
         {/* Floating Link & Selection Format Menus */}
         <Show
           when={
@@ -364,6 +381,10 @@ export const MarkdownShell: Component<
               <FloatingFormatMenu
                 portalScope={props.portalScope}
                 showLinkButton={!!builderConfig.links?.floatingMenu}
+                extendedInlineFormats={
+                  typeof builderConfig.floatingFormatMenu === 'object' &&
+                  builderConfig.floatingFormatMenu.extendedInlineFormats
+                }
               />
             </Show>
           </FloatingMenuGroup>

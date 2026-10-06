@@ -6,6 +6,7 @@ import { McpToolCall } from '@core/component/AI/component/tool/McpToolCall';
 import { useChatContext } from '@core/component/AI/context';
 import type { AssistantMessagePart } from '@service-cognition/generated/schemas/assistantMessagePart';
 import type { ChatMessageWithAttachments } from '@service-cognition/generated/schemas/chatMessageWithAttachments';
+import type { ToolName } from '@service-cognition/generated/tools/tool';
 import {
   type Accessor,
   createEffect,
@@ -65,13 +66,57 @@ type RenderItem =
 /**
  * Tools rendered outside the standard grouped activity chrome own their full
  * presentation. The dashboard renders as a full-bleed view, not a tool row.
- * SendEmail suspends the chat on a user-interactive compose UI (send/cancel),
- * so it must stay visible rather than being collapsed inside a tool group.
+ * Deferred user tools suspend the chat on an interactive compose UI, so they
+ * must stay visible rather than being collapsed inside a tool group.
  */
 const STANDALONE_TOOLS: ReadonlySet<string> = new Set([
+  'CreateCalendarEvent',
+  'DispatchCodingAgent',
   'DisplayResults',
+  'GenerateImage',
+  'ReadActivity',
+  'QueryDatabase',
+  'SaveDatabaseView',
   'SendEmail',
 ]);
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function hasTimelineWidget(value: unknown): boolean {
+  const widget = asObject(value);
+  if (!widget) return false;
+  if (widget.type === 'timeline') return true;
+  if (widget.type !== 'container' || !Array.isArray(widget.children)) {
+    return false;
+  }
+  return widget.children.some(hasTimelineWidget);
+}
+
+function isActivityPresentationWidget(value: unknown): boolean {
+  const widget = asObject(value);
+  if (!widget) return false;
+  if (widget.type === 'timeline' || widget.type === 'md') return true;
+  if (widget.type !== 'container' || !Array.isArray(widget.children)) {
+    return false;
+  }
+  return widget.children.every(isActivityPresentationWidget);
+}
+
+function isRedundantActivityDashboard(part: AssistantMessagePart): boolean {
+  if (part.type !== 'toolCall' || part.name !== 'DisplayResults') return false;
+  const view = asObject(asObject(part.json)?.view);
+  const widgets = view?.widgets;
+  return (
+    Array.isArray(widgets) &&
+    widgets.some(hasTimelineWidget) &&
+    widgets.every(isActivityPresentationWidget)
+  );
+}
 
 export function AssistantMessageParts(props: {
   parts: AssistantMessagePart[];
@@ -94,6 +139,12 @@ export function AssistantMessageParts(props: {
     completedToolIds,
     (id: string, completed) => completed.has(id)
   );
+  const hasNativeActivityResult = createMemo(() =>
+    props.parts.some(
+      (part) =>
+        part.type === 'toolCallResponseJson' && part.name === 'ReadActivity'
+    )
+  );
 
   const responseById = createMemo(() => {
     const responseMap = new Map<
@@ -115,9 +166,15 @@ export function AssistantMessageParts(props: {
       (part) =>
         part.type !== 'toolCallResponseJson' &&
         part.type !== 'toolCallErr' &&
+        !(hasNativeActivityResult() && isRedundantActivityDashboard(part)) &&
         (part.type !== 'thinking' || part.thinking.trim().length > 0)
     );
   });
+  /** Whether a visible part after `index` calls the tool named `name`. */
+  const followedBy = (index: number) => (name: ToolName) =>
+    parts()
+      .slice(index + 1)
+      .some((part) => part.type === 'toolCall' && part.name === name);
   const streamingTailTextIndex = createMemo(() => {
     if (!props.isStreaming) return;
     const visibleParts = parts();
@@ -265,6 +322,7 @@ export function AssistantMessageParts(props: {
                   renderContext: {
                     isStreaming: outer.isStreaming,
                     grouped: props.grouped(),
+                    followedBy: followedBy(props.entry().index),
                   },
                 }}
               />
@@ -289,6 +347,7 @@ export function AssistantMessageParts(props: {
                   renderContext: {
                     isStreaming: outer.isStreaming,
                     grouped: props.grouped(),
+                    followedBy: followedBy(props.entry().index),
                   },
                 }}
               />
@@ -366,6 +425,7 @@ export function AssistantMessageParts(props: {
           renderContext: {
             isStreaming: outer.isStreaming,
             grouped: false,
+            followedBy: followedBy(props.item().index),
           },
         }}
       />

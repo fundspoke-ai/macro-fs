@@ -1,7 +1,9 @@
 //! types
 use super::tool_object::{AsyncToolObject, UserTool, UserToolResponse};
 use crate::RequestContext;
+use crate::annotations::ToolAnnotated;
 use crate::schema::ValidationError;
+use crate::telemetry::ToolCallSpan;
 use crate::{AsyncTool, ToolResult};
 use axum::extract::FromRef;
 use schemars::{JsonSchema, Schema};
@@ -9,6 +11,10 @@ use serde::Serialize;
 use serde::de::Deserialize;
 use std::collections::BTreeMap;
 use thiserror::Error;
+use tracing::Instrument as _;
+
+#[cfg(test)]
+mod test;
 
 /// some tools need additional information
 #[derive(Debug)]
@@ -39,7 +45,9 @@ pub enum ToolSetCreationError {
 #[derive(Debug, Error)]
 pub enum ToolSetError {
     /// Failed to deserialize the tool input (possibly an AI hallucination).
-    #[error("error deserializing tool call (possible hallucination)")]
+    /// The message carries the serde detail so a model reading it as a tool
+    /// result can correct the offending argument instead of retrying blindly.
+    #[error("error deserializing tool call (possible hallucination): {0}")]
     Deserialization(serde_json::Error),
     /// The requested tool was not found in the toolset.
     #[error("tool not in toolset")]
@@ -53,6 +61,8 @@ pub type AsyncToolCollection<ToolSetContext> = ToolCollection<AsyncToolObject<To
 pub struct RequestSchema {
     /// The name of the tool.
     pub name: String,
+    /// What the tool does, sent as the provider tool definition's description.
+    pub description: String,
     /// The JSON schema for the tool's input parameters.
     pub schema: Schema,
 }
@@ -137,7 +147,13 @@ where
     pub fn add_tool<T, ToolContext>(mut self) -> Self
     where
         ToolContext: Sync + Send + FromRef<ToolSetContext> + 'static,
-        T: JsonSchema + AsyncTool<ToolContext> + for<'de> Deserialize<'de> + 'static + Send + Sync,
+        T: JsonSchema
+            + AsyncTool<ToolContext>
+            + ToolAnnotated
+            + for<'de> Deserialize<'de>
+            + 'static
+            + Send
+            + Sync,
         T::Output: Serialize + JsonSchema + 'static,
     {
         let tool_object = AsyncToolObject::try_from_tool::<T, ToolContext, T::Output>()
@@ -158,7 +174,13 @@ where
     pub fn add_user_tool<T, ToolContext>(mut self) -> Self
     where
         ToolContext: Sync + Send + FromRef<ToolSetContext> + 'static,
-        T: JsonSchema + AsyncTool<ToolContext> + for<'de> Deserialize<'de> + 'static + Send + Sync,
+        T: JsonSchema
+            + AsyncTool<ToolContext>
+            + ToolAnnotated
+            + for<'de> Deserialize<'de>
+            + 'static
+            + Send
+            + Sync,
         T::Output: Serialize + JsonSchema + 'static,
     {
         let tool_object = AsyncToolObject::try_from_tool::<T, ToolContext, T::Output>()
@@ -182,7 +204,10 @@ where
     /// was added.
     ///
     /// Returns an error if the tool is not found or if deserialization fails.
-    #[tracing::instrument(err, skip(self, context, request_context))]
+    ///
+    /// No span of its own: it runs inside the `execute_tool` span that
+    /// [`ToolSet::try_tool_call`](crate::ToolSet::try_tool_call) opens, which
+    /// records the arguments and result under the content policy.
     pub(crate) async fn try_tool_call_internal(
         &self,
         context: ToolSetContext,
@@ -202,7 +227,9 @@ where
     }
 
     /// this isn't called in the tool loop it's called by the user-facing API
-    #[tracing::instrument(err, skip(self, context, request_context))]
+    ///
+    /// A user-executed tool is still a tool execution, so it gets the same
+    /// `execute_tool` telemetry as a model-initiated call.
     pub async fn try_user_tool_call(
         &self,
         context: ToolSetContext,
@@ -210,22 +237,35 @@ where
         tool_name: &str,
         json: &serde_json::Value,
     ) -> Result<ToolResult<UserToolResponse<serde_json::Value>>, ToolSetError> {
-        let tool = self
-            .user_tools
-            .get(tool_name)
-            .ok_or_else(|| ToolSetError::NotFound(tool_name.to_owned()))
-            .and_then(|tool| {
-                tool.try_deserialize(json)
-                    .map_err(ToolSetError::Deserialization)
-            })?;
-        Ok(tool
-            .call(context, request_context)
-            .await
-            .map(UserToolResponse::UserAction))
+        let telemetry = request_context
+            .genai_telemetry
+            .then(|| ToolCallSpan::begin(tool_name, json));
+        let span = telemetry
+            .as_ref()
+            .map_or_else(tracing::Span::none, |telemetry| telemetry.span().clone());
+        let result: Result<ToolResult<serde_json::Value>, ToolSetError> = async {
+            let tool = self
+                .user_tools
+                .get(tool_name)
+                .ok_or_else(|| ToolSetError::NotFound(tool_name.to_owned()))
+                .and_then(|tool| {
+                    tool.try_deserialize(json)
+                        .map_err(ToolSetError::Deserialization)
+                })?;
+            Ok(tool.call(context, request_context).await)
+        }
+        .instrument(span)
+        .await;
+        // Recorded before the API wrapper goes on, so the span carries the
+        // tool's own output rather than `{"UserAction": ...}`.
+        if let Some(telemetry) = &telemetry {
+            telemetry.finish(&result);
+        }
+        result.map(|result| result.map(UserToolResponse::UserAction))
     }
 
     /// check if json + name matches a known tool in the toolset
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip_all, fields(tool_name = %tool_name))]
     pub fn is_valid_tool(&self, tool_name: &str, json: &serde_json::Value) -> bool {
         let Some(tool) = self
             .user_tools
@@ -249,7 +289,10 @@ where
     /// # Example
     ///
     /// ```
-    /// use ai_toolset::{AsyncTool, AsyncToolCollection, RequestContext, ServiceContext, ToolResult};
+    /// use ai_toolset::{
+    ///     AsyncTool, AsyncToolCollection, RequestContext, ServiceContext, ToolAnnotated,
+    ///     ToolAnnotations, ToolResult,
+    /// };
     /// use axum_macros::FromRef;
     /// use schemars::JsonSchema;
     /// use serde::{Deserialize, Serialize};
@@ -272,6 +315,10 @@ where
     /// #[derive(JsonSchema, Deserialize)]
     /// #[schemars(title = "SubTool", description = "A tool using SubContext")]
     /// struct SubTool { value: String }
+    ///
+    /// impl ToolAnnotated for SubTool {
+    ///     const ANNOTATIONS: ToolAnnotations = ToolAnnotations::read_only("Sub tool");
+    /// }
     ///
     /// #[async_trait::async_trait]
     /// impl AsyncTool<SubContext> for SubTool {

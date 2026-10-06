@@ -28,4 +28,9 @@ export const EntityType = {
   crm_contact: 'crm_contact',
   reminder: 'reminder',
   skill: 'skill',
+  agent_session: 'agent_session',
+  scheduled_action: 'scheduled_action',
+  initiative: 'initiative',
+  database: 'database',
+  database_row: 'database_row',
 } as const;

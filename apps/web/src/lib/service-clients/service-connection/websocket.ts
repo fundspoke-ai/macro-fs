@@ -14,6 +14,7 @@ import { createWebsocketStateSignal } from '@macro-inc/collaboration/websocket/s
 import { getMacroApiToken } from '@service-auth/fetch';
 import { createCallback } from '@solid-primitives/rootless';
 import type { ToWebsocketMessage } from './generated/schemas/toWebsocketMessage';
+import { instrumentGatewaySocket } from './presence-telemetry';
 
 export { parseWebsocketPayload } from './websocket-payload';
 
@@ -34,7 +35,7 @@ export async function resolveWsUrl() {
     const apiToken = await getMacroApiToken();
     if (!apiToken) throw new Error('No Macro API token');
 
-    return `${wsHost}/?macro-api-token=${apiToken}`;
+    return `${wsHost}?macro-api-token=${apiToken}`;
   }
   await fetchToken();
   return wsHost;
@@ -55,6 +56,8 @@ export const ws = new WebsocketBuilder(resolveWsUrl)
     maxMissedHeartbeats: 3,
   })
   .build();
+
+instrumentGatewaySocket(ws);
 
 function reconnectIfDisconnected() {
   ws.reconnectIfDisconnected();

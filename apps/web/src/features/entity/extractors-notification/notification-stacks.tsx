@@ -2,12 +2,8 @@ import { globalSplitManager } from '@app/signal/splitLayout';
 import { useGlobalNotificationSource } from '@components/app/GlobalAppState';
 import { useSplitPanel } from '@components/app/split-layout/layoutUtils';
 import { ContextMenuContent, MenuItem } from '@core/component/ContextMenu';
-import { toast } from '@core/component/Toast/Toast';
-import { buildSimpleEntityUrl } from '@core/util/url';
 import { ContextMenu } from '@kobalte/core/context-menu';
-import type { UnifiedNotification } from '@notifications';
 import {
-  getChannelNotificationParams,
   getMostRecentNotification,
   type NotificationStack,
   openNotification,
@@ -27,20 +23,13 @@ import {
 } from '../utils/notification';
 import { useNotificationStackActions } from './notification-actions';
 import { NotificationContent } from './notification-content';
+import { copyNotificationLink } from './notification-copy-link';
 import { NotificationDescription } from './notification-description';
 import { NotificationIcon } from './notification-icon';
 import { NotificationSenderIcon } from './notification-sender-icon';
 import { NotificationTimestamp } from './notification-timestamp';
 
 const DEFAULT_VISIBLE_COUNT = 3;
-
-function getNotificationUrl(notification: UnifiedNotification): string {
-  const { params } = getChannelNotificationParams(notification);
-  return buildSimpleEntityUrl(
-    { type: notification.entity_type, id: notification.entity_id },
-    params
-  );
-}
 
 interface NotificationStacksProps {
   entity: WithNotification<EntityData>;
@@ -65,8 +54,7 @@ export function NotificationStackRow(props: {
     entityId: props.entity.id,
   });
 
-  // The containing split (when any) is the navigation source, so opens from
-  // an engaged preview controller route into its viewer split.
+  // Keep navigation associated with the originating split.
   const panel = useSplitPanel();
 
   const handleClick = async (e: PointerEvent | MouseEvent | KeyboardEvent) => {
@@ -100,18 +88,14 @@ export function NotificationStackRow(props: {
     await markStackAsRead();
   };
 
-  const handleCopyLink = async () => {
-    const mostRecent = getMostRecentNotification(props.stack);
-    const url = getNotificationUrl(mostRecent);
-    await navigator.clipboard.writeText(url);
-    toast.success('Link copied to clipboard');
-  };
+  const handleCopyLink = () =>
+    copyNotificationLink(getMostRecentNotification(props.stack));
 
   return (
     <ContextMenu>
       <ContextMenu.Trigger class="size-full">
         <div
-          class="group/notif flex items-center gap-2.5 px-3 py-2 hover:bg-ink-muted/6 min-w-0 overflow-hidden cursor-pointer"
+          class="group/notif flex items-center gap-2.5 px-3 py-2 hover:bg-ink-muted/6 min-w-0 overflow-hidden"
           onClick={handleClick}
           role="button"
           tabIndex={0}
@@ -167,7 +151,7 @@ export function NotificationStackRow(props: {
               <Button
                 onClick={handleMarkAsDone}
                 tooltip={'Mark done'}
-                class="rounded text-ink-muted hover:text-accent hover:bg-accent/10 hidden group-hover/notif:grid p-0 place-items-center size-5"
+                class="text-ink-muted hover:text-accent hover:bg-accent/10 hidden group-hover/notif:grid p-0 place-items-center size-5"
               >
                 <CheckIcon class="size-3" />
               </Button>

@@ -4,6 +4,7 @@ import { $wrapNodeInElement, mergeRegister } from '@lexical/utils';
 import type { PeerIdValidator } from '@macro-inc/lexical-core';
 import {
   $collapseInlineSearch,
+  $createAgentSessionMentionNode,
   $createContactMentionNode,
   $createDateMentionNode,
   $createDocumentMentionNode,
@@ -15,6 +16,7 @@ import {
   $createUserMentionNode,
   $handleInlineSearchNodeMutation,
   $handleInlineSearchNodeTransform,
+  $isAgentSessionMentionNode,
   $isContactMentionNode,
   $isDateMentionNode,
   $isDocumentMentionNode,
@@ -22,6 +24,8 @@ import {
   $isPullRequestMentionNode,
   $isUserMentionNode,
   $removeInlineSearch,
+  type AgentSessionMentionInfo,
+  AgentSessionMentionNode,
   type ContactMentionInfo,
   ContactMentionNode,
   type DateMentionInfo,
@@ -72,6 +76,7 @@ import {
 import type { Setter } from 'solid-js';
 import { match } from 'ts-pattern';
 import type { MenuOperations } from '../../shared/inlineMenu';
+import { registerInlineMenuTrigger } from '../../shared/registerInlineMenuTrigger';
 import { $collapseSelection, $traverseNodes, nodeByKey } from '../../utils';
 import { mapRegisterDelete } from '../shared';
 
@@ -117,6 +122,9 @@ export const INSERT_USER_MENTION_COMMAND: LexicalCommand<UserMentionInfo> =
 export const INSERT_GROUP_MENTION_COMMAND: LexicalCommand<GroupMentionInfo> =
   createCommand('INSERT_GROUP_MENTION_COMMAND');
 
+export const INSERT_AGENT_SESSION_MENTION_COMMAND: LexicalCommand<AgentSessionMentionInfo> =
+  createCommand('INSERT_AGENT_SESSION_MENTION_COMMAND');
+
 export const INSERT_PR_MENTION_COMMAND: LexicalCommand<PullRequestMentionInfo> =
   createCommand('INSERT_PR_MENTION_COMMAND');
 
@@ -137,9 +145,13 @@ export type ItemMention = {
     | 'unknown'
     | 'color'
     | 'call'
+    | 'calendar_event'
+    | 'database'
+    | 'agent_session'
+    | 'initiative'
     | 'foreign'
     | 'group'
-    | 'automation'
+    | 'routine'
     | 'crm_company'
     | 'crm_contact'
     | 'skill';
@@ -157,6 +169,7 @@ function $isMentionNode(
   | DocumentMentionNode
   | ContactMentionNode
   | DateMentionNode
+  | AgentSessionMentionNode
   | PullRequestMentionNode
   | GroupMentionNode {
   return (
@@ -164,6 +177,7 @@ function $isMentionNode(
     $isDocumentMentionNode(node) ||
     $isContactMentionNode(node) ||
     $isDateMentionNode(node) ||
+    $isAgentSessionMentionNode(node) ||
     $isPullRequestMentionNode(node) ||
     $isGroupMentionNode(node)
   );
@@ -199,6 +213,10 @@ function $mentionItemFromNode(node: MentionNode): ItemMention {
     } else if (blockName === 'project') {
       fileType = 'project';
       itemType = 'project';
+    } else if (blockName === 'initiative') {
+      // A task project, never a document id.
+      fileType = 'initiative';
+      itemType = 'initiative';
     } else if (blockName === 'chat') {
       fileType = 'chat';
       itemType = 'chat';
@@ -210,6 +228,9 @@ function $mentionItemFromNode(node: MentionNode): ItemMention {
     } else if (blockName === 'call') {
       fileType = 'call';
       itemType = 'call';
+    } else if (blockName === 'calendar') {
+      fileType = 'calendar_event';
+      itemType = 'calendar_event';
     } else if (blockName === 'company') {
       fileType = 'company';
       itemType = 'crm_company';
@@ -242,6 +263,12 @@ function $mentionItemFromNode(node: MentionNode): ItemMention {
       itemId: node.getGroupAlias(),
       groupAlias: node.getGroupAlias(),
     };
+  } else if ($isAgentSessionMentionNode(node)) {
+    return {
+      itemType: 'agent_session',
+      itemId: node.getId(),
+      documentName: node.getLabel(),
+    };
   } else if ($isPullRequestMentionNode(node)) {
     return {
       itemType: 'foreign',
@@ -257,9 +284,10 @@ function $mentionItemFromNode(node: MentionNode): ItemMention {
   }
 }
 
-// Validators for the position of the @ trigger.
+// Validator for the position of the @ trigger. Only the text before the caret
+// constrains it, so `@` stays literal mid-word but opens the menu in front of a
+// word — the word itself is left out of the search.
 const beforeRegex = /[(['\"\`\s]$/;
-const afterRegex = /^[)\]'\"\`\s]/;
 
 /**
  * When mentions nodes are selected by using the arrow keys, we want to be able to delete them.
@@ -294,13 +322,17 @@ const getDocumentMentionItemType = (
   return match<ItemType, ItemMention['itemType']>(itemType)
     .with('email', () => 'thread')
     .with('document', () => 'document')
+    .with('agent_session', () => 'agent_session')
+    .with('database', () => 'database')
     .with('chat', () => 'chat')
     .with('channel', () => 'channel')
     .with('project', () => 'project')
+    .with('initiative', () => 'initiative')
     .with('channel_message', () => 'channel')
     .with('channel_thread', () => 'channel')
-    .with('automation', () => 'automation')
+    .with('routine', () => 'routine')
     .with('call', () => 'call')
+    .with('calendar_event', () => 'calendar_event')
     .with('foreign', () => {
       throw new Error('foreign entities cannot be document mentions');
     })
@@ -337,6 +369,7 @@ function registerMentionsPlugin(
       ContactMentionNode,
       DateMentionNode,
       PullRequestMentionNode,
+      AgentSessionMentionNode,
       InlineSearchNode,
     ])
   ) {
@@ -351,27 +384,6 @@ function registerMentionsPlugin(
    * delete a mention viq a node selection.
    */
   let consumeDelete = false;
-
-  /**
-   * Register a manual DOM listener for the @ symbol.
-   * TODO (seamus) : Find a more Lexical-y way to do this.
-   */
-  function registerSymbolListener() {
-    const listener = (e: KeyboardEvent) => {
-      if (e.key === '@') {
-        editor.dispatchCommand(TYPE_AT_SYMBOL_COMMAND, undefined);
-      }
-    };
-
-    return editor.registerRootListener((root, prev) => {
-      if (root) {
-        root.addEventListener('keydown', listener);
-      }
-      if (prev) {
-        prev.removeEventListener('keydown', listener);
-      }
-    });
-  }
 
   function updateMentionsSignal() {
     if (props.setMentions === undefined) return;
@@ -392,10 +404,16 @@ function registerMentionsPlugin(
       (payload) => {
         editor.update(() => {
           const selection = $getSelection();
-          const mentionNode = $createDocumentMentionNode({
-            ...payload,
-            createdAt: payload.createdAt ?? Date.now(),
-          });
+          const mentionNode =
+            payload.blockName === 'agent'
+              ? $createAgentSessionMentionNode({
+                  id: payload.documentId,
+                  label: payload.documentName,
+                })
+              : $createDocumentMentionNode({
+                  ...payload,
+                  createdAt: payload.createdAt ?? Date.now(),
+                });
 
           if (payload.mentionUuid) {
             mentionNode.setMentionUuid(payload.mentionUuid);
@@ -525,6 +543,44 @@ function registerMentionsPlugin(
     ),
 
     editor.registerCommand(
+      INSERT_AGENT_SESSION_MENTION_COMMAND,
+      (payload) => {
+        const node = $createAgentSessionMentionNode(payload);
+        $insertNodes([node]);
+        if ($isRootOrShadowRoot(node.getParentOrThrow()))
+          $wrapNodeInElement(node, $createParagraphNode);
+        node.selectEnd();
+        return true;
+      },
+      COMMAND_PRIORITY_NORMAL
+    ),
+
+    editor.registerMutationListener(
+      AgentSessionMentionNode,
+      (mutations, { prevEditorState }) => {
+        for (const [key, mutation] of mutations) {
+          const node = nodeByKey(
+            mutation === 'destroyed'
+              ? prevEditorState
+              : editor.getEditorState(),
+            key
+          );
+          if (!$isAgentSessionMentionNode(node)) continue;
+          if (mutation === 'created')
+            onCreateMention?.($mentionItemFromNode(node));
+          if (mutation === 'destroyed') {
+            const mentionUuid = node.getMentionUuid();
+            if (mentionUuid && sourceDocumentId) {
+              untrackMention(sourceDocumentId, mentionUuid);
+            }
+            onRemoveMention?.($mentionItemFromNode(node));
+          }
+        }
+        updateMentionsSignal();
+      }
+    ),
+
+    editor.registerCommand(
       INSERT_PR_MENTION_COMMAND,
       (payload) => {
         editor.update(() => {
@@ -572,16 +628,14 @@ function registerMentionsPlugin(
       COMMAND_PRIORITY_NORMAL
     ),
 
-    registerSymbolListener(),
+    registerInlineMenuTrigger(editor, '@', () => {
+      editor.dispatchCommand(TYPE_AT_SYMBOL_COMMAND, undefined);
+    }),
 
     editor.registerCommand(
       TYPE_AT_SYMBOL_COMMAND,
       () => {
-        const shouldTrigger = validTriggerPosition(
-          editor,
-          beforeRegex,
-          afterRegex
-        );
+        const shouldTrigger = validTriggerPosition(editor, beforeRegex, null);
         if (shouldTrigger) {
           editor.update(() => {
             $insertNodes([$createInlineSearchNode('@')]);

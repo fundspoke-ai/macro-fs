@@ -9,8 +9,12 @@ use filter_ast::Expr;
 use item_filters::ast::properties::{
     EntityRefId, PropertiesLiteral, PropertyEntityType, PropertyMatchValue,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{IntoFilterExpr, filter_expr_input, parse_id};
+
+#[cfg(test)]
+mod test;
 
 filter_expr_input!(
     GraphqlPropertiesExpr,
@@ -37,7 +41,14 @@ impl IntoFilterExpr<PropertiesLiteral> for GraphqlPropertiesLiteral {
             property_definition_id: parse_id(self.property_definition_id, "propertyDefinitionId")?,
             entity_type: self
                 .entity_type
-                .and_then(|et| PropertyEntityType::try_from(et).ok()),
+                .map(|entity_type| {
+                    PropertyEntityType::try_from(entity_type).map_err(|unsupported| {
+                        async_graphql::Error::new(format!(
+                            "Property filtering is not supported for {unsupported:?}"
+                        ))
+                    })
+                })
+                .transpose()?,
             value: self.value.into_ast()?,
         }))
     }
@@ -69,7 +80,8 @@ impl GraphqlPropertyMatchValue {
 }
 
 /// An entity type supported by the properties domain.
-#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[derive(Enum, Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum GraphqlPropertyEntityType {
     /// Calendar event entity.
     CalendarEvent,
@@ -81,8 +93,14 @@ pub enum GraphqlPropertyEntityType {
     Chat,
     /// Company entity.
     Company,
+    /// Database row entity.
+    DatabaseRow,
+    /// CRM contact entity.
+    Contact,
     /// Document entity.
     Document,
+    /// Initiative entity.
+    Initiative,
     /// Project entity.
     Project,
     /// Task entity.
@@ -102,7 +120,10 @@ impl GraphqlPropertyEntityType {
             models_properties::EntityType::Channel => Self::Channel,
             models_properties::EntityType::Chat => Self::Chat,
             models_properties::EntityType::Company => Self::Company,
+            models_properties::EntityType::DatabaseRow => Self::DatabaseRow,
+            models_properties::EntityType::Contact => Self::Contact,
             models_properties::EntityType::Document => Self::Document,
+            models_properties::EntityType::Initiative => Self::Initiative,
             models_properties::EntityType::Project => Self::Project,
             models_properties::EntityType::Task => Self::Task,
             models_properties::EntityType::Thread => Self::Thread,
@@ -118,7 +139,10 @@ impl GraphqlPropertyEntityType {
             Self::Channel => models_properties::EntityType::Channel,
             Self::Chat => models_properties::EntityType::Chat,
             Self::Company => models_properties::EntityType::Company,
+            Self::DatabaseRow => models_properties::EntityType::DatabaseRow,
+            Self::Contact => models_properties::EntityType::Contact,
             Self::Document => models_properties::EntityType::Document,
+            Self::Initiative => models_properties::EntityType::Initiative,
             Self::Project => models_properties::EntityType::Project,
             Self::Task => models_properties::EntityType::Task,
             Self::Thread => models_properties::EntityType::Thread,
@@ -136,14 +160,17 @@ impl TryFrom<GraphqlPropertyEntityType> for PropertyEntityType {
             GraphqlPropertyEntityType::Channel => Self::Channel,
             GraphqlPropertyEntityType::Chat => Self::Chat,
             GraphqlPropertyEntityType::Company => Self::Company,
+            GraphqlPropertyEntityType::DatabaseRow => Self::DatabaseRow,
             GraphqlPropertyEntityType::Document => Self::Document,
             GraphqlPropertyEntityType::Project => Self::Project,
             GraphqlPropertyEntityType::Task => Self::Task,
             GraphqlPropertyEntityType::Thread => Self::Thread,
             GraphqlPropertyEntityType::User => Self::User,
-            // Call records are not part of the generic property-filter AST.
-            // They are filtered through a dedicated call query instead.
-            other @ GraphqlPropertyEntityType::CallRecord => return Err(other),
+            GraphqlPropertyEntityType::Initiative => Self::Initiative,
+            other
+            @ (GraphqlPropertyEntityType::CallRecord | GraphqlPropertyEntityType::Contact) => {
+                return Err(other);
+            }
         })
     }
 }

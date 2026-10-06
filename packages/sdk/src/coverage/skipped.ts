@@ -9,7 +9,9 @@
 // backend adds an endpoint, `just coverage` fails until you wrap it or type
 // it into one of these lists by hand, as a conscious decision.
 
+import type { Sdk as AgentHarnessSdk } from '../../generated/agent-harness/sdk.gen';
 import type { Sdk as AuthSdk } from '../../generated/auth/sdk.gen';
+import type { Sdk as CalendarSdk } from '../../generated/calendar/sdk.gen';
 import type { Sdk as CognitionSdk } from '../../generated/cognition/sdk.gen';
 import type { Sdk as ConnectionSdk } from '../../generated/connection/sdk.gen';
 import type { Sdk as ContactsSdk } from '../../generated/contacts/sdk.gen';
@@ -22,22 +24,53 @@ import type { Sdk as StaticFilesSdk } from '../../generated/static-files/sdk.gen
 import type { Sdk as StorageSdk } from '../../generated/storage/sdk.gen';
 import type { Sdk as UnfurlSdk } from '../../generated/unfurl/sdk.gen';
 
+export const agentHarnessExcluded = [
+  // Claude Cloud sign-in is an app-internal auth flow, not SDK surface.
+  'complete',
+  'disconnect',
+  'start',
+  'status',
+  'loadAgentModelsHandler',
+  'discoverAgentCapabilitiesHandler',
+  'previewAgentSessions',
+  // Speculative page warm-up requires a signed-in user and is app-internal.
+  'warmAgentSessionHandler',
+] as const satisfies readonly (keyof AgentHarnessSdk)[];
+
+export const agentHarnessBacklog = [
+  'answerAgentSessionToolApproval',
+  'getAgentSessionPermissions',
+  'updateAgentSessionPermissions',
+] as const satisfies readonly (keyof AgentHarnessSdk)[];
+
 export const authExcluded = [
   'appleLogin',
+  'cancelCodexLogin',
+  'changePlan',
   'checkGithubLinkStatus',
   'checkGmailLinkStatus',
+  'configureCodex',
+  'createAiCreditCheckout',
   'createCheckoutSessionV2',
+  'createGtmInviteLink',
   'createInProgressLink',
   'createMergeRequest',
   'createPortalSession',
   'createTeam',
   'createUser',
+  'deleteCursorApiKey',
   'deleteGithubLink',
   'deleteTeam',
   'deleteTeamInviteHandler',
   'deleteUser',
+  'disconnectCodex',
   'enrichGithubPullRequests',
   'generateEmailLink',
+  'getAiBillingPlans',
+  'getAiBillingSummary',
+  'getCodexConnection',
+  'getCursorApiKey',
+  'getGtmInviteOffer',
   'getLegacyUserPermissions',
   'getPermissions',
   'getReferralCode',
@@ -55,7 +88,11 @@ export const authExcluded = [
   'initOutlookLink',
   'inviteToTeam',
   'joinTeam',
+  'listCodexEnvironments',
+  'listCursorModels',
+  'listGtmInviteLinks',
   'logout',
+  'mergeGithubPullRequest',
   'oauth2Callback',
   'oauthRedirect',
   'passwordLogin',
@@ -63,35 +100,56 @@ export const authExcluded = [
   'passwordlessLogin',
   'patchTeam',
   'patchTeamCrmSettings',
+  'patchTeamMemberPlan',
   'patchUserGroup',
   'patchUserOnboarding',
   'patchUserTutorial',
+  'pollCodexLogin',
   'postProfilePictures',
+  'putCursorApiKey',
+  'putCursorDefaultModel',
   'putProfilePicture',
   'putUserName',
+  'redeemGtmInviteLink',
   'refresh',
   'rejectInvitation',
   'removeUserFromTeam',
   'resendFusionauthVerifyUserEmail',
+  'resolveGtmInviteLink',
+  'revokeGtmInviteLink',
   'sendMobileWelcomeEmail',
   'sendReferralCode',
   'sessionCreation',
   'sessionLogin',
   'ssoLogin',
+  'startCodexLogin',
   'toggleTeamAutoJoinDomain',
   'toggleTeamNonAdminInvites',
+  'updateAiBillingOverage',
   'verifyEmailLink',
   'verifyFusionauthUserEmail',
   'verifyMergeRequest',
-] as const satisfies readonly (keyof AuthSdk)[];
+];
 
 export const authBacklog = [
   'macroApiToken',
 ] as const satisfies readonly (keyof AuthSdk)[];
 
+export const calendarExcluded = [
+  // Health probe is infra, not SDK surface.
+  'healthHandler',
+] as const satisfies readonly (keyof CalendarSdk)[];
+
+export const calendarBacklog =
+  [] as const satisfies readonly (keyof CalendarSdk)[];
+
 export const cognitionExcluded = [
   'addMcpServer',
+  'browsePipedreamMcpCatalog',
   'callTool',
+  'completePipedreamMcpConnection',
+  'createPipedreamMcpToken',
+  'deletePipedreamMcpConnection',
   'deleteMcpServer',
   'getBatchPreview',
   'getChatHistoryBatchMessagesHandler',
@@ -101,9 +159,12 @@ export const cognitionExcluded = [
   'getMemoryHandler',
   'healthHandler',
   'listMcpServers',
+  'listPipedreamMcpConnections',
   'mcpAuthCallback',
   'mcpOauthClientMetadata',
   'rejectToolCall',
+  // Channel discovery shares the app-only import workflow below.
+  'discoverHandler',
   'runImportHandler',
   'dismissRunHandler',
   'retryGatherHandler',
@@ -113,6 +174,7 @@ export const cognitionExcluded = [
   'setPricingHandler',
   'startMcpAuth',
   'updateMcpServer',
+  'updatePipedreamMcpConnection',
   'updateToolCall',
   'updateToolResponse',
   'upsertAiProjection',
@@ -145,6 +207,7 @@ export const contactsBacklog =
 export const emailExcluded = [
   'cancelBackfillGmail',
   'deleteLink',
+  'disableLinkCalendar',
   'disableSync',
   'getBackfillGmail',
   'getBackfillGmailActive',
@@ -160,20 +223,16 @@ export const emailExcluded = [
 export const emailBacklog = [
   'addDraftAttachment',
   'addForwardedAttachment',
-  'createCalendarEvent',
   'createDraft',
-  'deleteCalendarEvent',
   'deleteDraft',
   'deleteEmailFilter',
   'deleteScheduledDraft',
   'getScheduledMessages',
-  'listCalendars',
+  'getThreadCalendarInvitations',
   'listContacts',
   'listEmailFilters',
   'removeDraftAttachment',
   'removeForwardedAttachment',
-  'rsvpCalendarEvent',
-  'updateCalendarEvent',
   'upsertEmailFilter',
   'upsertScheduledMessage',
 ] as const satisfies readonly (keyof EmailSdk)[];
@@ -210,8 +269,10 @@ export const scheduledActionBacklog = [
   'createScheduledAction',
   'deleteScheduledAction',
   'executeScheduledActionNow',
+  'getScheduledAction',
   'listScheduledActionHistory',
   'listScheduledActions',
+  'setScheduledActionEnabled',
   'updateScheduledAction',
 ] as const satisfies readonly (keyof ScheduledActionSdk)[];
 
@@ -233,21 +294,43 @@ export const staticFilesBacklog =
   [] as const satisfies readonly (keyof StaticFilesSdk)[];
 
 export const storageExcluded = [
+  // Slack archive imports are browser-admin workflows, not SDK surface in v1.
+  'cancelSlackImport',
+  'completeSlackImportUploads',
+  'createSlackImport',
+  'finalizeSlackImport',
+  'getSlackImport',
+  'listSlackImports',
+  'registerSlackImportUploads',
   'bulkWakeupSyncServiceDocuments',
   'callWebhook',
   'checkActiveCall',
   'createChannelScopedBot',
+  'createCollabSurfaceToken',
   'createInstructionsHandler',
   'createViewHandler',
+  'deleteCollabSurface',
+  'ensureCollabSurface',
+  // First-run sample content is provisioned by the app's feature-gated onboarding.
+  'ensureStarterHandler',
   'deleteHistoryHandler',
   'deleteUserDocumentViewLocation',
   'deleteViewHandler',
+  // Old numeric comment links resolve inside the web app only.
+  'entityMessageLegacy',
   'excludeDefaultViewHandler',
   'getAttachmentReferences',
   'getBatchCallRecordPreview',
   'getBatchChannelPreview',
   'getBatchPreviewHandler',
+  'getActiveCalls',
   'getBatchProjectPreview',
+  'getBotOwnerProfiles',
+  'getCollabSurface',
+  // Storage for the web app's saved questions, not a user-facing surface.
+  'getDatabaseQuery',
+  // The web grid's incremental refresh after a version ping, not a user-facing surface.
+  'getDatabaseTableChanges',
   'getDocumentListHandler',
   'getDocumentLocationV3',
   'getDocumentProcessingResult',
@@ -267,17 +350,33 @@ export const storageExcluded = [
   'ingestTranscript',
   'initializeUserDocuments',
   'installSync',
-  'joinChannelByCode',
   'jobProcessingResultHandler',
+  'joinChannelByCode',
   'leaveOrEndCall',
+  // Live meeting admission and participant previews are app session flows.
+  'meetingGuestJoin',
+  // Browser setup reserves an empty RTC room before creating a meeting.
+  'meetingPrepare',
+  'meetingCancelPreparation',
+  'meetingGuestParticipants',
+  'meetingJoin',
+  'meetingLeave',
+  'meetingParticipants',
+  'mentionPreviews',
   'patchViewHandler',
-  'postChannelBotWebhook',
-  'postChannelMessages',
   'postItemsSoup',
   'postItemsSoupAst',
   'postItemsSoupAstGrouped',
   'removeBotFromChannelByBot',
-  'resolveChannelMessage',
+  // Storage for the web app's saved questions, not a user-facing surface.
+  'saveDatabaseQuery',
+  // Live presence between viewers of a database, internal to the web app.
+  'shareDatabaseAwareness',
+  // Composer dictation is an app-internal, user-only upload flow.
+  'transcribeDictation',
+  // The web app's Ctrl+Z over the viewer's own session edits; the SDK's
+  // applyOps does not surface the journal changes an undo names.
+  'undoDatabaseChange',
   'uploadExtractFolderHandler',
   'uploadFolderHandler',
   'upsertHistoryHandler',
@@ -285,16 +384,30 @@ export const storageExcluded = [
 ] as const satisfies readonly (keyof StorageSdk)[];
 
 export const storageBacklog = [
+  // Email follow-ups are available through the generated client.
+  'getEmailFollowup',
+  'setEmailFollowup',
+  'listEmailReminders',
+  'approveHarnessPairing',
+  'claimHarnessPairing',
+  'createAgent',
   'createAnchor',
   'createDocument',
   'createEntityMention',
-  'createReminder',
+  'createHarnessPairing',
+  'createInitiative',
+  'createUserApiKey',
   'deleteAnchor',
   'deleteEntityMention',
-  'deleteReminder',
+  'deleteHarness',
+  'deleteInitiative',
+  'deleteSelfHarness',
+  'deleteUserApiKey',
   'editAnchor',
   'editCallTranscript',
   'editThreadV2',
+  'entityMessageDeleteThread',
+  'entityMessagePatchThread',
   'getActivity',
   'getDocumentAnchors',
   'getDocumentByTeamSlug',
@@ -302,18 +415,41 @@ export const storageBacklog = [
   'getDocumentPermissionsV2',
   'getDocumentVersion',
   'getEntityPermission',
+  'getGithubPullRequest',
+  'getGithubPullRequestChanges',
+  'getGithubPullRequestChangesPatch',
   'getProjectPermissionsV2',
   'getProjectUserAccessLevel',
-  'getRecentActivityHandler',
-  'getReminder',
+  'getHarnessPairing',
+  'getInitiative',
+  'getSelfHarness',
+  'listAgents',
+  'listHarnessAgents',
+  'listHarnessSessions',
+  'listHarnesses',
+  'listInitiatives',
   'listOccurrences',
-  'listReminders',
+  'listTeamOutOfOffice',
+  'listUserApiKeys',
+  // Meeting management uses the generated client.
+  'meetingCancel',
+  'meetingCreate',
+  'meetingInvite',
+  'meetingInvitePermissions',
+  'meetingInviteUsers',
+  'meetingList',
+  'meetingListActive',
+  'meetingLookup',
+  'meetingShare',
+  'meetingUpdate',
   'postActivity',
   'presaveDocumentHandler',
   'saveDocumentHandler',
+  'setChannelPicture',
   'simpleSave',
   'toggleShareWithTeam',
-  'updateReminder',
+  'updateAgent',
+  'updateInitiative',
   'validateDocumentPermissionsToken',
 ] as const satisfies readonly (keyof StorageSdk)[];
 

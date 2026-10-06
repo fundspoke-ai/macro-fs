@@ -4,7 +4,7 @@ import CheckIcon from '@phosphor/check.svg';
 import ExclamationIcon from '@phosphor/exclamation-mark.svg';
 import Spinner from '@phosphor/spinner.svg';
 import XIcon from '@phosphor/x.svg';
-import { Button, cn, Layer, Surface } from '@ui';
+import { Button, cn, Surface } from '@ui';
 import type { Component, JSX } from 'solid-js';
 import {
   createEffect,
@@ -50,7 +50,7 @@ interface ToastStyle {
 
 const TOAST_STYLES: Record<ToastType, ToastStyle> = {
   [ToastType.SUCCESS]: {
-    background: 'bg-success/10',
+    background: 'bg-success-bg',
     accent: 'bg-success',
     borderColor: 'var(--color-success)',
     titleText: 'text-success-ink',
@@ -61,10 +61,10 @@ const TOAST_STYLES: Record<ToastType, ToastStyle> = {
       hover: 'hover:bg-success/80',
       text: 'text-success-ink',
     },
-    closeButtonHover: 'hover:text-success-ink hover:bg-success/10',
+    closeButtonHover: 'hover:text-success-ink hover:bg-success-hover',
   },
   [ToastType.FAILURE]: {
-    background: 'bg-failure/10',
+    background: 'bg-failure-bg',
     accent: 'bg-failure',
     titleText: 'text-failure-ink',
     borderColor: 'var(--color-failure)',
@@ -75,7 +75,7 @@ const TOAST_STYLES: Record<ToastType, ToastStyle> = {
       hover: 'hover:bg-failure/80',
       text: 'text-failure-ink',
     },
-    closeButtonHover: 'hover:text-failure-ink hover:bg-failure/10',
+    closeButtonHover: 'hover:text-failure-ink hover:bg-failure-hover',
   },
   [ToastType.ALERT]: {
     background: 'bg-alert/10',
@@ -192,6 +192,29 @@ function dismissActiveToast(region: string): boolean {
   return true;
 }
 
+/**
+ * Hand the region's single visible slot to a new toast, and report whether it
+ * displaced one (so the newcomer can skip its entrance animation).
+ *
+ * Persistent toasts opt out of the slot entirely: they are prompts the user is
+ * expected to answer, so a passing "Copied" must not tear one down, and a
+ * prompt appearing must not swallow a result the user is still reading. They
+ * stack in the region instead, and leave only when dismissed.
+ */
+function replaceActiveToast(region: string, persistent?: boolean): boolean {
+  if (persistent) return false;
+  return dismissActiveToast(region);
+}
+
+function trackActiveToast(
+  region: string,
+  toastId: number,
+  persistent?: boolean
+): void {
+  if (persistent) return;
+  setActiveToastId(region, toastId);
+}
+
 function clearTrackedToast(region: string, toastId: number): void {
   if (getActiveToastId(region) === toastId) {
     setActiveToastId(region, undefined);
@@ -251,9 +274,9 @@ function ActionButtons(props: { actions: ToastAction[]; mobile?: boolean }) {
         <Button
           size={props.mobile ? 'sm' : 'md'}
           onClick={action.onClick}
-          variant={props.mobile ? 'ghost' : 'base'}
-          class={cn('px-2 py-1', props.mobile && 'text-panel text-xs')}
-          depth={3}
+          variant="outline"
+          class="px-2 py-1 bg-surface"
+          depth={4}
         >
           <Show when={action.icon}>
             {(icon) => (
@@ -281,18 +304,16 @@ function ToastBodyWrapper(props: {
       fallback={
         <Surface
           highlightColor={props.accentColor}
-          class="relative w-[90vw] sm:w-md p-2 sm:p-3 rounded-xl shadow-lg shadow-drop-shadow"
-          depth={2}
+          hideBorder
+          class="relative w-[90vw] sm:w-md p-2 sm:p-3 rounded-xl glass bg-toast"
         >
           {props.children}
         </Surface>
       }
     >
-      <Layer depth={3}>
-        <div class="island relative w-[90vw] p-2 rounded-xl">
-          {props.children}
-        </div>
-      </Layer>
+      <div class="island relative w-full p-2 rounded-xl bg-toast">
+        {props.children}
+      </div>
     </Show>
   );
 }
@@ -314,8 +335,13 @@ function ToastContent(props: {
   skipOpenAnimation?: boolean;
   /** Called when this toast is removed from the DOM, so callers can clean up tracking. */
   onDismiss?: () => void;
+  /** Called at a user close gesture, before the exit animation begins. */
+  onUserDismiss?: () => void;
 }) {
   const styles = () => (props.toastType ? TOAST_STYLES[props.toastType] : null);
+  // Two actions beside the title squeeze it to a few characters; like the
+  // stacked custom layout, they get their own row under the description.
+  const stackActions = () => (props.actions?.length ?? 0) > 1;
 
   const accentColor = () => {
     if (props.custom?.color) return props.custom.color;
@@ -385,13 +411,20 @@ function ToastContent(props: {
       class={cn(
         `relative overflow-visible pointer-events-auto
         transition-[transform,opacity] duration-100 ease-in data-closed:opacity-0 data-[swipe=move]:translate-x-(--kb-toast-swipe-move-x)
-        data-[swipe=cancel]:translate-x-0 data-[swipe=cancel]:ease-out data-[swipe=cancel]:duration-200 data-[swipe=end]:animate-swipe-out`,
+        data-[swipe=move]:transition-none
+        data-[swipe=cancel]:translate-x-0 data-[swipe=cancel]:ease-out data-[swipe=cancel]:duration-200
+        data-[swipe=end]:data-[swipe-direction=right]:animate-swipe-out
+        data-[swipe=end]:data-[swipe-direction=left]:animate-swipe-out-left`,
         !props.skipOpenAnimation && 'data-opened:animate-slide-in',
         props.mobile && 'w-full'
       )}
       persistent={true}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
+      onSwipeEnd={() => props.onUserDismiss?.()}
+      onEscapeKeyDown={(event) => {
+        if (!event.defaultPrevented) props.onUserDismiss?.();
+      }}
     >
       <ToastBodyWrapper mobile={props.mobile} accentColor={accentColor()}>
         <Switch>
@@ -411,46 +444,72 @@ function ToastContent(props: {
 
           {/* ── Custom layout ── */}
           <Match when={props.custom}>
-            {(customConfig) => (
-              <>
-                <div class="flex items-center gap-2 justify-between">
-                  <Show when={customConfig().icon && !props.mobile}>
-                    {(_) => {
-                      const icon = customConfig().icon!;
-                      return (
-                        <div class="size-5 flex shrink-0 justify-center items-center rounded-full p-0.75">
-                          <Dynamic component={icon} />
-                        </div>
-                      );
-                    }}
-                  </Show>
-                  <Toast.Title
-                    class={cn(
-                      'font-semibold grow shrink truncate text-left',
-                      props.mobile ? 'text-xs' : 'text-ink'
-                    )}
-                  >
-                    {customConfig().title}
-                  </Toast.Title>
-                  <Show when={customConfig().actions?.length}>
-                    <ActionButtons
-                      actions={customConfig().actions!}
-                      mobile={props.mobile}
-                    />
-                  </Show>
-                  <Show when={!props.mobile}>
-                    <Toast.CloseButton>
-                      <Button variant="ghost" size="icon-sm">
+            {(customConfig) => {
+              // A persistent prompt on mobile can't borrow the transient
+              // one-line treatment: with the body and close button stripped it
+              // reduces to a bare title that never goes away. Give it the full
+              // card — description, close button, and its actions on their own
+              // row so the tap targets aren't fighting a truncated title.
+              const stacked = () => Boolean(props.mobile && props.persistent);
+              const showContent = () =>
+                Boolean(customConfig().content) && (!props.mobile || stacked());
+              return (
+                <>
+                  <div class="flex items-center gap-2 justify-between">
+                    <Show when={customConfig().icon && !props.mobile}>
+                      {(_) => {
+                        const icon = customConfig().icon!;
+                        return (
+                          <div class="size-5 flex shrink-0 justify-center items-center rounded-full p-0.75">
+                            <Dynamic component={icon} />
+                          </div>
+                        );
+                      }}
+                    </Show>
+                    <Toast.Title
+                      class={cn(
+                        'font-semibold grow shrink truncate text-left flex items-center',
+                        props.mobile ? 'text-xs' : 'text-ink',
+                        stacked() && 'text-sm'
+                      )}
+                    >
+                      {customConfig().title}
+                    </Toast.Title>
+                    <Show when={customConfig().actions?.length && !stacked()}>
+                      <ActionButtons
+                        actions={customConfig().actions!}
+                        mobile={props.mobile}
+                      />
+                    </Show>
+                    <Show when={!props.mobile || props.persistent}>
+                      <Toast.CloseButton
+                        as={Button}
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={() => props.onUserDismiss?.()}
+                      >
                         <XIcon />
-                      </Button>
-                    </Toast.CloseButton>
+                      </Toast.CloseButton>
+                    </Show>
+                  </div>
+                  <Show when={showContent()}>
+                    <div
+                      class={cn(
+                        'my-2',
+                        props.mobile && 'text-xs text-ink-muted'
+                      )}
+                    >
+                      {customConfig().content?.()}
+                    </div>
                   </Show>
-                </div>
-                <Show when={customConfig().content && !props.mobile}>
-                  <div class="my-2 ml-7">{customConfig().content?.()}</div>
-                </Show>
-              </>
-            )}
+                  <Show when={stacked() && customConfig().actions?.length}>
+                    <div class="flex justify-end gap-2">
+                      <ActionButtons actions={customConfig().actions!} mobile />
+                    </div>
+                  </Show>
+                </>
+              );
+            }}
           </Match>
 
           {/* ── Standard layout ── */}
@@ -480,7 +539,7 @@ function ToastContent(props: {
                   >
                     {props.message}
                   </Toast.Title>
-                  <Show when={props.actions?.length}>
+                  <Show when={props.actions?.length && !stackActions()}>
                     <ActionButtons
                       actions={props.actions!}
                       mobile={props.mobile}
@@ -494,10 +553,20 @@ function ToastContent(props: {
                     </Toast.CloseButton>
                   </Show>
                 </div>
-                <Show when={props.subtext && !props.mobile}>
-                  <Toast.Description class="text-sm text-ink-extra-muted ml-7">
+                <Show when={props.subtext && (!props.mobile || stackActions())}>
+                  <Toast.Description
+                    class={cn(
+                      'ml-7 text-ink-extra-muted',
+                      props.mobile ? 'text-xs' : 'text-sm'
+                    )}
+                  >
                     {props.subtext}
                   </Toast.Description>
+                </Show>
+                <Show when={stackActions()}>
+                  <div class="mt-2 ml-7 flex flex-wrap gap-2">
+                    <ActionButtons actions={props.actions!} mobile />
+                  </div>
                 </Show>
               </>
             )}
@@ -667,7 +736,7 @@ function embed(
   const useMobile = isMobile();
   const region =
     options?.region ?? (useMobile ? 'mobile-toast-region' : 'toast-region');
-  const skipOpenAnimation = dismissActiveToast(region);
+  const skipOpenAnimation = replaceActiveToast(region, options?.persistent);
   const toastId = toaster.show(
     (props) => (
       <ToastContent
@@ -682,7 +751,7 @@ function embed(
     ),
     { region }
   );
-  setActiveToastId(region, toastId);
+  trackActiveToast(region, toastId, options?.persistent);
   return toastId;
 }
 
@@ -700,12 +769,13 @@ function custom(
     duration?: number;
     region?: string;
     onDismiss?: () => void;
+    onUserDismiss?: () => void;
   }
 ): number {
   const useMobile = isMobile();
   const region =
     options?.region ?? (useMobile ? 'mobile-toast-region' : 'toast-region');
-  const skipOpenAnimation = dismissActiveToast(region);
+  const skipOpenAnimation = replaceActiveToast(region, options?.persistent);
   const toastId = toaster.show(
     (props) => (
       <ToastContent
@@ -715,6 +785,7 @@ function custom(
         duration={options?.duration}
         mobile={useMobile}
         skipOpenAnimation={skipOpenAnimation}
+        onUserDismiss={options?.onUserDismiss}
         onDismiss={() => {
           clearTrackedToast(region, props.toastId);
           options?.onDismiss?.();
@@ -723,24 +794,8 @@ function custom(
     ),
     { region }
   );
-  setActiveToastId(region, toastId);
+  trackActiveToast(region, toastId, options?.persistent);
   return toastId;
-}
-
-// ─── upload helper (kept for backwards compat) ───────────────────────────────
-
-export function createUploadToast(message: string) {
-  return toaster.show(
-    (props) => (
-      <ToastContent
-        toastId={props.toastId}
-        toastType={ToastType.LOADING}
-        message={message}
-        persistent={true}
-      />
-    ),
-    { region: 'stable-toast' }
-  );
 }
 
 // ─── public API ──────────────────────────────────────────────────────────────

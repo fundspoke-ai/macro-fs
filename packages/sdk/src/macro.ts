@@ -1,9 +1,12 @@
 import type { MacroOpts } from './config';
+import { AgentSessionNamespace } from './entities/agent-sessions/namespace';
 import { BotsNamespace } from './entities/bots/namespace';
+import { CalendarNamespace } from './entities/calendar/namespace';
 import { CallRecordNamespace } from './entities/calls/namespace';
 import { ChannelNamespace } from './entities/channels/namespace';
 import { ChatNamespace } from './entities/chats/namespace';
 import { CrmNamespace } from './entities/crm/namespace';
+import { DatabaseNamespace } from './entities/databases/namespace';
 import { DocumentNamespace } from './entities/documents/namespace';
 import { EmailNamespace } from './entities/email/namespace';
 import { FavoritesNamespace } from './entities/favorites/namespace';
@@ -15,11 +18,23 @@ import { PropertiesNamespace } from './entities/properties/namespace';
 import { TaskNamespace } from './entities/tasks/namespace';
 import { TeamNamespace } from './entities/teams/namespace';
 import { UserNamespace } from './entities/users/namespace';
+import type { User } from './entities/users/user';
 import { WebhooksNamespace } from './entities/webhooks/namespace';
 import type { MacroEvents } from './events/receiver';
 import { MacroClient } from './utils/client';
 
 export type { MacroOpts } from './config';
+export type { CallMessage } from './entities/calls/message';
+export {
+  type AddColumnOptions,
+  type ApplyOpsOptions,
+  type ChangeColumnTypeOptions,
+  type ColumnType,
+  type ConvertIntoNewColumnOptions,
+  MacroOpRefusedError,
+  type OpResultOf,
+} from './entities/databases/database';
+export type { ListenOptions, MacroEvents } from './events/receiver';
 export {
   here,
   type Interpolation,
@@ -33,11 +48,14 @@ export {
 } from './mentions';
 
 export class Macro<T extends MacroOpts = MacroOpts> {
+  readonly agentSessions: AgentSessionNamespace;
   readonly bots: BotsNamespace;
+  readonly calendar: CalendarNamespace;
   readonly calls: CallRecordNamespace;
   readonly channels: ChannelNamespace;
   readonly chats: ChatNamespace;
   readonly crm: CrmNamespace;
+  readonly databases: DatabaseNamespace;
   readonly documents: DocumentNamespace;
   readonly email: EmailNamespace;
   readonly favorites: FavoritesNamespace;
@@ -50,9 +68,7 @@ export class Macro<T extends MacroOpts = MacroOpts> {
   readonly teams: TeamNamespace;
   readonly users: UserNamespace;
   readonly webhooks: WebhooksNamespace;
-  declare readonly events: T extends { webhookSecret: string }
-    ? MacroEvents
-    : undefined;
+  readonly events: MacroEvents;
   /** Base URL of the Macro web app, used to build entity URLs. */
   readonly webAppUrl: string;
   /** Direct access to the underlying hey-api service clients. */
@@ -63,11 +79,14 @@ export class Macro<T extends MacroOpts = MacroOpts> {
     this.opts = opts;
     const client = new MacroClient(opts);
     this._client = client;
+    this.agentSessions = new AgentSessionNamespace(client);
     this.bots = new BotsNamespace(client);
+    this.calendar = new CalendarNamespace(client);
     this.calls = new CallRecordNamespace(client);
     this.channels = new ChannelNamespace(client);
     this.chats = new ChatNamespace(client);
     this.crm = new CrmNamespace(client);
+    this.databases = new DatabaseNamespace(client);
     this.documents = new DocumentNamespace(client);
     this.email = new EmailNamespace(client);
     this.favorites = new FavoritesNamespace(client);
@@ -80,7 +99,7 @@ export class Macro<T extends MacroOpts = MacroOpts> {
     this.teams = new TeamNamespace(client);
     this.users = new UserNamespace(client);
     this.webhooks = new WebhooksNamespace(client);
-    (this as { events?: MacroEvents }).events = client.events;
+    this.events = client.events;
     this.webAppUrl = client.webAppUrl;
   }
 
@@ -92,10 +111,10 @@ export class Macro<T extends MacroOpts = MacroOpts> {
     return this._client.myPrincipalId();
   }
 
-  /** Clone of this SDK acting on behalf of `userId` (sent as
+  /** Clone of this SDK acting on behalf of `user` (sent as
    * `x-macro-bot-for-macro-user-id`). Bot auth only — throws for user auth,
    * since a user token always acts as its own user. */
-  requestedAs(userId: string): Macro<T> {
-    return new Macro({ ...this.opts, requestedAs: userId });
+  requestedAs(user: User): Macro<T> {
+    return new Macro({ ...this.opts, requestedAs: user.id });
   }
 }

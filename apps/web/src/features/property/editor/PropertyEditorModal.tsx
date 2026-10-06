@@ -21,7 +21,7 @@ import { SYSTEM_PROPERTY_IDS } from '@property/constants';
 import { OptionCheckBox } from '@property/editors/selectors/OptionCheckBox';
 import { usePropertySelection } from '@property/hooks';
 import { usePropertyEntityDisplay } from '@property/hooks/usePropertyEntityDisplay';
-import { useDocTags } from '@property/tags';
+import { canTagEntity, useDocTags } from '@property/tags';
 import { TagDot } from '@property/tags/TagDot';
 import {
   TagEditorDialog,
@@ -201,15 +201,6 @@ function propertyEditorEntityType(entity: PropertyEditorEntity): EntityType {
   if ('entityType' in entity) return entity.entityType;
   if (isTaskEntity(entity)) return 'TASK';
   return macroEntityToPropertyEntityType(entity);
-}
-
-function canAssignTags(entity: PropertyEditorEntity): boolean {
-  try {
-    propertyEditorEntityType(entity);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function propertyEditorEntityName(entity: PropertyEditorEntity): string {
@@ -465,7 +456,7 @@ function PropertyList(props: {
 
     const query = props.searchTerm.toLowerCase().trim();
     return (
-      propertyEditorState.selectedEntities.every(canAssignTags) &&
+      propertyEditorState.selectedEntities.every(canTagEntity) &&
       (!query || 'tags'.includes(query) || 'label'.includes(query))
     );
   });
@@ -640,7 +631,7 @@ function EditingEntityPreview(props: { entities: PropertyEditorEntity[] }) {
         }}
       </For>
       <Show when={remainingCount() > 0}>
-        <div class="text-muted-foreground text-xs px-2 py-1">
+        <div class="text-ink-muted text-xs px-2 py-1">
           +{remainingCount()} more
         </div>
       </Show>
@@ -1364,7 +1355,7 @@ function PropertyValueEditor(props: {
         />
       </Match>
       <Match when={propertyType() === 'LINK'}>
-        <div class="p-4 text-center text-muted-foreground">
+        <div class="p-4 text-center text-ink-muted">
           Link editing not yet implemented
         </div>
       </Match>
@@ -2157,54 +2148,42 @@ function DatePropertyEditor(props: {
   });
 
   return (
-    <>
-      <Show
-        when={dateOptions().length > 0}
-        fallback={
-          <Show
-            when={props.searchValue().trim()}
-            fallback={
-              <CommandMenuEmptyState>
-                Enter a date or duration
-              </CommandMenuEmptyState>
-            }
-          >
+    <Show
+      when={dateOptions().length > 0}
+      fallback={
+        <Show
+          when={props.searchValue().trim()}
+          fallback={
             <CommandMenuEmptyState>
-              No dates match "{props.searchValue()}"
+              Enter a date or duration
             </CommandMenuEmptyState>
-          </Show>
-        }
-      >
-        <CommandMenuList
-          items={dateOptions()}
-          selectedIndex={props.selectedIndex()}
-          scrollSelectedIntoView={listController.shouldScrollSelectedIntoView()}
-          itemId={(_, index) => `date-option-${index}`}
-          onSelect={(option) => props.onSubmit(option.date)}
-          onItemMouseMove={(index) =>
-            listController.setSelectedIndexFromPointer(index)
           }
         >
-          {(option) => (
-            <>
-              <div class="flex-1 text-left">
-                <p class="text-sm font-medium">{option.displayText}</p>
-              </div>
-              <span class="text-xs text-ink-muted">{option.secondaryText}</span>
-            </>
-          )}
-        </CommandMenuList>
-      </Show>
-
-      <div class="p-4 border-t border-edge-muted">
-        <div class="text-xs text-ink-muted">
-          <span>Use queries like </span>
-          <code class="bg-active px-1">3d</code>,{' '}
-          <code class="bg-active px-1">1w</code>,{' '}
-          <code class="bg-active px-1">feb 17</code>, or{' '}
-          <code class="bg-active px-1">tomorrow</code>
-        </div>
-      </div>
-    </>
+          <CommandMenuEmptyState>
+            No dates match "{props.searchValue()}"
+          </CommandMenuEmptyState>
+        </Show>
+      }
+    >
+      <CommandMenuList
+        items={dateOptions()}
+        selectedIndex={props.selectedIndex()}
+        scrollSelectedIntoView={listController.shouldScrollSelectedIntoView()}
+        itemId={(_, index) => `date-option-${index}`}
+        onSelect={(option) => props.onSubmit(option.date)}
+        onItemMouseMove={(index) =>
+          listController.setSelectedIndexFromPointer(index)
+        }
+      >
+        {(option) => (
+          <>
+            <div class="flex-1 text-left">
+              <p class="text-sm font-medium">{option.displayText}</p>
+            </div>
+            <span class="text-xs text-ink-muted">{option.secondaryText}</span>
+          </>
+        )}
+      </CommandMenuList>
+    </Show>
   );
 }

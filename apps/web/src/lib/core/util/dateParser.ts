@@ -2,6 +2,8 @@
  * Parse natural language date inputs like "today", "tomorrow", "next week", etc.
  */
 
+import { differenceInCalendarDays } from 'date-fns';
+
 export type ParsedDate = {
   date: Date;
   displayFormat: string;
@@ -309,6 +311,49 @@ export function formatDate(date: Date): string {
     options.year = 'numeric';
   }
 
+  return date.toLocaleDateString('en-US', options);
+}
+
+/**
+ * Day-relative label for dates near now — "Today", "Yesterday", "2 days ago",
+ * "Tomorrow", "In 2 days" — falling back to `formatDate` beyond that window.
+ * (Moved from the DateMention decorator so lists can share it.)
+ */
+export function formatRelativeDay(date: Date): string {
+  const diff = differenceInCalendarDays(date, new Date());
+  switch (diff) {
+    case -2:
+      return '2 days ago';
+    case -1:
+      return 'Yesterday';
+    case 0:
+      return 'Today';
+    case 1:
+      return 'Tomorrow';
+    case 2:
+      return 'In 2 days';
+    default:
+      return formatDate(date);
+  }
+}
+
+/**
+ * Full date for a mention tooltip, with the time of day for dates near now.
+ * (Moved from the DateMention decorator so spreadsheet chips can share it.)
+ */
+export function formatTooltipDate(date: Date): string {
+  const diff = Math.abs(differenceInCalendarDays(date, new Date()));
+  const options: Intl.DateTimeFormatOptions = {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  };
+  if (diff <= 5) {
+    options.hour = 'numeric';
+    options.minute = '2-digit';
+    options.hour12 = true;
+  }
   return date.toLocaleDateString('en-US', options);
 }
 

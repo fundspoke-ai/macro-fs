@@ -1,9 +1,15 @@
 //! Outbound adapter for the AI editing worker.
 
-use crate::domain::ports::editing::{EditResult, EditUsage, EditingWorkerService};
+use crate::domain::ports::editing::{
+    EditMode, EditResult, EditUsage, EditingWorkerService, EditorName,
+};
+use anyhow::Context;
 use macro_sync_service_jwt::DocumentPermissionToken;
 use reqwest::Client;
 use std::sync::Arc;
+
+#[cfg(test)]
+mod test;
 
 /// Reqwest-backed client for the AI editing worker.
 #[derive(Clone)]
@@ -35,18 +41,185 @@ impl ReqwestEditingWorkerClient {
     }
 }
 
+impl ReqwestEditingWorkerClient {
+    #[cfg(feature = "ai_tools")]
+    async fn comment_mark(
+        &self,
+        document_id: &str,
+        document_token: &DocumentPermissionToken,
+        change: serde_json::Value,
+    ) -> anyhow::Result<reqwest::Response> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        macro_tower_layers::inject_trace_headers(&mut headers);
+        Ok(self
+            .client
+            .post(format!("{}/comment-mark", self.worker_url))
+            .headers(headers)
+            .timeout(std::time::Duration::from_secs(30))
+            .json(&serde_json::json!({
+                "documentId": document_id,
+                "documentToken": document_token.as_str(),
+                "change": change,
+            }))
+            .send()
+            .await?)
+    }
+}
+
 impl EditingWorkerService for ReqwestEditingWorkerClient {
+    #[cfg(feature = "ai_tools")]
+    #[tracing::instrument(skip_all, fields(document_id), err)]
+    async fn spreadsheet(
+        &self,
+        document_id: &str,
+        document_token: &DocumentPermissionToken,
+        request: &crate::domain::spreadsheet::SpreadsheetRequest,
+    ) -> anyhow::Result<crate::domain::spreadsheet::SpreadsheetResponse> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        macro_tower_layers::inject_trace_headers(&mut headers);
+        let response = self
+            .client
+            .post(format!("{}/spreadsheet", self.worker_url))
+            .headers(headers)
+            .timeout(std::time::Duration::from_secs(45))
+            .json(&serde_json::json!({
+                "documentId": document_id,
+                "documentToken": document_token.as_str(),
+                "request": request,
+            }))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_default();
+            let message = body.get("error").and_then(serde_json::Value::as_str)
+                .unwrap_or("Spreadsheet operation failed. Read the workbook again before retrying an edit.");
+            anyhow::bail!("{message} (HTTP {status})");
+        }
+        Ok(response.json().await?)
+    }
+
+    #[cfg(feature = "ai_tools")]
+    #[tracing::instrument(skip_all, fields(document_id), err)]
+    async fn word_document(
+        &self,
+        document_id: &str,
+        document_token: &DocumentPermissionToken,
+        request: &crate::domain::word_document::WordDocumentRequest,
+    ) -> anyhow::Result<crate::domain::word_document::WordDocumentResponse> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        macro_tower_layers::inject_trace_headers(&mut headers);
+        let response = self
+            .client
+            .post(format!("{}/docx", self.worker_url))
+            .headers(headers)
+            .timeout(std::time::Duration::from_secs(45))
+            .json(&serde_json::json!({
+                "documentId": document_id,
+                "documentToken": document_token.as_str(),
+                "request": request,
+            }))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_default();
+            let message = body
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Word document operation failed. Read the document again before retrying an edit.");
+            anyhow::bail!("{message} (HTTP {status})");
+        }
+        Ok(response.json().await?)
+    }
+
+    #[cfg(feature = "ai_tools")]
+    #[tracing::instrument(skip_all, fields(document_id, %mark_id), err)]
+    async fn add_comment_mark(
+        &self,
+        document_id: &str,
+        document_token: &DocumentPermissionToken,
+        mark_id: uuid::Uuid,
+        text: &str,
+        occurrence: Option<u32>,
+    ) -> anyhow::Result<crate::domain::ports::editing::CommentMarkPlacement> {
+        use crate::domain::ports::editing::CommentMarkPlacement;
+
+        let mut change = serde_json::json!({
+            "action": "add",
+            "markId": mark_id,
+            "text": text,
+        });
+        if let Some(occurrence) = occurrence {
+            change["occurrence"] = occurrence.into();
+        }
+        let response = self
+            .comment_mark(document_id, document_token, change)
+            .await?;
+        let status = response.status();
+        let body = response
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_default();
+        if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+            && let Some(reason) = body.get("error").and_then(serde_json::Value::as_str)
+        {
+            return Ok(CommentMarkPlacement::Refused(reason.to_owned()));
+        }
+        if !status.is_success() {
+            anyhow::bail!("editing worker returned {status}: {body}");
+        }
+        Ok(CommentMarkPlacement::Placed {
+            marked_text: body["markedText"].as_str().unwrap_or_default().to_owned(),
+        })
+    }
+
+    #[cfg(feature = "ai_tools")]
+    #[tracing::instrument(skip_all, fields(document_id, %mark_id), err)]
+    async fn remove_comment_mark(
+        &self,
+        document_id: &str,
+        document_token: &DocumentPermissionToken,
+        mark_id: uuid::Uuid,
+    ) -> anyhow::Result<()> {
+        let response = self
+            .comment_mark(
+                document_id,
+                document_token,
+                serde_json::json!({ "action": "remove", "markId": mark_id }),
+            )
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("editing worker returned {status}: {body}");
+        }
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, fields(document_id), err)]
     async fn edit(
         &self,
         document_id: &str,
         document_token: &DocumentPermissionToken,
         instructions: &str,
+        mode: EditMode,
+        editor: Option<EditorName>,
     ) -> anyhow::Result<EditResult> {
-        let request_body = serde_json::json!({
+        let mut request_body = serde_json::json!({
             "documentToken": document_token.as_str(),
             "documentId": document_id,
             "prompt": instructions,
+            "mode": match mode {
+                EditMode::Supervised => "supervised",
+                EditMode::Fast => "fast",
+            },
             "models": {
                 "supervisor": [
                     { "provider": "anthropic", "model": "claude-opus-4-8" },
@@ -57,13 +230,35 @@ impl EditingWorkerService for ReqwestEditingWorkerClient {
                     { "provider": "cerebras", "model": "zai-glm-4.7" },
                     { "provider": "anthropic", "model": "claude-sonnet-4-6" },
                 ],
+                // gpt-5.5 leads the coding chain on testbench evidence: replaying
+                // the same 16 prod sessions in the animated (production)
+                // configuration, against the cerebras/haiku chain it cut the
+                // coder retry rate from 37% to 9% (coders retrying 16 -> 2),
+                // runCode calls -63%, input tokens -61%, cost -35%, and judged
+                // quality improved (fully correct 12/16 -> 14/16, purpose met
+                // 14/16 -> 15/16) with no damaging sessions either way.
+                //
+                // haiku stays as the fallback: OpenAI throttles hard under
+                // concurrency, and a throttled bench run at 4-way parallelism
+                // timed out on 24 of 40 cases where a serial run had none.
                 "coding": [
-                    { "provider": "cerebras", "model": "gpt-oss-120b" },
+                    { "provider": "openai", "model": "gpt-5.5" },
+                    { "provider": "anthropic", "model": "claude-haiku-4-5" },
+                ],
+                // The fast path's single model; mirrors the web client's chain
+                // (apps/web ai-editing-worker/client.ts). Gemini 3.8 Flash ran
+                // a real inline edit in 1.5-5 s with no thinking tokens where
+                // 3.7 Flash took 3.8-5.4 s; Haiku is the provider-error fallback.
+                "fast": [
+                    { "provider": "google", "model": "gemini-3.8-flash" },
                     { "provider": "anthropic", "model": "claude-haiku-4-5" },
                 ],
             },
             "interpret": false,
         });
+        if let Some(editor) = editor {
+            request_body["editor"] = serde_json::json!({ "name": editor.as_str() });
+        }
 
         // Propagate the current trace so the worker's spans join this
         // service's trace instead of rooting their own.
@@ -76,7 +271,8 @@ impl EditingWorkerService for ReqwestEditingWorkerClient {
             .headers(headers)
             .json(&request_body)
             .send()
-            .await?;
+            .await
+            .context("editing worker request failed")?;
 
         let status = edit_resp.status();
         if !status.is_success() {

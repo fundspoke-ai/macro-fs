@@ -1,13 +1,16 @@
 pub mod attachment;
+pub mod calendar_invitation;
 pub mod contact;
 pub mod draft;
 pub mod email_filter;
 pub mod error;
 pub mod label;
 pub mod link;
+pub mod mail_projection;
 pub mod message;
 pub mod parsed_message;
 pub mod preview;
+pub mod sender_policy;
 pub mod thread;
 
 #[cfg(test)]
@@ -16,7 +19,8 @@ mod tests;
 pub use attachment::{Attachment, AttachmentDraft, AttachmentForwarded, MessageAttachment};
 pub use contact::{Contact, ContactInfo, RecipientType};
 pub use draft::{
-    CreateDraftInput, CreatedDraft, ParsedAddresses, ResolvedDraftInput, SimpleMessageInfo,
+    CreateDraftInput, CreatedDraft, DeletedUserDraft, DraftDeletion, MessageTimestamps,
+    ParsedAddresses, ResolvedDraftInput, SavedUserDraft, SettledDraftIds, SimpleMessageInfo,
     UpsertedContacts, UpsertedRecipient,
 };
 pub use email_filter::{EmailFilter, UpsertEmailFilterInput};
@@ -29,10 +33,15 @@ pub use link::{
     EmailBackfillStatus, EmailInboxDetails, EmailSyncStatus, Link, UserEmailLink,
     UserEmailLinkSettings, UserProvider,
 };
+pub use mail_projection::{
+    EmailDraftAggregate, EmailDraftEntry, EmailPreview, EmailThreadDraftState,
+    EmailThreadMailCacheFacts, EmailThreadMailPreviews, EmailThreadMailProjection,
+};
 pub use message::{Message, MessageRow, SimpleMessage};
 pub use parsed_message::{ParsedLabel, ParsedMessage, ParsedThread};
 pub use preview::{
     EmailThreadPreview, EnrichedEmailThreadPreview, GetEmailsRequest, PreviewCursorQuery,
     PreviewView, PreviewViewStandardLabel,
 };
+pub use sender_policy::SenderPolicy;
 pub use thread::{EmailThreadMetadata, Thread, ThreadRow};

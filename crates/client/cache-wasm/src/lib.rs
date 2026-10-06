@@ -1,4 +1,9 @@
-//! wasm-bindgen shell around the cache engine + IndexedDB storage.
+//! wasm-bindgen shell around the generic cache engine + Turso OPFS storage.
+//!
+//! Soup-specific GraphQL materialization and projection policy live in
+//! `soup-filter-cache-adapter`. This shell links that adapter at the browser
+//! composition edge and passes only generic predicate/projection IR into the
+//! cache engine.
 //!
 //! Exposes a `CacheEngine` class to the JS worker glue
 //! (`apps/web/src/lib/graphql-cache/`). All methods return Promises; the
@@ -11,7 +16,12 @@
 //! internally.
 
 #[cfg(target_arch = "wasm32")]
+mod query_telemetry;
+#[cfg(target_arch = "wasm32")]
 mod shell;
+
+#[cfg(target_arch = "wasm32")]
+pub use query_telemetry::set_slow_query_callback;
 
 #[cfg(target_arch = "wasm32")]
 pub use shell::*;

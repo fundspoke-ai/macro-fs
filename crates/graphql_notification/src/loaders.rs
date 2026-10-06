@@ -3,69 +3,21 @@ use std::{collections::HashMap, sync::Arc};
 use async_graphql::dataloader::{DataLoader, Loader};
 use macro_user_id::user_id::MacroUserIdStr;
 use model_notifications::NotifEvent;
-use notification::domain::models::{
-    UserNotificationRow,
-    request::{NotificationEntityRef, NotificationItemType},
-};
+use notification::domain::models::{UserNotificationRow, entity_query::EntityNotificationQuery};
 use rootcause::markers::{Cloneable, Dynamic};
 
-/// Tests for notification entity mapping and batching.
+/// Tests for notification entity batching.
 #[cfg(test)]
 mod test;
 
-/// Map a shared entity type to the notification domain's item type.
-///
-/// Some Soup entities, such as CRM companies, do not have a corresponding
-/// notification type. Those entities have an empty notification edge rather
-/// than failing the whole DataLoader batch.
-fn notification_item_type(entity_type: model_entity::EntityType) -> Option<NotificationItemType> {
-    use model_entity::EntityType;
-    match entity_type {
-        EntityType::EmailThread => Some(NotificationItemType::Email),
-        EntityType::ChannelMessage => Some(NotificationItemType::Message),
-        EntityType::Channel => Some(NotificationItemType::Channel),
-        EntityType::Document => Some(NotificationItemType::Document),
-        EntityType::Project => Some(NotificationItemType::Project),
-        EntityType::Chat => Some(NotificationItemType::Chat),
-        EntityType::Call => Some(NotificationItemType::Call),
-        EntityType::ForeignEntity => Some(NotificationItemType::Github),
-        EntityType::Reminder => Some(NotificationItemType::Reminder),
-        EntityType::CalendarEvent => Some(NotificationItemType::Calendar),
-        EntityType::User
-        | EntityType::Team
-        | EntityType::StaticFile
-        | EntityType::CrmCompany
-        | EntityType::CrmContact
-        | EntityType::Skill => None,
-    }
-}
-
-/// Build notification-service references for the subset of entities that can
-/// own notifications.
-fn notification_refs(
-    keys: &[model_entity::Entity<'static>],
-) -> Vec<(model_entity::Entity<'static>, NotificationEntityRef)> {
-    keys.iter()
-        .filter_map(|key| {
-            let entity_type = notification_item_type(key.entity_type)?;
-            Some((
-                key.clone(),
-                NotificationEntityRef {
-                    entity_type,
-                    id: key.entity_id.to_string(),
-                },
-            ))
-        })
-        .collect()
-}
-
 /// Reader used by GraphQL notification edges.
 pub trait SoupNotificationEdgeReader: Send + Sync + 'static {
-    /// Load notifications for the requested entity keys.
+    /// Load matching notifications, applying the limit separately per entity.
     fn get_notifications<'a>(
         &'a self,
         user_id: MacroUserIdStr<'static>,
         keys: Vec<model_entity::Entity<'static>>,
+        query: EntityNotificationQuery,
     ) -> impl Future<
         Output = Result<
             HashMap<model_entity::Entity<'static>, Vec<UserNotificationRow<NotifEvent>>>,
@@ -79,42 +31,18 @@ impl<T> SoupNotificationEdgeReader for Arc<T>
 where
     T: notification::domain::service::NotificationReader,
 {
-    async fn get_notifications(
+    fn get_notifications(
         &self,
         user_id: MacroUserIdStr<'static>,
         keys: Vec<model_entity::Entity<'static>>,
-    ) -> Result<
-        HashMap<model_entity::Entity<'static>, Vec<UserNotificationRow<NotifEvent>>>,
-        rootcause::Report,
-    > {
-        let mut result = keys
-            .iter()
-            .cloned()
-            .map(|key| (key, Vec::new()))
-            .collect::<HashMap<_, _>>();
-
-        let requested_refs = notification_refs(&keys);
-        if requested_refs.is_empty() {
-            return Ok(result);
-        }
-
-        let entity_refs = requested_refs
-            .iter()
-            .map(|(_, entity_ref)| entity_ref.clone())
-            .collect();
-
-        let mut notifications_by_entity = self
-            .get_entity_notifications_batch::<NotifEvent>(user_id, entity_refs)
-            .await
-            .map_err(|err| rootcause::report!(err))?;
-
-        for (original_key, entity_ref) in requested_refs {
-            if let Some(notifications) = notifications_by_entity.remove(&entity_ref) {
-                result.insert(original_key, notifications);
-            }
-        }
-
-        Ok(result)
+        query: EntityNotificationQuery,
+    ) -> impl Future<
+        Output = Result<
+            HashMap<model_entity::Entity<'static>, Vec<UserNotificationRow<NotifEvent>>>,
+            rootcause::Report,
+        >,
+    > + Send {
+        self.get_entity_notifications_batch::<NotifEvent>(user_id, keys, query)
     }
 }
 
@@ -127,12 +55,22 @@ impl SoupNotificationEdgeReader for NoOpSoupNotificationEdgeReader {
         &self,
         _user_id: MacroUserIdStr<'static>,
         keys: Vec<model_entity::Entity<'static>>,
+        _query: EntityNotificationQuery,
     ) -> Result<
         HashMap<model_entity::Entity<'static>, Vec<UserNotificationRow<NotifEvent>>>,
         rootcause::Report,
     > {
         Ok(keys.iter().map(|key| (key.clone(), Vec::new())).collect())
     }
+}
+
+/// An entity plus its complete selection. Limited and full reads must never collide.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntityNotificationsKey {
+    /// Canonical entity being read.
+    pub entity: model_entity::OwnedEntity,
+    /// States, event names, and per-entity limit.
+    pub query: EntityNotificationQuery,
 }
 
 /// DataLoader for entity notification edges.
@@ -150,7 +88,7 @@ impl<R> EntityNotificationsLoader<R> {
     }
 }
 
-impl<R> Loader<model_entity::OwnedEntity> for EntityNotificationsLoader<R>
+impl<R> Loader<EntityNotificationsKey> for EntityNotificationsLoader<R>
 where
     R: SoupNotificationEdgeReader,
 {
@@ -159,26 +97,33 @@ where
 
     async fn load(
         &self,
-        keys: &[model_entity::OwnedEntity],
-    ) -> Result<HashMap<model_entity::OwnedEntity, Self::Value>, Self::Error> {
-        let entities = keys
-            .iter()
-            .map(|key| key.as_entity().clone())
-            .collect::<Vec<_>>();
-        let mut loaded = self
-            .reader
-            .get_notifications(self.user_id.clone(), entities)
-            .await
-            .map_err(|error| error.into_cloneable())?;
-
-        Ok(keys
-            .iter()
-            .cloned()
-            .map(|key| {
-                let notifications = loaded.remove(key.as_entity()).unwrap_or_default();
-                (key, notifications)
-            })
-            .collect())
+        keys: &[EntityNotificationsKey],
+    ) -> Result<HashMap<EntityNotificationsKey, Self::Value>, Self::Error> {
+        let mut batches: HashMap<EntityNotificationQuery, Vec<EntityNotificationsKey>> =
+            HashMap::new();
+        for key in keys {
+            batches
+                .entry(key.query.clone())
+                .or_default()
+                .push(key.clone());
+        }
+        let mut result = HashMap::new();
+        for (query, keys) in batches {
+            let entities = keys
+                .iter()
+                .map(|key| key.entity.as_entity().clone())
+                .collect();
+            let mut loaded = self
+                .reader
+                .get_notifications(self.user_id.clone(), entities, query)
+                .await
+                .map_err(|error| error.into_cloneable())?;
+            for key in keys {
+                let notifications = loaded.remove(key.entity.as_entity()).unwrap_or_default();
+                result.insert(key, notifications);
+            }
+        }
+        Ok(result)
     }
 }
 

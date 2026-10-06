@@ -4,6 +4,7 @@ use std::{future::Future, time::Duration};
 
 use anyhow::Context;
 use futures::stream::{self, StreamExt};
+use model_owner::Owner;
 use tokio::time::timeout;
 use tokio_retry::Retry;
 
@@ -36,8 +37,8 @@ pub struct MarkdownBackfillOptions {
 pub struct MarkdownBackfillCandidate {
     /// Document id.
     pub id: String,
-    /// Document owner user id.
-    pub owner: String,
+    /// Document owner.
+    pub owner: Owner,
     /// Latest document instance id containing object-storage markdown bytes.
     pub document_instance_id: Option<i64>,
     /// Legacy uploaded flag.
@@ -340,7 +341,7 @@ where
             .initialize_existing_markdown(&candidate.id, &markdown)
             .await
         {
-            Ok(()) => CandidateResult::Initialized,
+            Ok(_) => CandidateResult::Initialized,
             Err(error) if sync_snapshot_already_exists(&error) => CandidateResult::Initialized,
             Err(error) => CandidateResult::InitializeError {
                 error: error.to_string(),

@@ -1,5 +1,5 @@
 import { type Vector2, vec2 } from '@block-canvas/util/vector2';
-import { useBlockId } from '@core/block';
+import { useMacroMentionLinkResolver } from '@components/app/split-layout/split-router/mention-links';
 import { buildConfig } from '@core/component/LexicalMarkdown/builder/MarkdownConfigBuilder';
 import { DecoratorRenderer } from '@core/component/LexicalMarkdown/component/core/DecoratorRenderer';
 import { NodeAccessoryRenderer } from '@core/component/LexicalMarkdown/component/core/NodeAccessoryRenderer';
@@ -11,9 +11,7 @@ import {
   DefaultShortcuts,
   keyboardShortcutsPlugin,
 } from '@core/component/LexicalMarkdown/plugins';
-import { ScopedPortal } from '@core/component/ScopedPortal';
 import clickOutside from '@core/directive/clickOutside';
-import { useCanEdit } from '@core/signal/permissions';
 import {
   $getRoot,
   $setSelection,
@@ -41,6 +39,7 @@ import {
   type Tool,
   Tools,
 } from '../../constants';
+import { useCanvasDocument } from '../../context/canvas-document-context';
 import type { TextNode } from '../../model/CanvasModel';
 import { useCanvasHistory } from '../../signal/canvasHistory';
 import { useSelection } from '../../signal/selection';
@@ -65,12 +64,15 @@ function TextBoxEditor(props: {
   blockId?: string;
 }) {
   const { registerEditor, unregisterEditor } = useTextNodeEditors();
-  const canEdit = useCanEdit();
+  const canvas = useCanvasDocument();
+  const canEdit = canvas.canEdit;
+  const useBlockBoundary = () => canvas.portalScope() === 'block';
   let mountRef!: HTMLDivElement;
 
   const toolManager = useToolManager();
 
   const config = buildConfig('markdown')
+    .withAppLinkResolver(useMacroMentionLinkResolver())
     .namespace('canvas-text-box')
     .withHistory({ timeGap: 400 })
     .withEmojis()
@@ -206,28 +208,29 @@ function TextBoxEditor(props: {
         }}
         contentEditable={props.editable()}
       />
-      <ScopedPortal>
-        <MentionsMenu
-          editor={editor}
-          menu={state.mentionsMenuOps!}
-          useBlockBoundary={true}
-        />
-        <EmojiMenu
-          editor={editor}
-          menu={state.emojisMenuOps!}
-          useBlockBoundary={true}
-        />
-        <Show when={state.snippetsMenuOps}>
-          {(menu) => (
-            <SnippetsMenu
-              editor={editor}
-              menu={menu()}
-              useBlockBoundary={true}
-              sourceDocumentId={props.blockId}
-            />
-          )}
-        </Show>
-      </ScopedPortal>
+      <MentionsMenu
+        editor={editor}
+        menu={state.mentionsMenuOps!}
+        useBlockBoundary={useBlockBoundary()}
+        portalScope={canvas.portalScope()}
+      />
+      <EmojiMenu
+        editor={editor}
+        menu={state.emojisMenuOps!}
+        useBlockBoundary={useBlockBoundary()}
+        portalScope={canvas.portalScope()}
+      />
+      <Show when={state.snippetsMenuOps}>
+        {(menu) => (
+          <SnippetsMenu
+            editor={editor}
+            menu={menu()}
+            useBlockBoundary={useBlockBoundary()}
+            portalScope={canvas.portalScope()}
+            sourceDocumentId={props.blockId}
+          />
+        )}
+      </Show>
       <DecoratorRenderer editor={editor} />
       <NodeAccessoryRenderer editor={editor} store={state.accessoryStore!} />
     </LexicalWrapperContext.Provider>
@@ -235,13 +238,14 @@ function TextBoxEditor(props: {
 }
 
 export function TextBox(props: { node: TextNode; mode: RenderMode }) {
-  const canEdit = useCanEdit();
+  const canvas = useCanvasDocument();
+  const canEdit = canvas.canEdit;
   const activeTool = useToolManager().activeTool;
   const history = useCanvasHistory();
   const selection = useSelection();
   const nodes = useCanvasNodes();
   const toolManager = useToolManager();
-  const blockId = useBlockId();
+  const blockId = canvas.documentId();
 
   const style = createMemo((): Partial<JSX.CSSProperties> => {
     return {

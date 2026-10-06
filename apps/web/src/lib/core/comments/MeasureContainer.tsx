@@ -6,6 +6,7 @@ import {
   type Ref,
   useContext,
 } from 'solid-js';
+import type { ThreadId } from './commentType';
 import { CommentsContext, threadMeasureContainerId } from './Thread';
 
 type MeasureContainerProps = {
@@ -14,7 +15,7 @@ type MeasureContainerProps = {
   top: number;
   ref?: Ref<HTMLDivElement>;
   maxHeight?: number;
-  threadId: number;
+  threadId: ThreadId;
   isActive: boolean;
   forceWidth?: number;
   transition?: boolean;
@@ -26,7 +27,7 @@ export const MeasureContainer = (props: ParentProps<MeasureContainerProps>) => {
   const { documentId, setActiveThread, setThreadHeight } =
     useContext(CommentsContext);
 
-  const setDomRect = (threadId: number, rect: DOMRect) => {
+  const setDomRect = (threadId: ThreadId, rect: DOMRect) => {
     if (rect.height === 0) return;
     setThreadHeight(threadId, rect.height);
   };
@@ -85,7 +86,7 @@ export const MeasureContainer = (props: ParentProps<MeasureContainerProps>) => {
         innerRef = el;
       }}
       classList={{
-        'transition-position duration-50': props.transition,
+        'transition-[left,right,top,bottom] duration-50': props.transition,
       }}
     >
       {props.children}

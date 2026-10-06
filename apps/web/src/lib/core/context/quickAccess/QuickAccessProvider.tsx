@@ -1,3 +1,4 @@
+import { DebugSuspense } from '@channel/DebugSuspense';
 import { createMemo, type FlowComponent } from 'solid-js';
 import { QuickAccessContextProvider } from './context';
 import { createQuickAccessValue } from './QuickAccessSource';
@@ -8,7 +9,7 @@ import type {
   QuickAccessListOptions,
 } from './types';
 
-export const QuickAccessProvider: FlowComponent = (props) => {
+const QuickAccessProviderValue: FlowComponent = (props) => {
   const source = createQuickAccessValue();
 
   const useList = ((
@@ -35,6 +36,7 @@ export const QuickAccessProvider: FlowComponent = (props) => {
   const quickAccess: QuickAccessContextValue = {
     useList,
     usesRecordSelection: source.usesRecordSelection,
+    usesSearchProjection: source.usesSearchProjection,
     isLoading: source.isLoading,
     refresh: source.refresh,
     getById: source.getById,
@@ -46,3 +48,9 @@ export const QuickAccessProvider: FlowComponent = (props) => {
     </QuickAccessContextProvider>
   );
 };
+
+export const QuickAccessProvider: FlowComponent = (props) => (
+  <DebugSuspense name="QuickAccess.root">
+    <QuickAccessProviderValue>{props.children}</QuickAccessProviderValue>
+  </DebugSuspense>
+);

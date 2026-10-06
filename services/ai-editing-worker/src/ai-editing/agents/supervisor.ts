@@ -1,31 +1,23 @@
 import { type Span, Telemetry } from '@macro-inc/observability';
 import { hasToolCall, stepCountIs, streamText } from 'ai';
-import type { ResolvedModels } from '../../run-edit';
+import type { SupervisedModels } from '../../run-edit';
 import type { LexicalSession } from '../ai-toolkit';
-import API_COMPACT from '../prompts/API_COMPACT.md';
-import INTERPRET from '../prompts/INTERPRET.md';
-import SHARED from '../prompts/SHARED.md';
-import SUPERVISOR from '../prompts/SUPERVISOR.md';
+import { INTERPRET_SYSTEM, SUPERVISOR_SYSTEM } from '../prompts';
 import { TokenTracker } from '../token-tracker';
 import { createDispatchTool, createImBlockedTool } from '../tools';
 import { numberLines, serializeWithXml } from '../utils';
 import { coder } from './coder';
+import { compactDocumentHistory } from './compact';
 import { interpreter } from './interpreter';
-import { EDIT_PROVIDER_OPTIONS } from './model-options';
+import { cachedPrompt, EDIT_PROVIDER_OPTIONS } from './model-options';
 import type { RunAgentOptions } from './types';
 
 export type { RunAgentOptions } from './types';
 
-// TODO(wolf): figure out if we want this. Leaving it off for now.
-const USE_COMPACT = false;
-
-const MASTER_SYSTEM = `${SHARED}\n${SUPERVISOR}${USE_COMPACT ? `\n${API_COMPACT}` : ''}`;
-const INTERPRET_SYSTEM = `${SHARED}\n${INTERPRET}`;
-
 export async function supervisor(
   session: LexicalSession,
   request: string,
-  models: ResolvedModels,
+  models: SupervisedModels,
   opts: RunAgentOptions
 ) {
   const serialize = (sess: LexicalSession) =>
@@ -87,6 +79,7 @@ export async function supervisor(
       sleep: opts.sleep,
       signal: opts.signal,
       makeWriter: opts.borrowWriter,
+      maxCoderSteps: opts.maxCoderSteps,
       runTask: coder,
       serialize,
       runner: opts.runner,
@@ -115,12 +108,12 @@ export async function supervisor(
     const result = streamText({
       model: models.supervisor,
       stopWhen: [stepCountIs(7), hasToolCall('reportBlocked')],
-      system: MASTER_SYSTEM,
-      prompt,
+      system: SUPERVISOR_SYSTEM,
+      messages: cachedPrompt(prompt),
       tools,
       providerOptions: EDIT_PROVIDER_OPTIONS,
       abortSignal: opts.signal,
-      prepareStep: ({ stepNumber }) => {
+      prepareStep: ({ stepNumber, messages }) => {
         // A step that throws mid-flight never reaches onStepFinish; close any
         // straggler so turns stay one-to-one with spans.
         endTurn();
@@ -128,7 +121,12 @@ export async function supervisor(
         turnSpan.setAttr('turn.index', stepNumber);
         turnSpan.setAttr('gen_ai.operation.name', 'chat');
         // require that the very first thing it does is a tool call
-        return stepNumber === 0 ? { toolChoice: 'required' } : undefined;
+        return {
+          ...(stepNumber === 0 ? { toolChoice: 'required' as const } : {}),
+          // Only the newest dispatch result describes the live document; older
+          // copies are stale and would be re-billed on every remaining step.
+          messages: compactDocumentHistory(messages),
+        };
       },
       onStepFinish: (step) => {
         const now = Date.now();

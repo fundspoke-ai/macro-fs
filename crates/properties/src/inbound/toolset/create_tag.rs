@@ -3,6 +3,7 @@
 use crate::domain::model::TagScope as DomainTagScope;
 use crate::domain::service::PropertiesService;
 use ai_toolset::{AsyncTool, RequestContext, ServiceContext, ToolCallError, ToolResult};
+use ai_toolset::{ToolAnnotated, ToolAnnotations};
 use async_trait::async_trait;
 use entity_access::domain::ports::EntityAccessService;
 use models_properties::api::{AddPropertyOptionRequest, AddStringOptionRequest};
@@ -12,8 +13,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::tag_color::TagColor;
 use super::{PropertiesToolContext, caller_team_receipt_opt};
+use crate::TagColor;
 
 fn default_tag_scope() -> TagScope {
     TagScope::Personal
@@ -59,6 +60,10 @@ pub struct CreateTagResponse {
     pub scope: TagScope,
     /// Human-readable summary.
     pub summary: String,
+}
+
+impl ToolAnnotated for CreateTag {
+    const ANNOTATIONS: ToolAnnotations = ToolAnnotations::additive("Create tag");
 }
 
 #[async_trait]

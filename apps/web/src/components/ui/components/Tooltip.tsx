@@ -1,12 +1,12 @@
 import type { HotkeyToken } from '@core/hotkey/tokens';
 import type { Placement } from '@floating-ui/dom';
 import { Tooltip as KobalteTooltip } from '@kobalte/core/tooltip';
-import { Surface } from '@ui';
 import type { ParentProps } from 'solid-js';
 import { createEffect, createSignal, For, on, onCleanup, Show } from 'solid-js';
 import { Hotkey } from '../../ui/components/Hotkey';
 import { tooltipsEnabled } from '../signals/signals';
 import { cn } from '../utils/classname';
+import { Surface } from './Surface';
 
 type TooltipProps = ParentProps<{
   hotkey?: HotkeyToken | HotkeyToken[];
@@ -19,8 +19,24 @@ type TooltipProps = ParentProps<{
   as?: 'div' | 'span';
   class?: string;
   label: string;
+  /** Allows non-interactive tooltip targets, such as disabled actions, to receive keyboard focus. */
+  tabIndex?: number;
   disabled?: boolean;
+  /** Override visibility, for example while a nested control has keyboard focus. */
+  open?: boolean;
 }>;
+
+export type TooltipClassOptions = {
+  class?: string;
+};
+
+/** Canonical classes for tooltip content and tooltip-like static hints. */
+export function tooltipClasses(options: TooltipClassOptions = {}): string {
+  return cn(
+    'flex items-center justify-center rounded-lg bg-tooltip p-2 text-xs text-ink-muted wrap-break-word',
+    options.class
+  );
+}
 
 /**
  * @example
@@ -31,6 +47,7 @@ type TooltipProps = ParentProps<{
 export function Tooltip(props: TooltipProps) {
   const [triggerRef, setTriggerRef] = createSignal<HTMLElement>();
   const [open, setOpen] = createSignal(false);
+  const isOpen = () => props.open ?? open();
 
   if (import.meta.env.MODE === 'test') {
     return <>{props.children}</>;
@@ -92,12 +109,13 @@ export function Tooltip(props: TooltipProps) {
   );
 
   onCleanup(() => setOpen(false));
+  const visible = () => isOpen() && !props.disabled && tooltipsEnabled();
 
   return (
     <KobalteTooltip
-      open={open()}
+      open={visible()}
       onOpenChange={(isOpen) => {
-        setOpen(isOpen);
+        setOpen(isOpen && !props.disabled && tooltipsEnabled());
       }}
       placement={props.placement ?? 'bottom'}
       ignoreSafeArea={true}
@@ -114,17 +132,15 @@ export function Tooltip(props: TooltipProps) {
           setTriggerRef(ref);
         }}
         class={cn('inline-flex items-center', props.class)}
+        tabIndex={props.tabIndex}
         as={props.as ?? 'div'}
       >
         {props.children}
       </KobalteTooltip.Trigger>
-      <Show when={open()}>
+      <Show when={visible()}>
         <KobalteTooltip.Portal>
           <KobalteTooltip.Content class="z-tool-tip max-w-[calc(100vw-32px)]">
-            <Surface
-              class="flex items-center justify-center p-2 text-ink-muted text-xs wrap-break-word"
-              depth={3}
-            >
+            <Surface class={tooltipClasses()} depth={3}>
               <div class="flex flex-row items-center gap-2">
                 <div class="text-xs">{props.label}</div>
                 <Show when={hasHotkey()}>

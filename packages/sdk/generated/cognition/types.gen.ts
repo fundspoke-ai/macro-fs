@@ -24,10 +24,25 @@ export type AddServerRequest = {
 };
 
 /**
+ * Public admission error payload. Handlers with additional fields can reuse the
+ * domain error's code and message and [`admission_status`].
+ */
+export type AiAdmissionErrorBody = {
+    /**
+     * Stable denial or unavailability code.
+     */
+    code: string;
+    /**
+     * Human-readable explanation, without internal billing diagnostics.
+     */
+    error: string;
+};
+
+/**
  * Everything we use AI for. The wire / DB form of each variant is its
  * `snake_case` name.
  */
-export type AiFeature = 'chat' | 'memory' | 'automation' | 'dynamic_completions_api' | 'chat_rename' | 'call_summary' | 'channel_bot' | 'ai_projection' | 'ai_editing' | 'import';
+export type AiFeature = 'chat' | 'memory' | 'automation' | 'dynamic_completions_api' | 'chat_rename' | 'call_summary' | 'channel_bot' | 'ai_projection' | 'ai_editing' | 'import' | 'agent_session' | 'agent_repository_choice' | 'dictation' | 'image_generation';
 
 /**
  * A structured part within an assistant message.
@@ -293,6 +308,10 @@ export type ChatMessageContent = string | Array<AssistantMessagePart>;
  * Error response for chat message endpoints
  */
 export type ChatMessageError = {
+    /**
+     * Stable machine-readable code for admission errors (402 or 503).
+     */
+    code?: string | null;
     error: string;
     stream_id?: string | null;
 };
@@ -400,24 +419,23 @@ export type CompleteOnboardingRequest = {
 };
 
 /**
- * A recorded completion: who, what feature, optional entity, and the cost.
+ * User and feature attribution for one invocation.
  */
 export type CompletionUsage = {
     /**
-     * Token usage and cost.
+     * Measured usage and resolved cost.
      */
     cost: Usage;
     /**
-     * The entity the completion related to, if any.
+     * Related entity, if any.
      */
     entity?: string | null;
     /**
-     * The feature that performed the completion.
+     * Feature that performed the invocation.
      */
     feature: AiFeature;
     /**
-     * The user the completion was performed for (the [system user](SYSTEM_USER_ID)
-     * for background work).
+     * User the invocation was performed for.
      */
     user: MacroUserIdStr;
 };
@@ -458,6 +476,18 @@ export type CreateChatRequest = {
      * Optional project to associate the chat with.
      */
     projectId?: string | null;
+};
+
+/**
+ * What a successful tool call committed to the user's databases.
+ */
+export type DatabaseChange = {
+    kind: 'none';
+} | {
+    kind: 'schema';
+} | {
+    count: number;
+    kind: 'rows';
 };
 
 export type DocumentCognitionServiceApiVersion = 'v1' | 'v2';
@@ -508,7 +538,7 @@ export type Entity = {
 /**
  * The type of an entity in Macro
  */
-export type EntityType = 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill';
+export type EntityType = 'user' | 'chat' | 'channel' | 'channel_message' | 'document' | 'project' | 'email_thread' | 'calendar_event' | 'team' | 'call' | 'foreign_entity' | 'static_file' | 'crm_company' | 'crm_contact' | 'reminder' | 'skill' | 'agent_session' | 'scheduled_action' | 'initiative' | 'database' | 'database_row';
 
 /**
  * Error response body.
@@ -537,19 +567,19 @@ export type ErrorResponse = {
 export type Expiry = 'day' | 'week' | 'month';
 
 /**
- * Usage for a single feature, with its rolled-up dollar total.
+ * Recorded invocations and total for one feature.
  */
 export type FeatureUsage = {
     /**
-     * The individual completions recorded for this feature.
+     * Recorded invocations.
      */
     entries: Array<CompletionUsage>;
     /**
-     * The feature.
+     * Feature attribution.
      */
     feature: AiFeature;
     /**
-     * Total cost across `entries` (USD).
+     * Total cost (USD).
      */
     total: number;
 };
@@ -570,7 +600,7 @@ export type FeatureUsage = {
  * - ContentType::mime_type() - Gets MIME type for ContentType
  *
  */
-export type FileType = 'docx' | 'pdf' | 'md' | 'canvas' | 'coffee' | 'cson' | 'iced' | 'c' | 'i' | 'cpp' | 'cppm' | 'cc' | 'ccm' | 'cxx' | 'cxxm' | 'cplusplus' | 'cplusplusm' | 'hpp' | 'hh' | 'hxx' | 'hplusplus' | 'h' | 'ii' | 'ino' | 'inl' | 'ipp' | 'ixx' | 'tpp' | 'txx' | 'hppin' | 'hin' | 'cu' | 'cuh' | 'cs' | 'csx' | 'cake' | 'css' | 'dart' | 'diff' | 'patch' | 'rej' | 'dockerfile' | 'containerfile' | 'go' | 'handlebars' | 'hbs' | 'hjs' | 'hlsl' | 'hlsli' | 'fx' | 'fxh' | 'vsh' | 'psh' | 'cginc' | 'compute' | 'html' | 'htm' | 'shtml' | 'xhtml' | 'xht' | 'mdoc' | 'jsp' | 'asp' | 'aspx' | 'jshtm' | 'volt' | 'ejs' | 'rhtml' | 'ini' | 'conf' | 'properties' | 'cfg' | 'directory' | 'gitattributes' | 'gitconfig' | 'gitmodules' | 'editorconfig' | 'repo' | 'java' | 'jav' | 'jsx' | 'js' | 'es6' | 'mjs' | 'cjs' | 'pac' | 'json' | 'bowerrc' | 'jscsrc' | 'webmanifest' | 'jsmap' | 'cssmap' | 'tsmap' | 'har' | 'jslintrc' | 'jsonld' | 'geojson' | 'ipynb' | 'vuerc' | 'jsonc' | 'eslintrc' | 'eslintrcjson' | 'jsfmtrc' | 'jshintrc' | 'swcrc' | 'hintrc' | 'babelrc' | 'jsonl' | 'ndjson' | 'codesnippets' | 'jl' | 'jmd' | 'sty' | 'cls' | 'bbx' | 'cbx' | 'tex' | 'ltx' | 'ctx' | 'bib' | 'less' | 'log' | 'lua' | 'mak' | 'mk' | 'mkd' | 'mdwn' | 'mdown' | 'markdown' | 'markdn' | 'mdtxt' | 'mdtext' | 'workbook' | 'm' | 'mm' | 'pl' | 'pm' | 'pod' | 't' | 'psgi' | 'raku' | 'rakumod' | 'rakutest' | 'rakudoc' | 'nqp' | 'p6' | 'pl6' | 'pm6' | 'php' | 'php4' | 'php5' | 'phtml' | 'ctp' | 'ps1' | 'psm1' | 'psd1' | 'pssc' | 'psrc' | 'py' | 'rpy' | 'pyw' | 'cpy' | 'gyp' | 'gypi' | 'pyi' | 'ipy' | 'pyt' | 'r' | 'rhistory' | 'rprofile' | 'rt' | 'cshtml' | 'razor' | 'rb' | 'rbx' | 'rjs' | 'gemspec' | 'rake' | 'ru' | 'erb' | 'podspec' | 'rbi' | 'rs' | 'scss' | 'sass' | 'shader' | 'sh' | 'bash' | 'bashrc' | 'bashaliases' | 'bashprofile' | 'bashlogin' | 'ebuild' | 'eclass' | 'profile' | 'bashlogout' | 'xprofile' | 'xsession' | 'xsessionrc' | 'zsh' | 'zshrc' | 'zprofile' | 'zlogin' | 'zlogout' | 'zshenv' | 'zshtheme' | 'fish' | 'ksh' | 'csh' | 'cshrc' | 'tcshrc' | 'yashrc' | 'yashprofile' | 'sql' | 'dsql' | 'swift' | 'ts' | 'cts' | 'mts' | 'tsx' | 'tsbuildinfo' | 'xml' | 'xsd' | 'ascx' | 'atom' | 'axml' | 'axaml' | 'bpmn' | 'cpt' | 'csl' | 'csproj' | 'csprojuser' | 'dita' | 'ditamap' | 'dtd' | 'ent' | 'mod' | 'dtml' | 'fsproj' | 'fxml' | 'iml' | 'isml' | 'jmx' | 'launch' | 'menu' | 'mxml' | 'nuspec' | 'opml' | 'owl' | 'proj' | 'props' | 'pt' | 'publishsettings' | 'pubxml' | 'pubxmluser' | 'rbxlx' | 'rbxmx' | 'rdf' | 'rng' | 'rss' | 'shproj' | 'storyboard' | 'targets' | 'tld' | 'tmx' | 'vbproj' | 'vbprojuser' | 'vcxproj' | 'vcxprojfilters' | 'wsdl' | 'wxi' | 'wxl' | 'wxs' | 'xaml' | 'xbl' | 'xib' | 'xlf' | 'xliff' | 'xpdl' | 'xul' | 'xoml' | 'xsl' | 'xslt' | 'yaml' | 'yml' | 'eyaml' | 'eyml' | 'cff' | 'yamltmlanguage' | 'yamltmpreferences' | 'yamltmtheme' | 'winget' | 'txt' | 'csv' | 'tsv' | 'jpeg' | 'jpg' | 'png' | 'gif' | 'svg' | 'webp' | 'avif' | 'bmp' | 'ico' | 'tiff' | 'tif' | 'heic' | 'heif' | 'tar' | 'targz' | 'tgz' | 'gz' | 'bz2' | 'tarbz2' | 'tbz2' | 'z' | 'tarz' | 'lz' | 'tarlz' | 'xz' | 'tarxz' | 'txz' | 'lzma' | 'tarlzma' | 'rar' | 'sevenz' | 'zst' | 'tarzst' | 'tzst' | 'zip' | 'exe' | 'msi' | 'dll' | 'bat' | 'cmd' | 'com' | 'appimage' | 'app' | 'bin' | 'deb' | 'rpm' | 'apk' | 'dmg' | 'pkg' | 'crx' | 'xpi' | 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' | 'm4a' | 'wma' | 'mid' | 'midi' | 'mp4' | 'mkv' | 'webm' | 'avi' | 'mov' | 'wmv' | 'mpg' | 'mpeg' | 'm4v' | 'flv' | 'f4v' | 'threegp' | 'ttf' | 'otf' | 'woff' | 'woff2' | 'eot' | 'rtf' | 'odt' | 'ods' | 'odp' | 'odg' | 'odf' | 'epub' | 'mobi' | 'azw' | 'azw3' | 'djvu' | 'xls' | 'ppt' | 'pptx' | 'xlsx' | 'db' | 'sqlite' | 'sqlite3' | 'mdb' | 'accdb' | 'dbf' | 'plist' | 'toml' | 'env' | 'dot' | 'gv' | 'torrent' | 'ics' | 'vcf' | 'ai' | 'eps' | 'ps' | 'dxf' | 'dwg' | 'stl' | 'obj' | 'fbx' | 'blend' | 'dae' | 'threeds' | 'gltf' | 'glb' | 'vhd' | 'vhdx' | 'vmdk' | 'ova' | 'ovf' | 'iso' | 'img' | 'swf';
+export type FileType = 'docx' | 'pdf' | 'md' | 'spreadsheet' | 'canvas' | 'coffee' | 'cson' | 'iced' | 'c' | 'i' | 'cpp' | 'cppm' | 'cc' | 'ccm' | 'cxx' | 'cxxm' | 'cplusplus' | 'cplusplusm' | 'hpp' | 'hh' | 'hxx' | 'hplusplus' | 'h' | 'ii' | 'ino' | 'inl' | 'ipp' | 'ixx' | 'tpp' | 'txx' | 'hppin' | 'hin' | 'cu' | 'cuh' | 'cs' | 'csx' | 'cake' | 'css' | 'dart' | 'diff' | 'patch' | 'rej' | 'dockerfile' | 'containerfile' | 'go' | 'handlebars' | 'hbs' | 'hjs' | 'hlsl' | 'hlsli' | 'fx' | 'fxh' | 'vsh' | 'psh' | 'cginc' | 'compute' | 'html' | 'htm' | 'shtml' | 'xhtml' | 'xht' | 'mdoc' | 'jsp' | 'asp' | 'aspx' | 'jshtm' | 'volt' | 'ejs' | 'rhtml' | 'ini' | 'conf' | 'properties' | 'cfg' | 'directory' | 'gitattributes' | 'gitconfig' | 'gitmodules' | 'editorconfig' | 'repo' | 'java' | 'jav' | 'jsx' | 'js' | 'es6' | 'mjs' | 'cjs' | 'pac' | 'json' | 'bowerrc' | 'jscsrc' | 'webmanifest' | 'jsmap' | 'cssmap' | 'tsmap' | 'har' | 'jslintrc' | 'jsonld' | 'geojson' | 'ipynb' | 'vuerc' | 'jsonc' | 'eslintrc' | 'eslintrcjson' | 'jsfmtrc' | 'jshintrc' | 'swcrc' | 'hintrc' | 'babelrc' | 'jsonl' | 'ndjson' | 'codesnippets' | 'jl' | 'jmd' | 'sty' | 'cls' | 'bbx' | 'cbx' | 'tex' | 'ltx' | 'ctx' | 'bib' | 'less' | 'log' | 'lua' | 'mak' | 'mk' | 'mkd' | 'mdwn' | 'mdown' | 'markdown' | 'markdn' | 'mdtxt' | 'mdtext' | 'workbook' | 'm' | 'mm' | 'pl' | 'pm' | 'pod' | 't' | 'psgi' | 'raku' | 'rakumod' | 'rakutest' | 'rakudoc' | 'nqp' | 'p6' | 'pl6' | 'pm6' | 'php' | 'php4' | 'php5' | 'phtml' | 'ctp' | 'ps1' | 'psm1' | 'psd1' | 'pssc' | 'psrc' | 'py' | 'rpy' | 'pyw' | 'cpy' | 'gyp' | 'gypi' | 'pyi' | 'ipy' | 'pyt' | 'r' | 'rhistory' | 'rprofile' | 'rt' | 'cshtml' | 'razor' | 'rb' | 'rbx' | 'rjs' | 'gemspec' | 'rake' | 'ru' | 'erb' | 'podspec' | 'rbi' | 'rs' | 'scss' | 'sass' | 'shader' | 'sh' | 'bash' | 'bashrc' | 'bashaliases' | 'bashprofile' | 'bashlogin' | 'ebuild' | 'eclass' | 'profile' | 'bashlogout' | 'xprofile' | 'xsession' | 'xsessionrc' | 'zsh' | 'zshrc' | 'zprofile' | 'zlogin' | 'zlogout' | 'zshenv' | 'zshtheme' | 'fish' | 'ksh' | 'csh' | 'cshrc' | 'tcshrc' | 'yashrc' | 'yashprofile' | 'sql' | 'dsql' | 'swift' | 'ts' | 'cts' | 'mts' | 'tsx' | 'tsbuildinfo' | 'xml' | 'xsd' | 'ascx' | 'atom' | 'axml' | 'axaml' | 'bpmn' | 'cpt' | 'csl' | 'csproj' | 'csprojuser' | 'dita' | 'ditamap' | 'dtd' | 'ent' | 'mod' | 'dtml' | 'fsproj' | 'fxml' | 'iml' | 'isml' | 'jmx' | 'launch' | 'menu' | 'mxml' | 'nuspec' | 'opml' | 'owl' | 'proj' | 'props' | 'pt' | 'publishsettings' | 'pubxml' | 'pubxmluser' | 'rbxlx' | 'rbxmx' | 'rdf' | 'rng' | 'rss' | 'shproj' | 'storyboard' | 'targets' | 'tld' | 'tmx' | 'vbproj' | 'vbprojuser' | 'vcxproj' | 'vcxprojfilters' | 'wsdl' | 'wxi' | 'wxl' | 'wxs' | 'xaml' | 'xbl' | 'xib' | 'xlf' | 'xliff' | 'xpdl' | 'xul' | 'xoml' | 'xsl' | 'xslt' | 'yaml' | 'yml' | 'eyaml' | 'eyml' | 'cff' | 'yamltmlanguage' | 'yamltmpreferences' | 'yamltmtheme' | 'winget' | 'txt' | 'csv' | 'tsv' | 'jpeg' | 'jpg' | 'png' | 'gif' | 'svg' | 'webp' | 'avif' | 'bmp' | 'ico' | 'tiff' | 'tif' | 'heic' | 'heif' | 'tar' | 'targz' | 'tgz' | 'gz' | 'bz2' | 'tarbz2' | 'tbz2' | 'z' | 'tarz' | 'lz' | 'tarlz' | 'xz' | 'tarxz' | 'txz' | 'lzma' | 'tarlzma' | 'rar' | 'sevenz' | 'zst' | 'tarzst' | 'tzst' | 'zip' | 'exe' | 'msi' | 'dll' | 'bat' | 'cmd' | 'com' | 'appimage' | 'app' | 'bin' | 'deb' | 'rpm' | 'apk' | 'dmg' | 'pkg' | 'crx' | 'xpi' | 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' | 'm4a' | 'wma' | 'mid' | 'midi' | 'mp4' | 'mkv' | 'webm' | 'avi' | 'mov' | 'wmv' | 'mpg' | 'mpeg' | 'm4v' | 'flv' | 'f4v' | 'threegp' | 'ttf' | 'otf' | 'woff' | 'woff2' | 'eot' | 'rtf' | 'odt' | 'ods' | 'odp' | 'odg' | 'odf' | 'epub' | 'mobi' | 'azw' | 'azw3' | 'djvu' | 'xls' | 'ppt' | 'pptx' | 'xlsx' | 'db' | 'sqlite' | 'sqlite3' | 'mdb' | 'accdb' | 'dbf' | 'plist' | 'toml' | 'env' | 'dot' | 'gv' | 'torrent' | 'ics' | 'vcf' | 'ai' | 'eps' | 'ps' | 'dxf' | 'dwg' | 'fig' | 'psd' | 'psb' | 'stl' | 'obj' | 'fbx' | 'blend' | 'dae' | 'threeds' | 'gltf' | 'glb' | 'vhd' | 'vhdx' | 'vmdk' | 'ova' | 'ovf' | 'iso' | 'img' | 'swf';
 
 export type GenericErrorResponse = {
     /**
@@ -769,7 +799,7 @@ export type ImportStatus = 'staged' | 'importing' | 'imported' | 'discarded';
  * Where an import entity was first staged from. Provenance only — never a
  * visibility filter.
  */
-export type Initiator = 'onboarding' | 'chat';
+export type Initiator = 'onboarding' | 'chat' | 'archive' | 'manual';
 
 export type JwtPayload = {
     token: string;
@@ -816,6 +846,11 @@ export type LinearIssueMeta = {
      */
     url?: string | null;
 };
+
+/**
+ * Defines who can access an item through its share link.
+ */
+export type LinkShare = 'PUBLIC' | 'TEAM';
 
 export type MacroUserIdStr = string;
 
@@ -963,19 +998,138 @@ export type PatchChatRequest = {
 };
 
 /**
- * Resolved price for one completion.
+ * One connectable app in the catalog.
+ */
+export type PipedreamCatalogEntryResponse = {
+    /**
+     * Pipedream app name slug — pass this to the connect flow.
+     */
+    app_slug: string;
+    /**
+     * One-line description of the app.
+     */
+    description?: string | null;
+    /**
+     * Human-readable name to display.
+     */
+    display_name: string;
+    /**
+     * URL of the app's icon, when available.
+     */
+    icon_url?: string | null;
+};
+
+/**
+ * A page of the connector catalog.
+ */
+export type PipedreamCatalogResponse = {
+    /**
+     * Cursor for the next page. Absent on the last page.
+     */
+    next_cursor?: string | null;
+    /**
+     * Catalog entries in display order (most popular first).
+     */
+    servers: Array<PipedreamCatalogEntryResponse>;
+};
+
+/**
+ * Request body for completing a Pipedream connect flow.
+ */
+export type PipedreamCompleteRequest = {
+    /**
+     * The connected-account ID reported by the Connect UI on success.
+     */
+    account_id: string;
+    /**
+     * Optional display name for the connector. Defaults to the app's name
+     * for new connections; existing connections keep their name.
+     */
+    server_name?: string | null;
+};
+
+/**
+ * A connected MCP app as returned by the API.
+ */
+export type PipedreamConnectionResponse = {
+    /**
+     * Pipedream app name slug, e.g. `linear`.
+     */
+    app_slug: string;
+    /**
+     * Whether the connector is enabled for tool use.
+     */
+    enabled: boolean;
+    /**
+     * Human-readable display name.
+     */
+    server_name: string;
+};
+
+/**
+ * Response from creating a Pipedream Connect token.
+ */
+export type PipedreamTokenResponse = {
+    /**
+     * Shareable link that opens the same connect flow in a browser tab.
+     */
+    connect_link_url: string;
+    /**
+     * RFC 3339 expiry of the token.
+     */
+    expires_at: string;
+    /**
+     * Short-lived token to open the Pipedream Connect UI with.
+     */
+    token: string;
+};
+
+/**
+ * Request body for updating a connected app.
+ */
+export type PipedreamUpdateRequest = {
+    /**
+     * The app slug to update.
+     */
+    app_slug: string;
+    /**
+     * Enable or disable the connector.
+     */
+    enabled?: boolean | null;
+    /**
+     * New display name for the connector.
+     */
+    server_name?: string | null;
+};
+
+/**
+ * Rates applied to an invocation and its resolved dollar cost.
  */
 export type Price = {
     /**
-     * Price per million input tokens (USD).
+     * Price per audio minute (USD), absent for token billing.
+     */
+    price_per_audio_minute?: number | null;
+    /**
+     * Price per million cache-read input tokens (USD), absent when the model
+     * has no published rate and for audio billing.
+     */
+    price_per_million_cache_read?: number | null;
+    /**
+     * Price per million cache-write input tokens (USD), absent when the model
+     * has no published rate and for audio billing.
+     */
+    price_per_million_cache_write?: number | null;
+    /**
+     * Price per million input tokens (USD); zero for audio billing.
      */
     price_per_million_in: number;
     /**
-     * Price per million output tokens (USD).
+     * Price per million output tokens (USD); zero for audio billing.
      */
     price_per_million_out: number;
     /**
-     * Total cost of the completion (USD).
+     * Total cost (USD).
      */
     total: number;
 };
@@ -1153,13 +1307,27 @@ export type SetPricingRequest = {
      */
     model: string;
     /**
-     * New price per million input tokens (USD).
+     * Price per minute of audio (USD), or null for token-only pricing.
      */
-    price_per_mil_in: number;
+    price_per_audio_minute?: number | null;
     /**
-     * New price per million output tokens (USD).
+     * Price per million cache-read input tokens (USD). Omit it when the model
+     * has no published rate: calls that report cache reads then stay unpriced.
      */
-    price_per_mil_out: number;
+    price_per_mil_cache_read?: number | null;
+    /**
+     * Price per million cache-write input tokens (USD). Omit it when the model
+     * has no published rate: calls that report cache writes then stay unpriced.
+     */
+    price_per_mil_cache_write?: number | null;
+    /**
+     * New price per million input tokens (USD). Required for token pricing.
+     */
+    price_per_mil_in?: number | null;
+    /**
+     * New price per million output tokens (USD). Required for token pricing.
+     */
+    price_per_mil_out?: number | null;
 };
 
 export type SharePermissionV2 = {
@@ -1171,15 +1339,13 @@ export type SharePermissionV2 = {
      * The share permission id
      */
     id: string;
-    /**
-     * If the item is publicly accessible
-     */
-    isPublic: boolean;
+    linkShare?: null | LinkShare;
+    linkShareAccessLevel?: null | AccessLevel;
     /**
      * The owner of the item
      */
     owner: string;
-    publicAccessLevel?: null | AccessLevel;
+    teamShareAccessLevel?: null | AccessLevel;
 };
 
 /**
@@ -1187,15 +1353,27 @@ export type SharePermissionV2 = {
  */
 export type SlackChannelMeta = {
     /**
+     * Whether Slack has archived this channel.
+     */
+    archived?: boolean;
+    /**
      * Slack's channel id (e.g. `C0123456789`), stable across renames.
      */
     channel_id?: string | null;
+    /**
+     * Total human members in the Slack channel.
+     */
+    member_count?: number | null;
+    /**
+     * Whether `participants` reflects a live membership read.
+     */
+    members_resolved?: boolean;
     /**
      * Channel name without the leading `#`.
      */
     name: string;
     /**
-     * The channel's most relevant members, when discoverable.
+     * Slack members matched to the Macro team roster when discovery resolved membership.
      */
     participants?: Array<SlackParticipant>;
     /**
@@ -1295,7 +1473,19 @@ export type StringIdResponse = {
 };
 
 export type StructuredCompletionError = {
+    /**
+     * Stable machine-readable code for admission errors (402 or 503).
+     */
+    code?: string | null;
     error: string;
+};
+
+export type StructuredCompletionOutcome = {
+    result: unknown;
+    status: 'completed';
+} | {
+    reason: string;
+    status: 'interrupted';
 };
 
 export type StructuredCompletionRequest = {
@@ -1307,7 +1497,19 @@ export type StructuredCompletionRequest = {
 };
 
 export type StructuredCompletionResponse = {
-    result: unknown;
+    outcome: StructuredCompletionOutcome;
+    /**
+     * Actual completed tools, independent of the model's claims.
+     */
+    toolActivity: Array<StructuredToolActivity>;
+};
+
+/**
+ * One tool call the agent finished, and what it did.
+ */
+export type StructuredToolActivity = {
+    name: string;
+    outcome: ToolOutcome;
 };
 
 /**
@@ -1315,10 +1517,21 @@ export type StructuredCompletionResponse = {
  */
 export type TargetType = 'user' | 'team';
 
+export type ToolOutcome = {
+    changes: DatabaseChange;
+    status: 'succeeded';
+} | {
+    status: 'failed';
+};
+
 export type ToolSet = {
     type: 'all';
 } | {
     type: 'none';
+} | {
+    type: 'databases';
+} | {
+    type: 'databases_read_only';
 };
 
 export type UpdateChannelSharePermission = {
@@ -1359,11 +1572,9 @@ export type UpdateSharePermissionRequestV2 = {
      * Any channel share permissions to be created/updated/removed
      */
     channelSharePermissions?: Array<UpdateChannelSharePermission> | null;
-    /**
-     * If the item is publicly accessible
-     */
-    isPublic?: boolean | null;
-    publicAccessLevel?: null | AccessLevel;
+    linkShare?: null | LinkShare;
+    linkShareAccessLevel?: null | AccessLevel;
+    teamShareAccessLevel?: null | AccessLevel;
 };
 
 /**
@@ -1454,23 +1665,35 @@ export type UpsertProjectionRequest = {
 };
 
 /**
- * The token usage and resolved cost of a single completion.
+ * Measured usage for one invocation.
  */
 export type Usage = {
     /**
-     * When the completion was recorded.
+     * Audio duration in seconds, absent for token billing.
+     */
+    audio_seconds?: number | null;
+    /**
+     * Input tokens read from a prompt cache; zero for audio billing.
+     */
+    cache_read_input_tokens: number;
+    /**
+     * Input tokens written to a prompt cache; zero for audio billing.
+     */
+    cache_write_input_tokens: number;
+    /**
+     * Recording timestamp.
      */
     created_at: string;
     /**
-     * Tokens consumed by the input.
+     * Uncached input tokens; zero for audio billing.
      */
     input_tokens: number;
     /**
-     * The model api id (e.g. `claude-opus-4-8`).
+     * Provider model identifier.
      */
     model: string;
     /**
-     * Tokens generated in the output.
+     * Output tokens; zero for audio billing.
      */
     output_tokens: number;
     price?: null | Price;
@@ -1499,7 +1722,7 @@ export type UsageRequest = {
 };
 
 /**
- * The result of a usage query: per-feature breakdown plus a grand total.
+ * Per-feature breakdown and grand total.
  */
 export type UsageSummary = {
     /**
@@ -1507,7 +1730,7 @@ export type UsageSummary = {
      */
     entries: Array<FeatureUsage>;
     /**
-     * Grand total cost across all features (USD).
+     * Grand total (USD).
      */
     total: number;
 };
@@ -1571,6 +1794,10 @@ export type SetPricingHandlerData = {
 };
 
 export type SetPricingHandlerErrors = {
+    /**
+     * Invalid pricing
+     */
+    400: ErrorBody;
     /**
      * Admin access required
      */
@@ -1748,6 +1975,7 @@ export type CreateChatData = {
 
 export type CreateChatErrors = {
     401: string;
+    403: string;
     500: string;
 };
 
@@ -2110,6 +2338,38 @@ export type RunImportHandlerResponses = {
 
 export type RunImportHandlerResponse = RunImportHandlerResponses[keyof RunImportHandlerResponses];
 
+export type DiscoverHandlerData = {
+    body?: never;
+    path: {
+        /**
+         * Import source
+         */
+        source: string;
+    };
+    query?: never;
+    url: '/import/runs/{source}/discover';
+};
+
+export type DiscoverHandlerErrors = {
+    /**
+     * Unknown import source or discovery not supported
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type DiscoverHandlerResponses = {
+    /**
+     * Discovery accepted (idempotent)
+     */
+    204: void;
+};
+
+export type DiscoverHandlerResponse = DiscoverHandlerResponses[keyof DiscoverHandlerResponses];
+
 export type DismissRunHandlerData = {
     body?: never;
     path: {
@@ -2160,10 +2420,20 @@ export type RetryGatherHandlerErrors = {
      */
     400: unknown;
     /**
+     * AI allowance exhausted
+     */
+    402: AiAdmissionErrorBody;
+    /**
      * Internal server error
      */
     500: unknown;
+    /**
+     * AI usage validation unavailable; retry later
+     */
+    503: AiAdmissionErrorBody;
 };
+
+export type RetryGatherHandlerError = RetryGatherHandlerErrors[keyof RetryGatherHandlerErrors];
 
 export type RetryGatherHandlerResponses = {
     /**
@@ -2433,6 +2703,149 @@ export type CompleteHandlerResponses = {
 
 export type CompleteHandlerResponse = CompleteHandlerResponses[keyof CompleteHandlerResponses];
 
+export type BrowsePipedreamMcpCatalogData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Search query to filter apps by name. Omit to browse.
+         */
+        search?: string;
+        /**
+         * Opaque pagination cursor from a previous response.
+         */
+        cursor?: string;
+        /**
+         * Page size (default 20, max 50).
+         */
+        limit?: number;
+    };
+    url: '/pipedream/mcp/catalog';
+};
+
+export type BrowsePipedreamMcpCatalogErrors = {
+    401: string;
+    500: ErrorResponse;
+    501: ErrorResponse;
+};
+
+export type BrowsePipedreamMcpCatalogError = BrowsePipedreamMcpCatalogErrors[keyof BrowsePipedreamMcpCatalogErrors];
+
+export type BrowsePipedreamMcpCatalogResponses = {
+    200: PipedreamCatalogResponse;
+};
+
+export type BrowsePipedreamMcpCatalogResponse = BrowsePipedreamMcpCatalogResponses[keyof BrowsePipedreamMcpCatalogResponses];
+
+export type CompletePipedreamMcpConnectionData = {
+    body: PipedreamCompleteRequest;
+    path?: never;
+    query?: never;
+    url: '/pipedream/mcp/complete';
+};
+
+export type CompletePipedreamMcpConnectionErrors = {
+    401: string;
+    404: ErrorResponse;
+    500: ErrorResponse;
+    501: ErrorResponse;
+};
+
+export type CompletePipedreamMcpConnectionError = CompletePipedreamMcpConnectionErrors[keyof CompletePipedreamMcpConnectionErrors];
+
+export type CompletePipedreamMcpConnectionResponses = {
+    200: PipedreamConnectionResponse;
+};
+
+export type CompletePipedreamMcpConnectionResponse = CompletePipedreamMcpConnectionResponses[keyof CompletePipedreamMcpConnectionResponses];
+
+export type DeletePipedreamMcpConnectionData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * The app slug to disconnect.
+         */
+        app_slug: string;
+    };
+    url: '/pipedream/mcp/connections';
+};
+
+export type DeletePipedreamMcpConnectionErrors = {
+    401: string;
+    500: ErrorResponse;
+};
+
+export type DeletePipedreamMcpConnectionError = DeletePipedreamMcpConnectionErrors[keyof DeletePipedreamMcpConnectionErrors];
+
+export type DeletePipedreamMcpConnectionResponses = {
+    204: void;
+};
+
+export type DeletePipedreamMcpConnectionResponse = DeletePipedreamMcpConnectionResponses[keyof DeletePipedreamMcpConnectionResponses];
+
+export type ListPipedreamMcpConnectionsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/pipedream/mcp/connections';
+};
+
+export type ListPipedreamMcpConnectionsErrors = {
+    401: string;
+    500: ErrorResponse;
+};
+
+export type ListPipedreamMcpConnectionsError = ListPipedreamMcpConnectionsErrors[keyof ListPipedreamMcpConnectionsErrors];
+
+export type ListPipedreamMcpConnectionsResponses = {
+    200: Array<PipedreamConnectionResponse>;
+};
+
+export type ListPipedreamMcpConnectionsResponse = ListPipedreamMcpConnectionsResponses[keyof ListPipedreamMcpConnectionsResponses];
+
+export type UpdatePipedreamMcpConnectionData = {
+    body: PipedreamUpdateRequest;
+    path?: never;
+    query?: never;
+    url: '/pipedream/mcp/connections';
+};
+
+export type UpdatePipedreamMcpConnectionErrors = {
+    401: string;
+    404: ErrorResponse;
+    500: ErrorResponse;
+};
+
+export type UpdatePipedreamMcpConnectionError = UpdatePipedreamMcpConnectionErrors[keyof UpdatePipedreamMcpConnectionErrors];
+
+export type UpdatePipedreamMcpConnectionResponses = {
+    200: PipedreamConnectionResponse;
+};
+
+export type UpdatePipedreamMcpConnectionResponse = UpdatePipedreamMcpConnectionResponses[keyof UpdatePipedreamMcpConnectionResponses];
+
+export type CreatePipedreamMcpTokenData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/pipedream/mcp/token';
+};
+
+export type CreatePipedreamMcpTokenErrors = {
+    401: string;
+    500: ErrorResponse;
+    501: ErrorResponse;
+};
+
+export type CreatePipedreamMcpTokenError = CreatePipedreamMcpTokenErrors[keyof CreatePipedreamMcpTokenErrors];
+
+export type CreatePipedreamMcpTokenResponses = {
+    200: PipedreamTokenResponse;
+};
+
+export type CreatePipedreamMcpTokenResponse = CreatePipedreamMcpTokenResponses[keyof CreatePipedreamMcpTokenResponses];
+
 export type GetBatchPreviewData = {
     body: GetBatchPreviewRequest;
     path?: never;
@@ -2470,13 +2883,17 @@ export type SendChatMessageErrors = {
      */
     401: unknown;
     /**
-     * Payment required — user lacks access to the requested model
+     * Payment required — the user's AI allowance is used up
      */
-    402: unknown;
+    402: ChatMessageError;
     /**
-     * Forbidden
+     * Forbidden — user lacks access to the requested model
      */
-    403: unknown;
+    403: ChatMessageError;
+    /**
+     * AI usage validation unavailable — retry later
+     */
+    503: ChatMessageError;
 };
 
 export type SendChatMessageError = SendChatMessageErrors[keyof SendChatMessageErrors];
@@ -2534,11 +2951,19 @@ export type StructuredCompletionErrors = {
     /**
      * Payment required
      */
-    402: unknown;
+    402: StructuredCompletionError;
+    /**
+     * No access to the requested model
+     */
+    403: StructuredCompletionError;
     /**
      * Internal error
      */
     500: StructuredCompletionError;
+    /**
+     * AI usage validation unavailable — retry later
+     */
+    503: StructuredCompletionError;
 };
 
 export type StructuredCompletionError2 = StructuredCompletionErrors[keyof StructuredCompletionErrors];

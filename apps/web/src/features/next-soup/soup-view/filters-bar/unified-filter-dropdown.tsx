@@ -3,7 +3,6 @@ import { isListViewID, TAGGABLE_LIST_VIEWS } from '@app/constants/list-views';
 import {
   type FilterContext,
   NO_ASSIGNEE,
-  NO_STAGE,
 } from '@app/features/next-soup/filters/configs/';
 import {
   buildDocumentTypeQuery,
@@ -21,40 +20,27 @@ import {
   type ReadFilter,
   useSoupView,
 } from '@app/features/next-soup/soup-view/soup-view-context';
-import { useFeatureFlag } from '@app/lib/analytics/posthog';
-import { useDealStages } from '@companies/crm/deal-stages';
-import { CrmStageIcon } from '@companies/crm/StageIcon';
 import { useSplitPanelOrThrow } from '@components/app/split-layout/layoutUtils';
 import { EntityIcon } from '@core/component/EntityIcon';
 import { UserIcon } from '@core/component/UserIcon';
-import {
-  ENABLE_NEW_INBOX_FLAG,
-  ENABLE_NEW_INBOX_OVERRIDE,
-} from '@core/constant/featureFlags';
 import { useUserId } from '@core/context/user';
 import { registerHotkey } from '@core/hotkey/hotkeys';
 import { TOKENS } from '@core/hotkey/tokens';
-import { idToDisplayName } from '@core/user/util';
-import CaretRightIcon from '@phosphor/caret-right.svg';
-import CheckIcon from '@phosphor/check.svg';
 import CircleDashedIcon from '@phosphor/circle-dashed.svg';
 import FilterIcon from '@phosphor/funnel-simple.svg';
 import { PropertyValueIcon } from '@property/component/propertyValue/PropertyValueIcon';
 import { PROPERTY_OPTION_IDS, SYSTEM_PROPERTY_IDS } from '@property/constants';
 import { useGithubLinkStatusQuery } from '@queries/auth';
 import { useContacts } from '@queries/contacts/contacts';
-import { useCurrentTeamQuery } from '@queries/team/teams';
-import { cn, Dropdown, Tooltip } from '@ui';
+import { type ButtonVariant, cn, Dropdown, Tooltip } from '@ui';
 import {
   type Accessor,
   batch,
-  createEffect,
   createMemo,
   createSignal,
   For,
   type JSX,
   Match,
-  onCleanup,
   Show,
   Switch,
 } from 'solid-js';
@@ -63,34 +49,18 @@ import {
   filterInboxGithubPrOption,
 } from './filter-categories';
 import {
-  SearchableMultiSelectInline,
-  type SearchableOption,
-} from './searchable-multi-select';
+  FilterOptionItem,
+  FilterSubmenu,
+  SearchableFilterSubmenu,
+} from './filter-menu';
+import type { SearchableOption } from './searchable-multi-select';
+
 import { useTagFilter } from './tag-filter';
 
 export type { FilterCategory, FilterOption } from './filter-categories';
 
-export const TypeIndicator = (props: { active: boolean }) => (
-  <span
-    class={cn(
-      'size-3.5 flex items-center justify-center shrink-0 rounded-sm border text-surface',
-      props.active
-        ? 'bg-accent border-accent'
-        : 'border-transparent group-hover:not-hover:border-edge-muted group-data-highlighted:not-hover:border-edge-muted hover:border-accent'
-    )}
-  >
-    <Show when={props.active}>
-      <CheckIcon class="size-2.5" />
-    </Show>
-  </span>
-);
-
-// Sub-trigger rows differ from default Dropdown.Item only by
-// distributing label + caret to the row ends.
-// const FILTER_MENU_SUBTRIGGER_CLASS = 'justify-between gap-2';
-
 // Filter categories by view
-const INBOX_FILTER_CATEGORIES: FilterCategory[] = [
+const HOME_FILTER_CATEGORIES: FilterCategory[] = [
   {
     id: 'type',
     label: 'Type',
@@ -142,7 +112,7 @@ const INBOX_FILTER_CATEGORIES: FilterCategory[] = [
 ];
 
 const isInboxTypeFilterId = (id: string) => {
-  for (const category of INBOX_FILTER_CATEGORIES) {
+  for (const category of HOME_FILTER_CATEGORIES) {
     if (category.options.find((o) => o.id === id)) return true;
   }
 
@@ -326,6 +296,11 @@ const DOCUMENTS_FILTER_CATEGORIES: FilterCategory[] = [
         icon: () => <EntityIcon targetType="canvas" size="xs" />,
       },
       {
+        id: 'doc-spreadsheet',
+        label: 'Spreadsheet',
+        icon: () => <EntityIcon targetType="spreadsheet" size="xs" />,
+      },
+      {
         id: 'file-code',
         label: 'Code',
         icon: () => <EntityIcon targetType="code" size="xs" />,
@@ -381,7 +356,10 @@ export function buildContactLabel(
 }
 
 export const VIEW_FILTER_CATEGORIES: Record<ListView, FilterCategory[]> = {
-  inbox: INBOX_FILTER_CATEGORIES,
+  home: HOME_FILTER_CATEGORIES,
+  // No refinements yet: the touched-by-me query rejects channel/email
+  // filter trees, so the inbox categories can't be offered wholesale.
+  recent: [],
   agents: [],
   mail: MAIL_FILTER_CATEGORIES,
   documents: DOCUMENTS_FILTER_CATEGORIES,
@@ -390,103 +368,12 @@ export const VIEW_FILTER_CATEGORIES: Record<ListView, FilterCategory[]> = {
   channels: [],
   calls: [],
   folders: [],
-  // The two tabs already split reminders on the only axis they have; there is
-  // nothing further to refine by.
-  reminders: [],
   search: [],
 };
 
-/** Searchable submenu for filters with many options like assignees */
-const SearchableFilterSubmenu = (props: {
-  label: string;
-  options: Accessor<SearchableOption[]>;
-  activeIds: Accessor<string[]>;
-  onChange: (ids: string[]) => void;
-  placeholder?: string;
-  open?: Accessor<boolean>;
-  onOpenChange?: (v: boolean) => void;
-  /** Keep `options` in their given order instead of pinning selected first. */
-  preserveOrder?: boolean;
-}) => {
-  const [internalOpen, setInternalOpen] = createSignal(false);
-  const isOpen = () => props.open?.() ?? internalOpen();
-  const setIsOpen = (v: boolean) => {
-    if (props.onOpenChange) props.onOpenChange(v);
-    else setInternalOpen(v);
-  };
-  const [inputRef, setInputRef] = createSignal<HTMLInputElement>();
-
-  // Focus the search input while the sub is open.
-  //
-  // Two issues conspire:
-  //   1. Initial focus has to wait for Kobalte's DismissableLayer to register
-  //      itself as a nested layer of the parent menu (done in its onMount).
-  //      The sub is portaled, so focusing the input before that registration
-  //      looks like "focus outside" to the parent and closes the whole menu
-  //      tree. One rAF is enough to get past those onMount callbacks.
-  //   2. After that, Kobalte's `onPointerMove` on the SubTrigger keeps
-  //      calling `focusWithoutScrolling(e.currentTarget)` on every mouse
-  //      move, stealing focus back to the trigger. Reclaim on blur — user
-  //      dismissal routes (Escape / click-outside) close the sub first,
-  //      which unregisters this listener before focus moves elsewhere.
-  createEffect(() => {
-    const el = inputRef();
-    if (!isOpen() || !el) return;
-
-    const raf = requestAnimationFrame(() => {
-      if (isOpen()) el.focus();
-    });
-
-    const onBlur = () => {
-      queueMicrotask(() => {
-        if (isOpen() && document.activeElement !== el) el.focus();
-      });
-    };
-    el.addEventListener('blur', onBlur);
-
-    onCleanup(() => {
-      cancelAnimationFrame(raf);
-      el.removeEventListener('blur', onBlur);
-    });
-  });
-
-  return (
-    <Dropdown.Sub open={isOpen()} onOpenChange={setIsOpen}>
-      <Dropdown.SubTrigger
-        onPointerEnter={(e: PointerEvent & { currentTarget: HTMLElement }) => {
-          // Kobalte's "grace polygon" keeps an open sub alive when the
-          // pointer crosses toward its content. For sibling In/From triggers,
-          // that means moving between them leaves the prior sub stuck open
-          // and the prior trigger stuck with data-highlighted. Force focus
-          // + open so Kobalte's parent selection manager updates to this
-          // trigger and the shared signal closes the sibling.
-          if (e.pointerType !== 'mouse') return;
-          e.currentTarget.focus({ preventScroll: true });
-          if (!isOpen()) setIsOpen(true);
-        }}
-      >
-        <span class="text-ink">{props.label}</span>
-        <CaretRightIcon class="size-3 text-ink-muted" />
-      </Dropdown.SubTrigger>
-
-      <Dropdown.SubContent class="w-65 max-w-[90vw]">
-        <Dropdown.Group class="p-0 gap-0">
-          <SearchableMultiSelectInline
-            onRequestClose={() => setIsOpen(false)}
-            placeholder={props.placeholder}
-            activeIds={props.activeIds}
-            onChange={props.onChange}
-            options={props.options}
-            inputRef={setInputRef}
-            preserveOrder={props.preserveOrder}
-          />
-        </Dropdown.Group>
-      </Dropdown.SubContent>
-    </Dropdown.Sub>
-  );
-};
-
 interface UnifiedFilterDropdownProps {
+  /** View-specific refinements alongside the shared filters. */
+  children?: JSX.Element;
   /** Optional controlled open state */
   open?: Accessor<boolean>;
   onOpenChange?: (open: boolean) => void;
@@ -496,6 +383,7 @@ interface UnifiedFilterDropdownProps {
   hideTrigger?: boolean;
   /** Hide the default trigger's text label while retaining its tooltip. */
   hideLabel?: boolean;
+  variant?: ButtonVariant;
 }
 
 const READ_FILTER_OPTIONS: { id: ReadFilter; label: string }[] = [
@@ -510,38 +398,14 @@ const ReadStatusSubmenu = (props: {
   onChange: (value: ReadFilter) => void;
 }) => {
   return (
-    <Dropdown.Sub>
-      <Dropdown.SubTrigger>
-        <span class="text-ink">Status</span>
-        <CaretRightIcon class="size-3 text-ink-muted" />
-      </Dropdown.SubTrigger>
-
-      <Dropdown.SubContent>
-        <Dropdown.Group>
-          <For each={READ_FILTER_OPTIONS}>
-            {(option) => {
-              const active = () => props.value === option.id;
-              return (
-                <Dropdown.Item
-                  onSelect={() => props.onChange(option.id)}
-                  closeOnSelect
-                >
-                  <TypeIndicator active={active()} />
-                  <span
-                    class={cn(
-                      'flex-1 truncate',
-                      active() ? 'text-ink' : 'text-ink-muted'
-                    )}
-                  >
-                    {option.label}
-                  </span>
-                </Dropdown.Item>
-              );
-            }}
-          </For>
-        </Dropdown.Group>
-      </Dropdown.SubContent>
-    </Dropdown.Sub>
+    <FilterSubmenu
+      label="Status"
+      active={props.value !== 'all'}
+      options={READ_FILTER_OPTIONS}
+      isSelected={(id) => props.value === id}
+      onSelect={props.onChange}
+      closeOnSelect
+    />
   );
 };
 
@@ -560,18 +424,13 @@ export const UnifiedFilterDropdown = (
     queryFilters,
     assigneeFilter,
     setAssigneeFilter,
-    ownerFilter,
-    setOwnerFilter,
-    stageFilter,
-    setStageFilter,
     activeTab,
     readFilter,
     setReadFilter,
   } = useSoupView();
   const contacts = useContacts();
-  const teamQuery = useCurrentTeamQuery();
   const userId = useUserId();
-  const dealStages = useDealStages();
+  const selectFilters = useSoupView().extensions?.selectFilters ?? [];
 
   const currentView = createMemo((): ListView | undefined => {
     const content = panel.handle.content();
@@ -580,12 +439,9 @@ export const UnifiedFilterDropdown = (
     return content.id;
   });
 
-  const newInboxFlag = useFeatureFlag(ENABLE_NEW_INBOX_FLAG, {
-    enabledOverride: ENABLE_NEW_INBOX_OVERRIDE,
-  });
-  const isNewInbox = () => currentView() === 'inbox' && newInboxFlag().enabled;
+  const isHomeView = () => currentView() === 'home';
   const githubLinkStatus = useGithubLinkStatusQuery({
-    enabled: () => currentView() === 'inbox',
+    enabled: () => currentView() === 'home',
   });
 
   const categories = createMemo(() => {
@@ -597,7 +453,7 @@ export const UnifiedFilterDropdown = (
     // inapplicable there.
     if (view === 'documents' && activeTab() === 'folders') return [];
 
-    if (view !== 'inbox') return viewCategories;
+    if (view !== 'home') return viewCategories;
 
     return filterInboxGithubPrOption(
       viewCategories,
@@ -638,8 +494,8 @@ export const UnifiedFilterDropdown = (
     const query =
       typeof filter.query === 'function' ? filter.query(ctx) : filter.query;
 
-    if (currentView() === 'inbox' && isInboxTypeFilterId(optionId)) {
-      const baseQuery = getViewPreset('inbox', activeTab())?.filters;
+    if (currentView() === 'home' && isInboxTypeFilterId(optionId)) {
+      const baseQuery = getViewPreset('home', activeTab())?.filters;
 
       if (!baseQuery) {
         return;
@@ -735,99 +591,6 @@ export const UnifiedFilterDropdown = (
     });
   };
 
-  // Owner options for the Customers view (team members, plus a "No owner"
-  // row) — company owners are always teammates, so the broader contacts
-  // list (anyone ever interacted with) would mostly be noise here.
-  const ownerOptions = createMemo((): SearchableOption[] => {
-    const currentUserId = userId();
-    const noOwnerOption: SearchableOption = {
-      id: NO_ASSIGNEE,
-      label: 'No owner',
-      icon: () => <CircleDashedIcon class="size-3.5 text-ink-muted" />,
-    };
-    let meOption: SearchableOption | undefined;
-    const memberOptions: SearchableOption[] = [];
-    for (const member of teamQuery.data?.members ?? []) {
-      const id = member.user_id;
-      const opt: SearchableOption = {
-        id,
-        label: buildContactLabel(
-          { id, name: idToDisplayName(id) },
-          currentUserId
-        ),
-        icon: () => (
-          <UserIcon id={id} size="sm" suppressClick showTooltip={false} />
-        ),
-      };
-      if (id === currentUserId) {
-        meOption = opt;
-      } else {
-        memberOptions.push(opt);
-      }
-    }
-    memberOptions.sort((a, b) => a.label.localeCompare(b.label));
-    return [...(meOption ? [meOption] : []), noOwnerOption, ...memberOptions];
-  });
-
-  // Owner filtering is a client-side predicate (companies come back from a
-  // dedicated capped CRM request), so no query filters to maintain here.
-  const handleOwnerChange = (ids: string[]) => {
-    batch(() => {
-      setOwnerFilter(ids);
-      const shouldBeActive = ids.length > 0;
-      if (shouldBeActive !== soup.predicates.isActive('company-owner')) {
-        soup.predicates.toggle({ and: ['company-owner'] });
-      }
-    });
-  };
-
-  // Stage options for the Customers view: the team's active deal-stage set
-  // (plus retired legacy stages on the default set) and a trailing
-  // "No stage" row.
-  const stageOptions = createMemo((): SearchableOption[] => [
-    ...dealStages.filterStages().map((stage, index) => ({
-      id: stage.id,
-      label: stage.label,
-      icon: () => (
-        <CrmStageIcon optionId={stage.id} index={index} class="size-3.5" />
-      ),
-    })),
-    {
-      id: NO_STAGE,
-      label: 'No stage',
-      icon: () => <CircleDashedIcon class="size-3.5 text-ink-muted" />,
-    },
-  ]);
-
-  // The stage set shown when no filter is active: the active deal stages
-  // plus "No stage" — retired legacy stages only display when filtered in.
-  const defaultStageIds = createMemo(
-    () => new Set([...dealStages.stages().map((stage) => stage.id), NO_STAGE])
-  );
-
-  // The stage submenu reflects what's on screen: an empty filter shows the
-  // default columns, so exactly those read as checked (legacy stages don't).
-  const effectiveStageFilter = () =>
-    stageFilter().length > 0 ? stageFilter() : [...defaultStageIds()];
-
-  // Stage filtering is a client-side predicate, mirroring the owner filter.
-  const handleStageChange = (ids: string[]) => {
-    // Checking exactly the default set is the same as no filter — store it
-    // as empty so the predicate deactivates.
-    const next =
-      ids.length === defaultStageIds().size &&
-      ids.every((id) => defaultStageIds().has(id))
-        ? []
-        : ids;
-    batch(() => {
-      setStageFilter(next);
-      const shouldBeActive = next.length > 0;
-      if (shouldBeActive !== soup.predicates.isActive('company-stage')) {
-        soup.predicates.toggle({ and: ['company-stage'] });
-      }
-    });
-  };
-
   const isTasksView = () => currentView() === 'tasks';
   const isDocumentsView = () => currentView() === 'documents';
   const isCreatedByFilterView = () => {
@@ -836,7 +599,6 @@ export const UnifiedFilterDropdown = (
   };
   const showCreatedByFilter = () =>
     isCreatedByFilterView() && !(isDocumentsView() && activeTab() === 'owned');
-  const isCompaniesView = () => currentView() === 'companies';
 
   // The Files "Owned" tab has a creator constraint as part of its base
   // preset. Keep that constraint when a user clears an explicit Created by
@@ -937,8 +699,8 @@ export const UnifiedFilterDropdown = (
       when={
         categories().length > 0 ||
         isTasksView() ||
-        isCompaniesView() ||
-        isNewInbox() ||
+        selectFilters.length > 0 ||
+        isHomeView() ||
         showTagsFilter()
       }
     >
@@ -953,8 +715,9 @@ export const UnifiedFilterDropdown = (
             <Match when={true}>
               <Tooltip label="Filter" hotkey={TOKENS.soup.filter}>
                 <Dropdown.Trigger
+                  variant={props.variant ?? 'outline'}
                   depth={2}
-                  class="bg-surface"
+                  class={props.variant === 'ghost' ? undefined : 'bg-surface'}
                   aria-label={props.hideLabel ? 'Filter' : undefined}
                 >
                   <FilterIcon />
@@ -967,9 +730,9 @@ export const UnifiedFilterDropdown = (
           </Switch>
         </Show>
 
-        <Dropdown.Content class={cn('shadow-menu min-w-32')}>
+        <Dropdown.Content class={cn('min-w-32')}>
           <Dropdown.Group>
-            <Show when={isNewInbox()}>
+            <Show when={isHomeView()}>
               <ReadStatusSubmenu
                 value={readFilter()}
                 onChange={setReadFilter}
@@ -980,8 +743,8 @@ export const UnifiedFilterDropdown = (
                 categories().length === 1 &&
                 !isDocumentsView() &&
                 !isTasksView() &&
-                !isCompaniesView() &&
-                !isNewInbox()
+                selectFilters.length === 0 &&
+                !isHomeView()
               }
               fallback={
                 <>
@@ -997,47 +760,13 @@ export const UnifiedFilterDropdown = (
 
                   <For each={categories()}>
                     {(category) => (
-                      <Dropdown.Sub>
-                        <Dropdown.SubTrigger>
-                          <span class="text-ink">{category.label}</span>
-                          <CaretRightIcon class="size-3 text-ink-muted" />
-                        </Dropdown.SubTrigger>
-
-                        <Dropdown.SubContent>
-                          <Dropdown.Group>
-                            <For each={category.options}>
-                              {(option) => {
-                                const active = () => isOptionActive(option.id);
-                                return (
-                                  <Dropdown.Item
-                                    onSelect={() => toggleFilter(option.id)}
-                                    closeOnSelect={!category.multiple}
-                                  >
-                                    <TypeIndicator active={active()} />
-
-                                    <Show when={option.icon}>
-                                      {(icon) => (
-                                        <span class="size-4 flex items-center justify-center shrink-0">
-                                          {icon()()}
-                                        </span>
-                                      )}
-                                    </Show>
-
-                                    <span
-                                      class={cn(
-                                        'flex-1 truncate',
-                                        active() ? 'text-ink' : 'text-ink-muted'
-                                      )}
-                                    >
-                                      {option.label}
-                                    </span>
-                                  </Dropdown.Item>
-                                );
-                              }}
-                            </For>
-                          </Dropdown.Group>
-                        </Dropdown.SubContent>
-                      </Dropdown.Sub>
+                      <FilterSubmenu
+                        label={category.label}
+                        options={category.options}
+                        isSelected={isOptionActive}
+                        onSelect={toggleFilter}
+                        closeOnSelect={!category.multiple}
+                      />
                     )}
                   </For>
 
@@ -1062,24 +791,19 @@ export const UnifiedFilterDropdown = (
                     />
                   </Show>
 
-                  {/* Stage + Owner filters for the Customers view */}
-                  <Show when={isCompaniesView()}>
-                    <SearchableFilterSubmenu
-                      label="Stage"
-                      options={stageOptions}
-                      activeIds={effectiveStageFilter}
-                      onChange={handleStageChange}
-                      placeholder="Filter stages..."
-                      preserveOrder
-                    />
-                    <SearchableFilterSubmenu
-                      label="Owner"
-                      options={ownerOptions}
-                      activeIds={ownerFilter}
-                      onChange={handleOwnerChange}
-                      placeholder="Search owners..."
-                    />
-                  </Show>
+                  <For each={selectFilters}>
+                    {(filter) => (
+                      <SearchableFilterSubmenu
+                        label={filter.label}
+                        active={filter.active?.()}
+                        options={filter.options}
+                        activeIds={filter.effectiveValues}
+                        onChange={filter.change}
+                        placeholder={filter.placeholder}
+                        preserveOrder={filter.preserveOrder}
+                      />
+                    )}
+                  </For>
                 </>
               }
             >
@@ -1088,29 +812,13 @@ export const UnifiedFilterDropdown = (
                 {(option) => {
                   const active = () => isOptionActive(option.id);
                   return (
-                    <Dropdown.Item
+                    <FilterOptionItem
+                      label={option.label}
+                      icon={option.icon}
+                      active={active()}
                       onSelect={() => toggleFilter(option.id)}
                       closeOnSelect={!categories()[0]!.multiple}
-                    >
-                      <TypeIndicator active={active()} />
-
-                      <Show when={option.icon}>
-                        {(icon) => (
-                          <span class="size-4 flex items-center justify-center shrink-0">
-                            {icon()()}
-                          </span>
-                        )}
-                      </Show>
-
-                      <span
-                        class={cn(
-                          'flex-1 truncate',
-                          active() ? 'text-ink' : 'text-ink-muted'
-                        )}
-                      >
-                        {option.label}
-                      </span>
-                    </Dropdown.Item>
+                    />
                   );
                 }}
               </For>
@@ -1125,6 +833,7 @@ export const UnifiedFilterDropdown = (
                 placeholder="Filter by tag..."
               />
             </Show>
+            {props.children}
           </Dropdown.Group>
         </Dropdown.Content>
       </Dropdown>

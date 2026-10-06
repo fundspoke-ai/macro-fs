@@ -1,3 +1,4 @@
+import type { CalendarBlockProps } from '@block-calendar/types';
 import type { BlockCanvasProps } from '@block-canvas/component/Block';
 import type { BlockChannelProps } from '@block-channel/component/NewChannelBlockAdapter';
 import type { BlockMarkdownProps } from '@block-md/component/Block';
@@ -5,7 +6,7 @@ import type { IDocumentStorageServiceFile } from '@filesystem/file';
 import type {
   InitialSync,
   LiveSyncSource,
-  TimeoutError,
+  SyncError,
 } from '@macro-inc/collaboration/collab/source';
 import type { AccessLevel } from '@service-storage/generated/schemas/accessLevel';
 import type { DocumentMetadata } from '@service-storage/generated/schemas/documentMetadata';
@@ -39,40 +40,16 @@ import {
   useContext,
 } from 'solid-js';
 import { createStore, type SetStoreFunction, type Store } from 'solid-js/store';
+import {
+  type BlockAliasRegistry,
+  BlockRegistry,
+} from '../constants/block-registry';
 import { ENABLE_PDF_MULTISPLIT } from './constant/featureFlags';
 import { blockDataSignal } from './internal/BlockLoader';
 import type { Source, SourcePreload } from './source';
 import type { ObjectLike, ResultError } from './util/result';
 
-/**
- * List of valid block types that can be used in the application.
- */
-export const BlockRegistry = [
-  'call',
-  'chat',
-  'write',
-  'pdf',
-  'md',
-  'code',
-  'image',
-  'canvas',
-  'channel',
-  'project',
-  'unknown',
-  'video',
-  'email',
-  'contact',
-  'company',
-  'automation',
-  'pr',
-] as const;
-
-/** Block names that resolve through another concrete block implementation. */
-export const VirtualBlockRegistry = ['write'] as const;
-const virtualBlockNames = new Set<string>(VirtualBlockRegistry);
-export const ConcreteBlockRegistry = BlockRegistry.filter(
-  (name) => !virtualBlockNames.has(name)
-);
+export { BlockAliasRegistry, BlockRegistry } from '../constants/block-registry';
 
 type BlockNameKeys = keyof typeof BlockRegistry & number;
 
@@ -80,12 +57,6 @@ type BlockNameKeys = keyof typeof BlockRegistry & number;
  * Represents a block name which is one of the predefined block types in {@link BlockRegistry}.
  */
 export type BlockName = (typeof BlockRegistry)[BlockNameKeys];
-
-/**
- * List of strongly-typed, valid aliases that can be used as pseudo-differentiated
- * block types.
- */
-export const BlockAliasRegistry = ['csv', 'task', 'snippet', 'skill'] as const;
 
 type BlockAliasKeys = keyof typeof BlockAliasRegistry & number;
 
@@ -100,14 +71,18 @@ export type BlockAlias = (typeof BlockAliasRegistry)[BlockAliasKeys];
  */
 export const NonDocumentBlockTypes = [
   'call',
+  'calendar',
   'chat',
+  'database',
   'channel',
   'project',
   'email',
   'contact',
   'company',
-  'automation',
+  'routine',
   'pr',
+  'agent',
+  'initiative',
 ] as const as (BlockName | BlockAlias)[];
 
 /**
@@ -144,7 +119,9 @@ function exclude(excludeSet: BlockName[]) {
  */
 const _ValidBlockCombinations: BlockCombinationRules = {
   call: allBlockNames,
+  calendar: allBlockNames,
   chat: allBlockNames,
+  database: allBlockNames,
   pdf: ENABLE_PDF_MULTISPLIT ? allBlockNames : exclude(['pdf']),
   write: exclude(['write']),
   md: allBlockNames,
@@ -153,6 +130,11 @@ const _ValidBlockCombinations: BlockCombinationRules = {
   channel: allBlockNames,
   email: allBlockNames,
   canvas: allBlockNames,
+  spreadsheet: allBlockNames,
+  pptx: allBlockNames,
+  psd: allBlockNames,
+  fig: allBlockNames,
+  ai: allBlockNames,
   project: allBlockNames,
   unknown: allBlockNames,
   video: allBlockNames,
@@ -161,15 +143,24 @@ const _ValidBlockCombinations: BlockCombinationRules = {
   task: allBlockNames,
   snippet: allBlockNames,
   skill: allBlockNames,
-  automation: allBlockNames,
+  routine: allBlockNames,
   csv: allBlockNames,
   pr: allBlockNames,
+  agent: allBlockNames,
+  initiative: allBlockNames,
 } as const;
 
 // maps block name to valid parents
 export const ValidNestingCombinations: BlockCombinationRules = {
   call: new Set([]),
+  calendar: new Set([]),
   canvas: new Set(['md']),
+  spreadsheet: new Set([]),
+  pptx: new Set([]),
+  psd: new Set([]),
+  fig: new Set([]),
+  ai: new Set([]),
+  database: new Set([]),
   chat: new Set([]),
   pdf: new Set(['md']),
   write: new Set([]),
@@ -186,9 +177,11 @@ export const ValidNestingCombinations: BlockCombinationRules = {
   task: new Set([]),
   snippet: new Set([]),
   skill: new Set([]),
-  automation: new Set([]),
+  routine: new Set([]),
   csv: new Set([]),
   pr: new Set([]),
+  agent: new Set([]),
+  initiative: new Set([]),
 };
 
 export const LoadErrors = {
@@ -328,6 +321,7 @@ export type ExtractLoadType<T extends LoadFunction<any, any>> =
   ExtractSuccessType<Awaited<ReturnType<T>>>;
 
 export interface BlockComponentProps extends Record<BlockName, ObjectLike> {
+  calendar: CalendarBlockProps;
   canvas: BlockCanvasProps;
   channel: BlockChannelProps;
   md: BlockMarkdownProps;
@@ -340,7 +334,7 @@ interface BlockComponentLoadData extends Record<BlockName, ObjectLike> {
   md: DocumentBlockData &
     DssFileData & {
       syncSource: LiveSyncSource;
-      doInitialSync: () => ResultAsync<InitialSync, TimeoutError>;
+      doInitialSync: () => ResultAsync<InitialSync, SyncError>;
     };
   code: DocumentBlockData;
   project: ProjectBlockData;
@@ -386,8 +380,14 @@ export type BlockDefinition<
   /** The component for the block. */
   component: BlockComponent<Name>;
 
+  /** Lightweight placeholder while the block's component or data loads. */
+  loading?: Component;
+
   /** flag to indicate wether this block should enable collaborative features. */
   liveTrackingEnabled?: boolean;
+
+  /** Whether mounting this block records entity-open analytics and history. */
+  openTrackingEnabled?: boolean;
 
   accepted: Record<string, string>;
 

@@ -6,9 +6,39 @@ export type ClientOptions = {
 
 export type AbGroup = 'A' | 'B';
 
+/**
+ * Error response body.
+ */
+export type AiBillingErrorBody = {
+    /**
+     * Human-readable error description.
+     */
+    error: string;
+};
+
 export type AppleLoginRequest = {
     code: string;
     id_token: string;
+};
+
+/**
+ * Request body for switching plans
+ */
+export type ChangePlanRequest = {
+    /**
+     * The plan to move the active subscription to
+     */
+    plan: SeatPlan;
+};
+
+/**
+ * Response for a plan change
+ */
+export type ChangePlanResponse = {
+    /**
+     * The plan the subscription is now on
+     */
+    plan: SeatPlan;
 };
 
 /**
@@ -28,6 +58,129 @@ export type CheckoutSessionMetadata = {
      */
     gaClientId?: string | null;
 };
+
+/**
+ * Hosted checkout with the billing terms the server actually granted.
+ */
+export type CheckoutSessionV2Response = {
+    /**
+     * Trial duration, absent for an immediately paid checkout.
+     */
+    trialDays?: number | null;
+    /**
+     * The opaque URL returned by Stripe.
+     */
+    url: string;
+};
+
+/**
+ * Explicit remote environment for future Codex sessions.
+ */
+export type CodexConfigRequest = {
+    /**
+     * An environment currently visible to this account.
+     */
+    environmentId: string;
+};
+
+/**
+ * Safe connection metadata; no secret or masked token is returned.
+ */
+export type CodexConnectionStatus = {
+    /**
+     * Connected provider account identifier.
+     */
+    accountId?: string | null;
+    /**
+     * Whether the user has completed provider authorization.
+     */
+    connected: boolean;
+    /**
+     * Reserved until provider-verified email metadata is available.
+     */
+    email?: string | null;
+    /**
+     * Explicitly selected remote environment.
+     */
+    environmentId?: string | null;
+};
+
+/**
+ * A cloud environment visible to the connected provider account.
+ */
+export type CodexEnvironment = {
+    /**
+     * Provider environment identity.
+     */
+    id: string;
+    /**
+     * Human-readable provider label.
+     */
+    label?: string | null;
+    /**
+     * Ordered safe repository identities from Codex.
+     */
+    repositories: Array<CodexEnvironmentRepository>;
+};
+
+/**
+ * Safe repository metadata available to the connected Codex account.
+ */
+export type CodexEnvironmentRepository = {
+    /**
+     * Credential-free HTTPS clone URL.
+     */
+    cloneUrl: string;
+    /**
+     * Provider default branch.
+     */
+    defaultBranch: string;
+    /**
+     * Owner/repository identity.
+     */
+    fullName: string;
+};
+
+/**
+ * Outcome of polling one attempt.
+ */
+export type CodexLoginPoll = {
+    /**
+     * Current attempt state.
+     */
+    status: CodexLoginState;
+};
+
+/**
+ * Expiring browser authorization instructions.
+ */
+export type CodexLoginStart = {
+    /**
+     * Owner-bound attempt UUID.
+     */
+    attemptId: string;
+    /**
+     * UTC attempt deadline.
+     */
+    expiresAt: string;
+    /**
+     * Minimum browser polling interval.
+     */
+    pollIntervalSeconds: number;
+    /**
+     * Short expiring user code, not an API credential.
+     */
+    userCode: string;
+    /**
+     * Official provider verification URL.
+     */
+    verificationUrl: string;
+};
+
+/**
+ * Device authorization state visible to its initiating user.
+ */
+export type CodexLoginState = 'pending' | 'connected' | 'expired' | 'failed';
 
 export type CreateAccountMergeRequest = {
     /**
@@ -53,9 +206,32 @@ export type CreateCheckoutSessionV2Request = {
      */
     metadata?: CheckoutSessionMetadata;
     /**
+     * Request the automatic, first-subscription 30-day Premium trial.
+     */
+    onboardingTrial?: boolean;
+    plan?: null | SeatPlan;
+    /**
      * The URL to redirect to on successful checkout
      */
     successUrl: string;
+};
+
+/**
+ * Request body to create a link.
+ */
+export type CreateGtmInviteLinkRequest = {
+    /**
+     * The recipient's first name, shown on the welcome page.
+     */
+    firstName: string;
+    /**
+     * Free-form internal note for the dashboard.
+     */
+    note?: string | null;
+    /**
+     * The recipient's email, when the sender knows it.
+     */
+    recipientEmail?: string | null;
 };
 
 export type CreateInProgressLinkResponse = {
@@ -107,6 +283,102 @@ export type CreateUserRequest = {
 };
 
 /**
+ * Request body for [`create_credit_checkout_handler`].
+ */
+export type CreditCheckoutRequestBody = {
+    /**
+     * Pack size, cents; one of the catalog's `credit_packs_cents`.
+     */
+    amountCents: number;
+    /**
+     * Where Stripe returns the user on cancel. Same rules as `success_url`.
+     */
+    cancelUrl: string;
+    /**
+     * Where Stripe returns the user after paying. Must be an `https` URL
+     * on the origin the request came from.
+     */
+    successUrl: string;
+};
+
+/**
+ * Response for [`create_credit_checkout_handler`].
+ */
+export type CreditCheckoutResponse = {
+    /**
+     * The hosted Checkout URL to redirect to.
+     */
+    url: string;
+};
+
+/**
+ * What settings needs to render the Cursor connection.
+ *
+ * Deliberately thin. `registered` drives the whole UI; `updatedAt` lets it say
+ * when the key was last replaced, which is the only thing a user can check
+ * against their own memory when a session starts failing.
+ *
+ * Deliberately *not* reporting anything about the deployment itself. That is
+ * operator information: a user who sees it cannot act on it, and a service
+ * that cannot reach KMS does not start.
+ */
+export type CursorApiKeyStatus = {
+    /**
+     * The Cursor model id this user's sessions start on, when they have
+     * chosen one. `None` means the deployment default is in effect — the
+     * settings dropdown shows that as its resting value.
+     */
+    defaultModelId?: string | null;
+    /**
+     * Whether this user has a key stored.
+     */
+    registered: boolean;
+    /**
+     * When the stored key was last replaced, if there is one.
+     */
+    updatedAt?: string | null;
+};
+
+/**
+ * One model the settings dropdown can offer.
+ *
+ * Id, name and family: the dropdown lists models, not the hundreds of
+ * parameter variants each carries. The chosen id's parameters are resolved to
+ * Cursor's default variant at session start. The family is the same heading
+ * the Cursor ACP agent groups its session model select under, so the settings
+ * picker and the in-session picker read the same way.
+ */
+export type CursorModelOption = {
+    /**
+     * The human-readable name, e.g. `Cursor Grok 4.6`.
+     */
+    displayName: string;
+    /**
+     * The family heading to list this model under, e.g. `Cursor Grok`.
+     */
+    group: string;
+    /**
+     * The id to store and send, e.g. `grok-4.6`.
+     */
+    id: string;
+};
+
+/**
+ * The models this account may choose from.
+ */
+export type CursorModelsResponse = {
+    /**
+     * The offered models, in the order Cursor returned them.
+     */
+    models: Array<CursorModelOption>;
+};
+
+/**
+ * Why a request was refused.
+ */
+export type DenyReason = 'allowance_exhausted' | 'free_allowance_exhausted' | 'overage_limit_reached' | 'overage_payment_failed';
+
+/**
  * Empty response is required due to custom fetch forcing `response.json()`
  */
 export type EmptyResponse = {
@@ -142,6 +414,10 @@ export type EnrichedGithubPullRequest = {
      */
     additions?: number | null;
     /**
+     * The users assigned to the pull request, when known.
+     */
+    assignees?: Array<GithubPullRequestUser> | null;
+    /**
      * The stable numeric GitHub user id for the pull request author, when available.
      */
     authorId?: number | null;
@@ -174,6 +450,10 @@ export type EnrichedGithubPullRequest = {
      */
     githubKey: string;
     /**
+     * The pull request's labels, when known.
+     */
+    labels?: Array<GithubPullRequestLabel> | null;
+    /**
      * The GitHub pull request title, when enrichment succeeds.
      */
     name?: string | null;
@@ -195,6 +475,11 @@ export type EnrichedGithubPullRequest = {
      * The GitHub repository name.
      */
     repo: string;
+    /**
+     * Each reviewer's latest submitted review, when known. Stored metadata merges this per
+     * reviewer, so a write that knows one review keeps the others.
+     */
+    reviews?: Array<GithubPullRequestReview> | null;
     status?: null | GithubPullRequestStatus;
     /**
      * The public GitHub URL for the pull request.
@@ -301,10 +586,23 @@ export type GetUserInfo = {
 
 export type GithubLinkStatusResponse = {
     /**
+     * Stable ID of the authenticated user's linked GitHub account.
+     */
+    github_user_id: string;
+    /**
+     * Login of the authenticated user's linked GitHub account.
+     */
+    github_username: string;
+    /**
      * Whether the user must reauthenticate their GitHub link.
      */
     reauthentication_required: boolean;
 };
+
+/**
+ * How GitHub combines a pull request's commits into its base branch.
+ */
+export type GithubMergeMethod = 'merge' | 'squash' | 'rebase';
 
 /**
  * A check run associated with a GitHub pull request.
@@ -408,6 +706,20 @@ export type GithubPullRequestComment = {
 };
 
 /**
+ * A label on a GitHub pull request.
+ */
+export type GithubPullRequestLabel = {
+    /**
+     * The label color as six hex digits without a leading `#`, when known.
+     */
+    color?: string | null;
+    /**
+     * The label name, unique within its repository regardless of case.
+     */
+    name: string;
+};
+
+/**
  * A pull request reference that can be enriched with live GitHub data.
  */
 export type GithubPullRequestRef = {
@@ -438,15 +750,182 @@ export type GithubPullRequestRef = {
 };
 
 /**
+ * A reviewer's latest submitted review on a pull request.
+ */
+export type GithubPullRequestReview = {
+    /**
+     * The stable numeric GitHub user id of the reviewer, as a string.
+     */
+    reviewerGithubUserId: string;
+    /**
+     * The reviewer's GitHub login, when known.
+     */
+    reviewerLogin?: string | null;
+    /**
+     * What the review said.
+     */
+    state: GithubPullRequestReviewState;
+    /**
+     * When the review was submitted, when known.
+     */
+    submittedAt?: string | null;
+};
+
+/**
+ * What a reviewer's latest review on a pull request said.
+ */
+export type GithubPullRequestReviewState = 'approved' | 'changes_requested' | 'commented' | 'dismissed';
+
+/**
  * The normalized lifecycle status for a GitHub pull request.
  */
 export type GithubPullRequestStatus = 'open' | 'closed' | 'merged';
+
+/**
+ * A GitHub user named on a pull request, such as an assignee.
+ */
+export type GithubPullRequestUser = {
+    /**
+     * The stable numeric GitHub user id, as a string.
+     */
+    githubUserId: string;
+    /**
+     * The user's GitHub login, when known.
+     */
+    login?: string | null;
+};
 
 export type GmailLinkStatusResponse = {
     /**
      * Whether the user must reauthenticate their Gmail link.
      */
     reauthentication_required: boolean;
+};
+
+/**
+ * A link as shown on the staff dashboard.
+ */
+export type GtmInviteLink = {
+    /**
+     * When the account started a paid subscription.
+     */
+    convertedAt?: string | null;
+    /**
+     * When the link was created.
+     */
+    createdAt: string;
+    /**
+     * The Macro user id of the staff member who created the link.
+     */
+    createdBy: string;
+    /**
+     * When the link stops being openable.
+     */
+    expiresAt: string;
+    /**
+     * The recipient's first name.
+     */
+    firstName: string;
+    /**
+     * When the welcome page first loaded.
+     */
+    firstOpenedAt?: string | null;
+    /**
+     * Free months the promotion grants.
+     */
+    freeMonths: number;
+    /**
+     * Primary key.
+     */
+    id: string;
+    /**
+     * Internal note.
+     */
+    note?: string | null;
+    /**
+     * How many times the welcome page loaded.
+     */
+    openCount: number;
+    /**
+     * The Stripe promotion code applied at checkout.
+     */
+    promoCode: string;
+    /**
+     * The recipient's email, when known.
+     */
+    recipientEmail?: string | null;
+    /**
+     * When that account redeemed the link.
+     */
+    redeemedAt?: string | null;
+    /**
+     * The Macro user id of the account that signed up through the link.
+     */
+    redeemedBy?: string | null;
+    /**
+     * When staff revoked the link.
+     */
+    revokedAt?: string | null;
+    /**
+     * Lifecycle status.
+     */
+    status: GtmInviteLinkStatus;
+    /**
+     * The Stripe subscription id of that subscription.
+     */
+    stripeSubscriptionId?: string | null;
+    /**
+     * The secret to embed in the link URL.
+     */
+    token: string;
+};
+
+/**
+ * Links for the dashboard.
+ */
+export type GtmInviteLinkList = {
+    /**
+     * Newest first.
+     */
+    links: Array<GtmInviteLink>;
+};
+
+/**
+ * Where a link is in its lifecycle.
+ */
+export type GtmInviteLinkStatus = 'active' | 'expired' | 'revoked' | 'redeemed' | 'converted';
+
+/**
+ * The promotion a signed-in user's account holds.
+ */
+export type GtmInviteOffer = {
+    /**
+     * The first name the link was made out to.
+     */
+    firstName: string;
+    /**
+     * Free months the promotion grants.
+     */
+    freeMonths: number;
+    /**
+     * The redeemed link.
+     */
+    linkId: string;
+    /**
+     * The Stripe promotion code checkout applies.
+     */
+    promoCode: string;
+    /**
+     * When the account redeemed the link.
+     */
+    redeemedAt: string;
+};
+
+/**
+ * Whether the signed-in user holds an unused offer.
+ */
+export type GtmInviteOfferStatus = {
+    offer?: null | GtmInviteOffer;
 };
 
 export type InitGithubLinkResponse = {
@@ -505,11 +984,50 @@ export type InviteToTeamRequest = {
     invites: Array<InviteEntry>;
 };
 
+/**
+ * Defines who can access an item through its share link.
+ */
+export type LinkShare = 'PUBLIC' | 'TEAM';
+
 export type MacroApiTokenResponse = {
     /**
      * The newly created macro_api_token
      */
     macro_api_token: string;
+};
+
+/**
+ * A request to merge one pull request on the user's behalf.
+ */
+export type MergeGithubPullRequestRequest = {
+    mergeMethod?: null | GithubMergeMethod;
+    /**
+     * The GitHub pull request number.
+     */
+    number: number;
+    /**
+     * The GitHub repository owner or organization.
+     */
+    owner: string;
+    /**
+     * The GitHub repository name.
+     */
+    repo: string;
+};
+
+/**
+ * Response body for a merged pull request.
+ */
+export type MergeGithubPullRequestResponse = {
+    /**
+     * GitHub's own summary of the merge.
+     */
+    message: string;
+    pullRequest?: null | EnrichedGithubPullRequest;
+    /**
+     * The merge commit's SHA.
+     */
+    sha: string;
 };
 
 export type PasswordRequest = {
@@ -587,9 +1105,20 @@ export type PatchTeamCrmSettingsResponse = {
 };
 
 /**
+ * Request body for `PATCH /team/members/{member_user_id}/plan`.
+ */
+export type PatchTeamMemberPlanRequest = {
+    /**
+     * The plan to bill the member's seat at from now on.
+     */
+    plan: SeatPlan;
+};
+
+/**
  * Request to update a team
  */
 export type PatchTeamRequest = {
+    default_link_share?: null | LinkShare;
     /**
      * The new name for the team
      */
@@ -662,6 +1191,57 @@ export type Permission = {
     id: string;
 };
 
+/**
+ * One plan in the catalog.
+ */
+export type PlanCatalogEntry = {
+    /**
+     * Included AI per seat per period, in cents at provider cost. For the
+     * free plan this is its monthly hard cap.
+     */
+    included_ai_cents_per_seat: number;
+    /**
+     * Monthly subscription price per seat, cents.
+     */
+    monthly_price_cents: number;
+    /**
+     * Whether a new purchase or plan move may pick this plan today.
+     */
+    purchasable: boolean;
+    /**
+     * The tier.
+     */
+    tier: PlanTier;
+};
+
+/**
+ * The plan catalog and the knobs the billing UI offers.
+ */
+export type PlanCatalogResponse = {
+    /**
+     * Credit packs a payer may buy, cents.
+     */
+    credit_packs_cents: Array<number>;
+    /**
+     * Largest allowed overage cap, cents.
+     */
+    overage_limit_max_cents: number;
+    /**
+     * Smallest allowed overage cap, cents.
+     */
+    overage_limit_min_cents: number;
+    /**
+     * Every plan, cheapest first. Clients read allowances from here rather
+     * than hard-coding them; `purchasable` marks the plans a user can buy.
+     */
+    plans: Array<PlanCatalogEntry>;
+};
+
+/**
+ * The plans a user can be on, cheapest first.
+ */
+export type PlanTier = 'free' | 'premium' | 'max';
+
 export type PostGetNamesRequestBody = {
     user_ids: Array<string>;
 };
@@ -672,6 +1252,45 @@ export type ProfilePictureQueryParams = {
 
 export type ProfilePictures = {
     pictures: Array<UserProfilePicture>;
+};
+
+/**
+ * What the public welcome page learns about a link.
+ */
+export type PublicGtmInviteLink = {
+    /**
+     * The recipient's first name.
+     */
+    firstName: string;
+    /**
+     * Free months the promotion grants.
+     */
+    freeMonths: number;
+    /**
+     * Whether the link can still be used.
+     */
+    status: GtmInviteLinkStatus;
+};
+
+/**
+ * The key the user pasted.
+ */
+export type PutCursorApiKeyRequest = {
+    /**
+     * A `crsr_…` Cursor API key.
+     */
+    apiKey: string;
+};
+
+/**
+ * The model the user chose for their sessions.
+ */
+export type PutCursorDefaultModelRequest = {
+    /**
+     * A Cursor model id (e.g. `grok-4.6`), or `null` to clear the choice and
+     * fall back to the deployment default.
+     */
+    modelId?: string | null;
 };
 
 export type PutUserNameQueryParams = {
@@ -685,12 +1304,29 @@ export type PutUserNameQueryParams = {
     last_name?: string | null;
 };
 
+/**
+ * Request body to redeem a link.
+ */
+export type RedeemGtmInviteLinkRequest = {
+    /**
+     * The token from the link URL.
+     */
+    token: string;
+};
+
 export type ResendFusionauthVerifyUserEmailRequest = {
     /**
      * The email address to resend the verification email to
      */
     email: string;
 };
+
+/**
+ * The paid plan a seat is billed at. Every member of a paying team has one;
+ * a team may mix them, and its Stripe subscription carries one seat item per
+ * plan in use.
+ */
+export type SeatPlan = 'premium' | 'max';
 
 /**
  * The body which is used to describe the recipient email
@@ -752,6 +1388,7 @@ export type Team = {
      * `false` when no row exists).
      */
     crm_enabled: boolean;
+    default_link_share?: null | LinkShare;
     /**
      * Whether this team is on an enterprise license. Enterprise teams are
      * billed out-of-band; membership changes skip all Stripe subscription
@@ -813,6 +1450,11 @@ export type TeamInvitesResponse = {
  */
 export type TeamMember = {
     /**
+     * The paid plan the member's seat is billed at. Meaningful on paying
+     * and enterprise teams; free-team members carry the default.
+     */
+    plan: SeatPlan;
+    /**
      * The role of the team member
      */
     role: TeamRole;
@@ -870,6 +1512,100 @@ export type ToggleNonAdminInvitesResponse = {
      * toggle.
      */
     allow_non_admin_invites: boolean;
+};
+
+/**
+ * Request body for [`update_overage_handler`].
+ */
+export type UpdateOverageRequest = {
+    /**
+     * Bill usage past allowance and credits.
+     */
+    enabled: boolean;
+    /**
+     * Per-period cap on overage spend, cents. Required when enabling.
+     */
+    limitCents?: number;
+};
+
+/**
+ * The payer's current-period position, as shown in Billing settings and used
+ * by the gate.
+ */
+export type UsageSnapshot = {
+    blocked_reason?: null | DenyReason;
+    /**
+     * Whether the requesting user is the payer.
+     */
+    can_manage_billing: boolean;
+    /**
+     * Shared prepaid credit balance, in customer cents.
+     */
+    credit_balance_cents: number;
+    /**
+     * Shared payer credits already applied to this period, in customer cents.
+     */
+    credits_consumed_cents: number;
+    /**
+     * Included AI for this user's seat this period, in cents at provider cost.
+     */
+    included_cents: number;
+    /**
+     * Shared overage charged so far this period, in customer cents.
+     */
+    overage_charged_cents: number;
+    /**
+     * Whether overage billing is on.
+     */
+    overage_enabled: boolean;
+    /**
+     * Per-period overage cap, in customer cents.
+     */
+    overage_limit_cents: number;
+    /**
+     * Whether overage is paused after a failed charge.
+     */
+    overage_suspended: boolean;
+    /**
+     * The payer for this user's AI.
+     */
+    payer: string;
+    /**
+     * Period end (exclusive).
+     */
+    period_end: string;
+    /**
+     * Period start.
+     */
+    period_start: string;
+    /**
+     * Cost cents of usage this seat may still consume: its remaining allowance
+     * plus whatever shared credit and overage headroom pays for at the markup.
+     * 0 when blocked.
+     */
+    remaining_cents: number;
+    /**
+     * Seats billed to the payer.
+     */
+    seats: number;
+    /**
+     * The plan.
+     */
+    tier: PlanTier;
+    /**
+     * Team-wide usage beyond per-seat allowances, at the overage markup, that
+     * is not yet covered by shared credits or charges (awaiting settlement).
+     * Customer cents.
+     */
+    uncovered_cents: number;
+    /**
+     * Enterprise: never metered.
+     */
+    unlimited: boolean;
+    /**
+     * AI used by this user this period, in cents at provider cost.
+     */
+    used_cents: number;
 };
 
 export type UserLinkResponse = {
@@ -938,6 +1674,332 @@ export type UserTokensResponse = {
      */
     refresh_token: string;
 };
+
+export type CreateAiCreditCheckoutData = {
+    body: CreditCheckoutRequestBody;
+    path?: never;
+    query?: never;
+    url: '/ai-billing/credits/checkout';
+};
+
+export type CreateAiCreditCheckoutErrors = {
+    /**
+     * Invalid pack, untrusted return URL, or no payment account
+     */
+    400: AiBillingErrorBody;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * A paid plan is required
+     */
+    402: AiBillingErrorBody;
+    /**
+     * Only the payer may buy credits
+     */
+    403: AiBillingErrorBody;
+    /**
+     * Internal server error
+     */
+    500: AiBillingErrorBody;
+};
+
+export type CreateAiCreditCheckoutError = CreateAiCreditCheckoutErrors[keyof CreateAiCreditCheckoutErrors];
+
+export type CreateAiCreditCheckoutResponses = {
+    /**
+     * Checkout URL
+     */
+    200: CreditCheckoutResponse;
+};
+
+export type CreateAiCreditCheckoutResponse = CreateAiCreditCheckoutResponses[keyof CreateAiCreditCheckoutResponses];
+
+export type UpdateAiBillingOverageData = {
+    body: UpdateOverageRequest;
+    path?: never;
+    query?: never;
+    url: '/ai-billing/overage';
+};
+
+export type UpdateAiBillingOverageErrors = {
+    /**
+     * Invalid limit
+     */
+    400: AiBillingErrorBody;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * A paid plan is required
+     */
+    402: AiBillingErrorBody;
+    /**
+     * Only the payer may change billing
+     */
+    403: AiBillingErrorBody;
+    /**
+     * Internal server error
+     */
+    500: AiBillingErrorBody;
+};
+
+export type UpdateAiBillingOverageError = UpdateAiBillingOverageErrors[keyof UpdateAiBillingOverageErrors];
+
+export type UpdateAiBillingOverageResponses = {
+    /**
+     * Updated position
+     */
+    200: UsageSnapshot;
+};
+
+export type UpdateAiBillingOverageResponse = UpdateAiBillingOverageResponses[keyof UpdateAiBillingOverageResponses];
+
+export type GetAiBillingPlansData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/ai-billing/plans';
+};
+
+export type GetAiBillingPlansResponses = {
+    /**
+     * Plan catalog
+     */
+    200: PlanCatalogResponse;
+};
+
+export type GetAiBillingPlansResponse = GetAiBillingPlansResponses[keyof GetAiBillingPlansResponses];
+
+export type GetAiBillingSummaryData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/ai-billing/summary';
+};
+
+export type GetAiBillingSummaryErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Internal server error
+     */
+    500: AiBillingErrorBody;
+};
+
+export type GetAiBillingSummaryError = GetAiBillingSummaryErrors[keyof GetAiBillingSummaryErrors];
+
+export type GetAiBillingSummaryResponses = {
+    /**
+     * Current-period position
+     */
+    200: UsageSnapshot;
+};
+
+export type GetAiBillingSummaryResponse = GetAiBillingSummaryResponses[keyof GetAiBillingSummaryResponses];
+
+export type DisconnectCodexData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/codex';
+};
+
+export type DisconnectCodexResponses = {
+    204: void;
+};
+
+export type DisconnectCodexResponse = DisconnectCodexResponses[keyof DisconnectCodexResponses];
+
+export type GetCodexConnectionData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/codex';
+};
+
+export type GetCodexConnectionResponses = {
+    200: CodexConnectionStatus;
+};
+
+export type GetCodexConnectionResponse = GetCodexConnectionResponses[keyof GetCodexConnectionResponses];
+
+export type ConfigureCodexData = {
+    body: CodexConfigRequest;
+    path?: never;
+    query?: never;
+    url: '/codex/config';
+};
+
+export type ConfigureCodexResponses = {
+    200: CodexConnectionStatus;
+};
+
+export type ConfigureCodexResponse = ConfigureCodexResponses[keyof ConfigureCodexResponses];
+
+export type ListCodexEnvironmentsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/codex/environments';
+};
+
+export type ListCodexEnvironmentsResponses = {
+    200: Array<CodexEnvironment>;
+};
+
+export type ListCodexEnvironmentsResponse = ListCodexEnvironmentsResponses[keyof ListCodexEnvironmentsResponses];
+
+export type StartCodexLoginData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/codex/login';
+};
+
+export type StartCodexLoginResponses = {
+    200: CodexLoginStart;
+};
+
+export type StartCodexLoginResponse = StartCodexLoginResponses[keyof StartCodexLoginResponses];
+
+export type CancelCodexLoginData = {
+    body?: never;
+    path: {
+        attempt_id: string;
+    };
+    query?: never;
+    url: '/codex/login/{attempt_id}';
+};
+
+export type CancelCodexLoginResponses = {
+    204: void;
+};
+
+export type CancelCodexLoginResponse = CancelCodexLoginResponses[keyof CancelCodexLoginResponses];
+
+export type PollCodexLoginData = {
+    body?: never;
+    path: {
+        attempt_id: string;
+    };
+    query?: never;
+    url: '/codex/login/{attempt_id}';
+};
+
+export type PollCodexLoginResponses = {
+    200: CodexLoginPoll;
+};
+
+export type PollCodexLoginResponse = PollCodexLoginResponses[keyof PollCodexLoginResponses];
+
+export type DeleteCursorApiKeyData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/cursor-api-key';
+};
+
+export type DeleteCursorApiKeyErrors = {
+    401: string;
+    403: ErrorResponse;
+};
+
+export type DeleteCursorApiKeyError = DeleteCursorApiKeyErrors[keyof DeleteCursorApiKeyErrors];
+
+export type DeleteCursorApiKeyResponses = {
+    200: CursorApiKeyStatus;
+};
+
+export type DeleteCursorApiKeyResponse = DeleteCursorApiKeyResponses[keyof DeleteCursorApiKeyResponses];
+
+export type GetCursorApiKeyData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/cursor-api-key';
+};
+
+export type GetCursorApiKeyErrors = {
+    401: string;
+    403: ErrorResponse;
+};
+
+export type GetCursorApiKeyError = GetCursorApiKeyErrors[keyof GetCursorApiKeyErrors];
+
+export type GetCursorApiKeyResponses = {
+    200: CursorApiKeyStatus;
+};
+
+export type GetCursorApiKeyResponse = GetCursorApiKeyResponses[keyof GetCursorApiKeyResponses];
+
+export type PutCursorApiKeyData = {
+    body: PutCursorApiKeyRequest;
+    path?: never;
+    query?: never;
+    url: '/cursor-api-key';
+};
+
+export type PutCursorApiKeyErrors = {
+    400: ErrorResponse;
+    401: string;
+    403: ErrorResponse;
+};
+
+export type PutCursorApiKeyError = PutCursorApiKeyErrors[keyof PutCursorApiKeyErrors];
+
+export type PutCursorApiKeyResponses = {
+    200: CursorApiKeyStatus;
+};
+
+export type PutCursorApiKeyResponse = PutCursorApiKeyResponses[keyof PutCursorApiKeyResponses];
+
+export type PutCursorDefaultModelData = {
+    body: PutCursorDefaultModelRequest;
+    path?: never;
+    query?: never;
+    url: '/cursor-api-key/default-model';
+};
+
+export type PutCursorDefaultModelErrors = {
+    401: string;
+    403: ErrorResponse;
+    409: ErrorResponse;
+};
+
+export type PutCursorDefaultModelError = PutCursorDefaultModelErrors[keyof PutCursorDefaultModelErrors];
+
+export type PutCursorDefaultModelResponses = {
+    200: CursorApiKeyStatus;
+};
+
+export type PutCursorDefaultModelResponse = PutCursorDefaultModelResponses[keyof PutCursorDefaultModelResponses];
+
+export type ListCursorModelsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/cursor-api-key/models';
+};
+
+export type ListCursorModelsErrors = {
+    401: string;
+    403: ErrorResponse;
+    409: ErrorResponse;
+    502: ErrorResponse;
+};
+
+export type ListCursorModelsError = ListCursorModelsErrors[keyof ListCursorModelsErrors];
+
+export type ListCursorModelsResponses = {
+    200: CursorModelsResponse;
+};
+
+export type ListCursorModelsResponse = ListCursorModelsResponses[keyof ListCursorModelsResponses];
 
 export type VerifyFusionauthUserEmailData = {
     body?: never;
@@ -1047,6 +2109,187 @@ export type EnrichGithubPullRequestsResponses = {
 };
 
 export type EnrichGithubPullRequestsResponse2 = EnrichGithubPullRequestsResponses[keyof EnrichGithubPullRequestsResponses];
+
+export type MergeGithubPullRequestData = {
+    body: MergeGithubPullRequestRequest;
+    path?: never;
+    query?: never;
+    url: '/github_pull_requests/merge';
+};
+
+export type MergeGithubPullRequestErrors = {
+    401: ErrorResponse;
+    /**
+     * The user cannot push to the repository
+     */
+    403: ErrorResponse;
+    /**
+     * No GitHub link, or the pull request is not visible to the user
+     */
+    404: ErrorResponse;
+    /**
+     * The pull request is not mergeable as it stands, or its head moved
+     */
+    409: ErrorResponse;
+    422: ErrorResponse;
+    428: ErrorResponse;
+    500: ErrorResponse;
+};
+
+export type MergeGithubPullRequestError = MergeGithubPullRequestErrors[keyof MergeGithubPullRequestErrors];
+
+export type MergeGithubPullRequestResponses = {
+    200: MergeGithubPullRequestResponse;
+};
+
+export type MergeGithubPullRequestResponse2 = MergeGithubPullRequestResponses[keyof MergeGithubPullRequestResponses];
+
+export type ListGtmInviteLinksData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only the caller's own links (default: every staff member's).
+         */
+        mine?: boolean;
+    };
+    url: '/gtm-invite/links';
+};
+
+export type ListGtmInviteLinksErrors = {
+    401: ErrorResponse;
+    403: ErrorResponse;
+    500: ErrorResponse;
+};
+
+export type ListGtmInviteLinksError = ListGtmInviteLinksErrors[keyof ListGtmInviteLinksErrors];
+
+export type ListGtmInviteLinksResponses = {
+    200: GtmInviteLinkList;
+};
+
+export type ListGtmInviteLinksResponse = ListGtmInviteLinksResponses[keyof ListGtmInviteLinksResponses];
+
+export type CreateGtmInviteLinkData = {
+    body: CreateGtmInviteLinkRequest;
+    path?: never;
+    query?: never;
+    url: '/gtm-invite/links';
+};
+
+export type CreateGtmInviteLinkErrors = {
+    400: ErrorResponse;
+    401: ErrorResponse;
+    403: ErrorResponse;
+    500: ErrorResponse;
+};
+
+export type CreateGtmInviteLinkError = CreateGtmInviteLinkErrors[keyof CreateGtmInviteLinkErrors];
+
+export type CreateGtmInviteLinkResponses = {
+    200: GtmInviteLink;
+};
+
+export type CreateGtmInviteLinkResponse = CreateGtmInviteLinkResponses[keyof CreateGtmInviteLinkResponses];
+
+export type RevokeGtmInviteLinkData = {
+    body?: never;
+    path: {
+        /**
+         * The invite link id
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/gtm-invite/links/{id}';
+};
+
+export type RevokeGtmInviteLinkErrors = {
+    400: ErrorResponse;
+    401: ErrorResponse;
+    403: ErrorResponse;
+    404: ErrorResponse;
+    500: ErrorResponse;
+};
+
+export type RevokeGtmInviteLinkError = RevokeGtmInviteLinkErrors[keyof RevokeGtmInviteLinkErrors];
+
+export type RevokeGtmInviteLinkResponses = {
+    200: GtmInviteLink;
+};
+
+export type RevokeGtmInviteLinkResponse = RevokeGtmInviteLinkResponses[keyof RevokeGtmInviteLinkResponses];
+
+export type GetGtmInviteOfferData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/gtm-invite/offer';
+};
+
+export type GetGtmInviteOfferErrors = {
+    401: ErrorResponse;
+    500: ErrorResponse;
+};
+
+export type GetGtmInviteOfferError = GetGtmInviteOfferErrors[keyof GetGtmInviteOfferErrors];
+
+export type GetGtmInviteOfferResponses = {
+    200: GtmInviteOfferStatus;
+};
+
+export type GetGtmInviteOfferResponse = GetGtmInviteOfferResponses[keyof GetGtmInviteOfferResponses];
+
+export type ResolveGtmInviteLinkData = {
+    body?: never;
+    path: {
+        /**
+         * The token from the invite link URL
+         */
+        token: string;
+    };
+    query?: never;
+    url: '/gtm-invite/public/{token}';
+};
+
+export type ResolveGtmInviteLinkErrors = {
+    400: ErrorResponse;
+    404: ErrorResponse;
+    429: unknown;
+    500: ErrorResponse;
+};
+
+export type ResolveGtmInviteLinkError = ResolveGtmInviteLinkErrors[keyof ResolveGtmInviteLinkErrors];
+
+export type ResolveGtmInviteLinkResponses = {
+    200: PublicGtmInviteLink;
+};
+
+export type ResolveGtmInviteLinkResponse = ResolveGtmInviteLinkResponses[keyof ResolveGtmInviteLinkResponses];
+
+export type RedeemGtmInviteLinkData = {
+    body: RedeemGtmInviteLinkRequest;
+    path?: never;
+    query?: never;
+    url: '/gtm-invite/redeem';
+};
+
+export type RedeemGtmInviteLinkErrors = {
+    400: ErrorResponse;
+    401: ErrorResponse;
+    404: ErrorResponse;
+    409: ErrorResponse;
+    410: ErrorResponse;
+    500: ErrorResponse;
+};
+
+export type RedeemGtmInviteLinkError = RedeemGtmInviteLinkErrors[keyof RedeemGtmInviteLinkErrors];
+
+export type RedeemGtmInviteLinkResponses = {
+    200: GtmInviteOffer;
+};
+
+export type RedeemGtmInviteLinkResponse = RedeemGtmInviteLinkResponses[keyof RedeemGtmInviteLinkResponses];
 
 export type HealthHandlerData = {
     body?: never;
@@ -1215,9 +2458,9 @@ export type InitGmailLinkData = {
          */
         original_url: string;
         /**
-         * **OPTIONAL**. Also request the Google Calendar scope. Only honored when the deployment allows calendar scope requests; pass it from calendar entry points only, since the extra scope changes the Google consent screen.
+         * **OPTIONAL**. Which capabilities to request consent for: `gmail` (default), `gmail_and_calendar`, or `calendar`. The calendar variants are only honored when the deployment allows calendar scope requests.
          */
-        include_calendar?: boolean;
+        scopes?: string;
     };
     url: '/link/gmail';
 };
@@ -1919,6 +3162,37 @@ export type JoinTeamResponses = {
     200: unknown;
 };
 
+export type PatchTeamMemberPlanData = {
+    body: PatchTeamMemberPlanRequest;
+    path: {
+        /**
+         * The member whose seat plan changes
+         */
+        member_user_id: string;
+    };
+    query?: never;
+    url: '/team/members/{member_user_id}/plan';
+};
+
+export type PatchTeamMemberPlanErrors = {
+    400: ErrorResponse;
+    401: ErrorResponse;
+    /**
+     * The team has no active subscription
+     */
+    402: ErrorResponse;
+    404: ErrorResponse;
+    500: ErrorResponse;
+};
+
+export type PatchTeamMemberPlanError = PatchTeamMemberPlanErrors[keyof PatchTeamMemberPlanErrors];
+
+export type PatchTeamMemberPlanResponses = {
+    200: TeamMember;
+};
+
+export type PatchTeamMemberPlanResponse = PatchTeamMemberPlanResponses[keyof PatchTeamMemberPlanResponses];
+
 export type ToggleTeamNonAdminInvitesData = {
     body?: never;
     path?: never;
@@ -2016,6 +3290,7 @@ export type CreateUserData = {
 
 export type CreateUserErrors = {
     400: ErrorResponse;
+    403: ErrorResponse;
     500: ErrorResponse;
 };
 
@@ -2353,10 +3628,49 @@ export type CreateCheckoutSessionV2Errors = {
 export type CreateCheckoutSessionV2Error = CreateCheckoutSessionV2Errors[keyof CreateCheckoutSessionV2Errors];
 
 export type CreateCheckoutSessionV2Responses = {
-    200: StripeSessionResponse;
+    200: CheckoutSessionV2Response;
 };
 
 export type CreateCheckoutSessionV2Response = CreateCheckoutSessionV2Responses[keyof CreateCheckoutSessionV2Responses];
+
+export type ChangePlanData = {
+    body: ChangePlanRequest;
+    path?: never;
+    query?: never;
+    url: '/user/stripe/plan';
+};
+
+export type ChangePlanErrors = {
+    /**
+     * Plan not available
+     */
+    400: ErrorResponse;
+    /**
+     * The team has no active subscription
+     */
+    402: ErrorResponse;
+    /**
+     * Only team admins change plans on a team
+     */
+    403: ErrorResponse;
+    /**
+     * No active subscription
+     */
+    404: ErrorResponse;
+    /**
+     * Already on this plan, or more than one active subscription
+     */
+    409: ErrorResponse;
+    500: ErrorResponse;
+};
+
+export type ChangePlanError = ChangePlanErrors[keyof ChangePlanErrors];
+
+export type ChangePlanResponses = {
+    200: ChangePlanResponse;
+};
+
+export type ChangePlanResponse2 = ChangePlanResponses[keyof ChangePlanResponses];
 
 export type CreatePortalSessionData = {
     body: CreatePortalSessionRequest;

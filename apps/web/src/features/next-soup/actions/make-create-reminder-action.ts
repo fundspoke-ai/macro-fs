@@ -1,35 +1,71 @@
 import { openReminderComposer } from '@app/features/reminders/reminder-composer';
-import { ENABLE_REMINDERS } from '@core/constant/featureFlags';
+import { enableReminders, isFeatureEnabled } from '@core/constant/featureFlags';
 import type { EntityData } from '@entity';
-import { reminderTarget } from '@queries/reminders/reminders';
-import type { SoupState } from '../create-soup-state';
+import type {
+  EntityActionListState,
+  EntityActionNavigationHandler,
+} from './entity-action-context';
 
-/**
- * Set a reminder about an entity.
- *
- * `execute` opens the composer rather than writing anything: the description
- * and the date both come from the user, so there is nothing to do until that
- * modal resolves. Single-entity only — a reminder points at one thing.
- *
- * `canExecute` carries the `ENABLE_REMINDERS` gate, which is what every surface
- * (hotkeys, both soup menus, the block ⋯ menu) checks before offering the
- * action — so the flag reaches all of them from here. `execute` re-checks it,
- * since a stale command-menu entry could otherwise still fire.
- */
-export const makeCreateReminderAction = () => {
-  const canExecute = (entity: EntityData): boolean =>
-    ENABLE_REMINDERS() && reminderTarget(entity) !== undefined;
+type MakeCreateReminderOptions = {
+  onEmailSaved?: () => void | Promise<void>;
+};
+
+export const makeCreateReminderAction = (
+  options?: MakeCreateReminderOptions
+) => {
+  const canExecute = (
+    entity: EntityData
+  ): entity is Extract<EntityData, { type: 'email' }> =>
+    isFeatureEnabled(enableReminders) && entity.type === 'email';
 
   const execute = (entities: EntityData[]) => {
     const [entity] = entities;
     if (!entity || !canExecute(entity)) return;
-    openReminderComposer(entity);
+    openReminderComposer(entity, {
+      onCreated: options?.onEmailSaved,
+    });
   };
 
-  const executeWithSoup = async (entities: EntityData[], _soup: SoupState) => {
-    // Opening the composer doesn't change the list, so selection and focus are
-    // left where they are.
-    execute(entities);
+  const executeWithSoup = async (
+    entities: EntityData[],
+    soup: EntityActionListState,
+    /** Whether the list moves on once the email is snoozed. */
+    opts: {
+      advances: boolean;
+      onNavigate?: EntityActionNavigationHandler;
+    }
+  ) => {
+    const [entity] = entities;
+    if (!entity || !canExecute(entity)) return;
+    openReminderComposer(entity, {
+      onCreated: async () => {
+        // A hosted email view owns pagination and its navigation history.
+        if (options?.onEmailSaved) {
+          await options.onEmailSaved();
+          return;
+        }
+        if (opts.advances) {
+          const next = [1, -1]
+            .map((direction) =>
+              soup.navigate.peekOffset(direction, {
+                wrapNavigation: false,
+                skipGroupHeaders: true,
+                skipLoadMore: true,
+              })
+            )
+            .find(
+              (candidate) =>
+                candidate && candidate.row.original.id !== entity.id
+            )?.row;
+          soup.selection.clear();
+          soup.focus.set(next?.id);
+          opts.onNavigate?.({
+            actionId: 'create-reminder',
+            entity: next?.original,
+          });
+        }
+      },
+    });
   };
 
   return { canExecute, execute, executeWithSoup };

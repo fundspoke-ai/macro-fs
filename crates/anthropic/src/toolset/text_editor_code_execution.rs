@@ -3,6 +3,7 @@ use crate::types::request::CODE_EXECUTION_TOOL;
 use crate::types::response::ResponseContentKind;
 use crate::types::response::code_execution::TextEditorCodeExecutionResponse;
 use ai_toolset::{AsyncTool, RequestContext, ServiceContext, ToolCallError, ToolResult};
+use ai_toolset::{ToolAnnotated, ToolAnnotations};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -18,6 +19,11 @@ pub struct TextEditorCodeExecution {
     pub input: String,
 }
 
+impl ToolAnnotated for TextEditorCodeExecution {
+    const ANNOTATIONS: ToolAnnotations =
+        ToolAnnotations::destructive("Edit file in sandbox").with_open_world();
+}
+
 #[async_trait]
 impl AsyncTool<AnthropicToolContext> for TextEditorCodeExecution {
     type Output = TextEditorCodeExecutionResponse;
@@ -26,12 +32,12 @@ impl AsyncTool<AnthropicToolContext> for TextEditorCodeExecution {
     async fn call(
         &self,
         service_context: ServiceContext<AnthropicToolContext>,
-        _request_context: RequestContext,
+        request_context: RequestContext,
     ) -> ToolResult<Self::Output> {
         let ctx = &*service_context;
         let blocks = super::invoke_server_tool(
-            &ctx.client,
-            &ctx.model,
+            ctx,
+            &request_context,
             CODE_EXECUTION_TOOL.clone(),
             &self.input,
         )

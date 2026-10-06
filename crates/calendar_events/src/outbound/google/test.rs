@@ -38,6 +38,109 @@ fn calendar_access_role_is_reflected_on_mapped_events() {
 }
 
 #[test]
+fn event_type_is_mapped_with_an_unknown_fallback() {
+    let range = OccurrenceRange {
+        starts_at: DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        ends_at: DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        start_date: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+    };
+    let target = GoogleCalendarTarget {
+        owner_id: "macro|office@example.com".to_string(),
+        email_link_id: Uuid::now_v7(),
+        account_id: Uuid::now_v7(),
+        calendar_id: Uuid::now_v7(),
+        provider_calendar_id: "primary".to_string(),
+        is_read_only: false,
+        range,
+    };
+    let master = |event_type: Option<&str>| -> GoogleEvent {
+        let mut value = serde_json::json!({
+            "id": "provider-event",
+            "iCalUID": "office@example.com",
+            "summary": "Office",
+            "start": {"date": "2026-08-26"},
+            "end": {"date": "2026-08-27"},
+            "created": "2026-08-01T00:00:00Z",
+            "updated": "2026-08-01T00:00:00Z"
+        });
+        if let Some(event_type) = event_type {
+            value["eventType"] = event_type.into();
+        }
+        serde_json::from_value(value).unwrap()
+    };
+
+    for (provider, expected) in [
+        (None, EventType::Default),
+        (Some("default"), EventType::Default),
+        (Some("workingLocation"), EventType::WorkingLocation),
+        (Some("outOfOffice"), EventType::OutOfOffice),
+        (Some("focusTime"), EventType::FocusTime),
+        (Some("birthday"), EventType::Birthday),
+        (Some("fromGmail"), EventType::FromGmail),
+        (Some("someFutureType"), EventType::Default),
+    ] {
+        let upsert = map_upsert(&target, master(provider), Vec::new(), Vec::new()).unwrap();
+        assert_eq!(upsert.event.event_type, expected, "provider {provider:?}");
+    }
+}
+
+#[test]
+fn creator_is_mapped_separately_from_the_organizer() {
+    let master: GoogleEvent = serde_json::from_value(serde_json::json!({
+        "id": "provider-event",
+        "iCalUID": "created@example.com",
+        "summary": "On someone else's calendar",
+        "start": {"dateTime": "2026-08-27T19:00:00Z", "timeZone": "UTC"},
+        "end": {"dateTime": "2026-08-27T20:45:00Z", "timeZone": "UTC"},
+        "organizer": {"email": "jackson@example.com", "displayName": "Jackson Kustec"},
+        "creator": {"email": "teo@example.com", "displayName": "Teo Nys"},
+        "created": "2026-08-27T01:00:00Z",
+        "updated": "2026-08-27T01:00:00Z"
+    }))
+    .unwrap();
+    let range = OccurrenceRange {
+        starts_at: DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        ends_at: DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        start_date: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+    };
+    let target = GoogleCalendarTarget {
+        owner_id: "macro|jackson@example.com".to_string(),
+        email_link_id: Uuid::now_v7(),
+        account_id: Uuid::now_v7(),
+        calendar_id: Uuid::now_v7(),
+        provider_calendar_id: "primary".to_string(),
+        is_read_only: false,
+        range,
+    };
+
+    let upsert = map_upsert(&target, master, Vec::new(), Vec::new()).unwrap();
+
+    assert_eq!(
+        upsert.event.organizer_email.as_deref(),
+        Some("jackson@example.com")
+    );
+    assert_eq!(
+        upsert.event.organizer_name.as_deref(),
+        Some("Jackson Kustec")
+    );
+    assert_eq!(
+        upsert.event.creator_email.as_deref(),
+        Some("teo@example.com")
+    );
+    assert_eq!(upsert.event.creator_name.as_deref(), Some("Teo Nys"));
+}
+
+#[test]
 fn malformed_recurring_instance_does_not_overstate_snapshot_coverage() {
     let master: GoogleEvent = serde_json::from_value(serde_json::json!({
         "id": "provider-master",
@@ -80,6 +183,97 @@ fn malformed_recurring_instance_does_not_overstate_snapshot_coverage() {
 
     let upsert = map_upsert(&target, master, Vec::new(), vec![malformed_instance]).unwrap();
     assert!(upsert.occurrences.is_empty());
+}
+
+/// Google's `instances` feed can return two entries that resolve to the same
+/// occurrence key — a moved exception whose original start still lands on the
+/// series slot, a pagination overlap, a DST boundary. Both would collide on
+/// the `(event_id, occurrence_key)` primary key and wedge the whole backfill,
+/// so the mapper collapses them and keeps the live instance over a cancelled
+/// tombstone.
+#[test]
+fn duplicate_instances_collapse_to_one_live_occurrence() {
+    let master: GoogleEvent = serde_json::from_value(serde_json::json!({
+        "id": "provider-master",
+        "iCalUID": "recurring@example.com",
+        "summary": "Recurring calendar event",
+        "start": {"dateTime": "2026-07-24T14:00:00Z", "timeZone": "UTC"},
+        "end": {"dateTime": "2026-07-24T15:00:00Z", "timeZone": "UTC"},
+        "recurrence": ["RRULE:FREQ=DAILY"],
+        "created": "2026-07-20T14:00:00Z",
+        "updated": "2026-07-21T14:00:00Z"
+    }))
+    .unwrap();
+    let cancelled_instance: GoogleEvent = serde_json::from_value(serde_json::json!({
+        "id": "provider-master_20260724T140000Z",
+        "iCalUID": "recurring@example.com",
+        "recurringEventId": "provider-master",
+        "originalStartTime": {"dateTime": "2026-07-24T14:00:00Z", "timeZone": "UTC"},
+        "start": {"dateTime": "2026-07-24T14:00:00Z", "timeZone": "UTC"},
+        "end": {"dateTime": "2026-07-24T15:00:00Z", "timeZone": "UTC"},
+        "status": "cancelled"
+    }))
+    .unwrap();
+    let moved_instance: GoogleEvent = serde_json::from_value(serde_json::json!({
+        "id": "provider-master_20260724T140000Z",
+        "iCalUID": "recurring@example.com",
+        "recurringEventId": "provider-master",
+        "originalStartTime": {"dateTime": "2026-07-24T14:00:00Z", "timeZone": "UTC"},
+        "start": {"dateTime": "2026-07-24T16:00:00Z", "timeZone": "UTC"},
+        "end": {"dateTime": "2026-07-24T17:00:00Z", "timeZone": "UTC"},
+        "status": "confirmed"
+    }))
+    .unwrap();
+    let range = OccurrenceRange {
+        starts_at: DateTime::parse_from_rfc3339("2026-07-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        ends_at: DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        start_date: NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+    };
+    let target = GoogleCalendarTarget {
+        owner_id: "macro|recurring@example.com".to_string(),
+        email_link_id: Uuid::now_v7(),
+        account_id: Uuid::now_v7(),
+        calendar_id: Uuid::now_v7(),
+        provider_calendar_id: "primary".to_string(),
+        is_read_only: false,
+        range,
+    };
+
+    // The tombstone is fed first so the live instance must win by replacement,
+    // not merely by arriving first.
+    let upsert = map_upsert(
+        &target,
+        master,
+        Vec::new(),
+        vec![cancelled_instance, moved_instance],
+    )
+    .unwrap();
+
+    assert_eq!(upsert.occurrences.len(), 1);
+    let occurrence = &upsert.occurrences[0];
+    assert_eq!(occurrence.occurrence_key, "2026-07-24T14:00:00+00:00");
+    assert!(
+        !occurrence.is_cancelled,
+        "the live instance must survive the collapse"
+    );
+    assert_eq!(
+        occurrence.time,
+        EventTime::Timed {
+            starts_at: DateTime::parse_from_rfc3339("2026-07-24T16:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            ends_at: DateTime::parse_from_rfc3339("2026-07-24T17:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            time_zone: Some("UTC".to_string()),
+        },
+        "the surviving row keeps the live instance's own time"
+    );
 }
 
 #[test]
@@ -133,6 +327,7 @@ fn malformed_master_is_quarantined_without_deleting_its_provider_identity() {
 #[test]
 fn quota_forbidden_response_is_retryable() {
     let error = provider_response_error(
+        GoogleRequestKind::Read,
         StatusCode::FORBIDDEN,
         r#"{"error":{"message":"Quota exceeded","errors":[{"reason":"userRateLimitExceeded"}]}}"#,
     );
@@ -141,8 +336,26 @@ fn quota_forbidden_response_is_retryable() {
 }
 
 #[test]
+fn push_unsupported_watch_is_classified_apart_from_other_rejections() {
+    let error = provider_response_error(
+        GoogleRequestKind::Mutation,
+        StatusCode::BAD_REQUEST,
+        r#"{"error":{"code":400,"message":"Push notifications are not supported by this resource.","errors":[{"domain":"global","reason":"pushNotSupportedForRequestedResource","message":"Push notifications are not supported by this resource."}]}}"#,
+    );
+    assert_eq!(error.kind(), GoogleProviderErrorKind::PushUnsupported);
+
+    let other = provider_response_error(
+        GoogleRequestKind::Mutation,
+        StatusCode::BAD_REQUEST,
+        r#"{"error":{"code":400,"message":"Invalid channel","errors":[{"reason":"invalid"}]}}"#,
+    );
+    assert_eq!(other.kind(), GoogleProviderErrorKind::Permanent);
+}
+
+#[test]
 fn insufficient_permissions_require_reauthorization() {
     let error = provider_response_error(
+        GoogleRequestKind::Read,
         StatusCode::FORBIDDEN,
         r#"{"error":{"message":"Insufficient Permission","errors":[{"reason":"insufficientPermissions"}]}}"#,
     );
@@ -153,6 +366,7 @@ fn insufficient_permissions_require_reauthorization() {
 #[test]
 fn expired_sync_token_requests_a_full_resync() {
     let error = provider_response_error(
+        GoogleRequestKind::Read,
         StatusCode::GONE,
         r#"{"error":{"message":"Sync token is no longer valid","errors":[{"reason":"fullSyncRequired"}]}}"#,
     );
@@ -163,6 +377,7 @@ fn expired_sync_token_requests_a_full_resync() {
 #[test]
 fn rejected_access_token_is_retryable_with_a_fresh_token() {
     let error = provider_response_error(
+        GoogleRequestKind::Read,
         StatusCode::UNAUTHORIZED,
         r#"{"error":{"message":"Invalid Credentials","errors":[{"reason":"authError"}]}}"#,
     );
@@ -171,13 +386,106 @@ fn rejected_access_token_is_retryable_with_a_fresh_token() {
 }
 
 #[test]
-fn unrelated_forbidden_response_is_permanent() {
+fn unrelated_forbidden_mutation_is_permanent() {
     let error = provider_response_error(
+        GoogleRequestKind::Mutation,
         StatusCode::FORBIDDEN,
         r#"{"error":{"message":"Forbidden","errors":[{"reason":"forbidden"}]}}"#,
     );
 
     assert_eq!(error.kind(), GoogleProviderErrorKind::Permanent);
+}
+
+#[test]
+fn undocumented_precondition_failure_is_retryable() {
+    // We never send an If-Match, so a 412 is retryable for mutations too.
+    for kind in [GoogleRequestKind::Read, GoogleRequestKind::Mutation] {
+        let error = provider_response_error(
+            kind,
+            StatusCode::PRECONDITION_FAILED,
+            r#"{"error":{"message":"Precondition check failed."}}"#,
+        );
+
+        assert_eq!(error.kind(), GoogleProviderErrorKind::Transient);
+    }
+}
+
+#[test]
+fn unknown_client_errors_are_retryable_on_reads_but_permanent_on_mutations() {
+    let read = provider_response_error(
+        GoogleRequestKind::Read,
+        StatusCode::CONFLICT,
+        r#"{"error":{"message":"Conflict"}}"#,
+    );
+    assert_eq!(read.kind(), GoogleProviderErrorKind::Transient);
+
+    let mutation = provider_response_error(
+        GoogleRequestKind::Mutation,
+        StatusCode::CONFLICT,
+        r#"{"error":{"message":"Conflict"}}"#,
+    );
+    assert_eq!(mutation.kind(), GoogleProviderErrorKind::Permanent);
+}
+
+/// The calendar list has no per-calendar isolation to bound a deterministic
+/// failure, so an unknown 4xx there stays terminal like a mutation, while the
+/// undocumented 412 is still retried at account scope.
+#[test]
+fn unknown_client_errors_on_the_account_read_stay_permanent() {
+    let forbidden = provider_response_error(
+        GoogleRequestKind::AccountRead,
+        StatusCode::FORBIDDEN,
+        r#"{"error":{"message":"Forbidden","errors":[{"reason":"forbidden"}]}}"#,
+    );
+    assert_eq!(forbidden.kind(), GoogleProviderErrorKind::Permanent);
+
+    let precondition = provider_response_error(
+        GoogleRequestKind::AccountRead,
+        StatusCode::PRECONDITION_FAILED,
+        r#"{"error":{"message":"Precondition check failed."}}"#,
+    );
+    assert_eq!(precondition.kind(), GoogleProviderErrorKind::Transient);
+}
+
+#[test]
+fn provider_error_keeps_google_reason_strings() {
+    let error = provider_response_error(
+        GoogleRequestKind::Read,
+        StatusCode::FORBIDDEN,
+        r#"{"error":{"message":"Forbidden","errors":[{"reason":"variableTermLimitExceeded"}]}}"#,
+    );
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("Forbidden"), "{rendered}");
+    assert!(rendered.contains("variableTermLimitExceeded"), "{rendered}");
+}
+
+#[test]
+fn readback_failures_after_a_write_are_never_retryable() {
+    // A retry of the outer mutation would re-apply the write (a duplicate
+    // POST, re-notified guests), so a retryable readback failure is demoted.
+    for kind in [
+        GoogleProviderErrorKind::Transient,
+        GoogleProviderErrorKind::SyncTokenExpired,
+    ] {
+        let demoted = non_retryable_after_write(GoogleProviderError::new(kind, "Conflict"));
+        assert_eq!(demoted.kind(), GoogleProviderErrorKind::Permanent);
+        assert!(
+            demoted.message().contains("Conflict"),
+            "{}",
+            demoted.message()
+        );
+    }
+
+    // Kinds a retry would not help pass through untouched.
+    for kind in [
+        GoogleProviderErrorKind::Permanent,
+        GoogleProviderErrorKind::ReauthRequired,
+    ] {
+        let kept = non_retryable_after_write(GoogleProviderError::new(kind, "kept"));
+        assert_eq!(kept.kind(), kind);
+        assert_eq!(kept.message(), "kept");
+    }
 }
 
 #[test]
@@ -559,6 +867,64 @@ fn rsvp_patch_updates_only_the_connected_attendee() {
     assert_eq!(attendees[0]["comment"], "unrelated state that must survive");
 }
 
+fn google_attendee(email: &str, is_self: bool) -> GoogleAttendee {
+    serde_json::from_value(serde_json::json!({
+        "email": email,
+        "self": is_self,
+        "responseStatus": "needsAction",
+    }))
+    .unwrap()
+}
+
+#[test]
+fn rsvp_patches_the_actor_row_not_the_google_self_flag() {
+    let attendees = vec![
+        google_attendee("jacob@example.com", true),
+        google_attendee("jackson@example.com", false),
+    ];
+    let actor = ActorInboxes::from_owned(vec!["jackson@example.com".to_string()])
+        .expect("owned addresses remain after normalize");
+    let found = find_actor_attendee(&attendees, &actor);
+    assert_eq!(
+        found.and_then(|attendee| attendee.email.as_deref()),
+        Some("jackson@example.com")
+    );
+}
+
+#[test]
+fn rsvp_does_not_patch_another_attendee_when_the_requester_is_absent() {
+    let attendees = vec![google_attendee("jacob@example.com", true)];
+    let actor = ActorInboxes::from_owned(vec!["jackson@example.com".to_string()])
+        .expect("owned addresses remain after normalize");
+    assert!(find_actor_attendee(&attendees, &actor).is_none());
+}
+
+#[test]
+fn google_attendees_write_an_explicit_response_status() {
+    let body = google_attendees_body(&[
+        CalendarAttendeeInput {
+            email: "self@example.com".to_string(),
+            is_optional: false,
+            response_status: Some(AttendeeResponseStatus::Accepted),
+        },
+        CalendarAttendeeInput {
+            email: "guest@example.com".to_string(),
+            is_optional: true,
+            response_status: None,
+        },
+    ]);
+
+    assert_eq!(body[0]["email"], "self@example.com");
+    assert_eq!(body[0]["responseStatus"], "accepted");
+    assert_eq!(body[0]["optional"], false);
+    assert_eq!(body[1]["email"], "guest@example.com");
+    assert_eq!(body[1]["optional"], true);
+    assert!(
+        body[1].get("responseStatus").is_none(),
+        "a guest without a status must keep Google's default"
+    );
+}
+
 #[test]
 fn reminders_round_trip_between_google_and_the_domain() {
     let master: GoogleEvent = serde_json::from_value(serde_json::json!({
@@ -642,6 +1008,7 @@ fn mutation_bodies_serialize_reminders_in_google_shape() {
     });
 
     let draft = CalendarEventDraft {
+        idempotency_key: None,
         title: "New".to_string(),
         description: None,
         location: None,
@@ -660,6 +1027,7 @@ fn mutation_bodies_serialize_reminders_in_google_shape() {
         transparency: None,
         reminders: Some(reminders.clone()),
         conference: None,
+        out_of_office: None,
     };
     assert_eq!(draft_body(&draft)["reminders"], expected);
 
@@ -675,6 +1043,43 @@ fn mutation_bodies_serialize_reminders_in_google_shape() {
             .get("reminders"),
         None,
         "an untouched patch must not clobber provider reminders"
+    );
+}
+
+/// The provider write for a patch must carry exactly the supplied fields:
+/// a stray key overwrites provider state the user never asked to change —
+/// a time-only patch that also wrote `recurrence` or `summary` would mangle
+/// a recurring series' rules or revert its title.
+#[test]
+fn patch_bodies_carry_only_the_supplied_fields() {
+    let time_only = patch_body(&CalendarEventPatch {
+        time: Some(EventTime::Timed {
+            starts_at: DateTime::parse_from_rfc3339("2026-08-18T20:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            ends_at: DateTime::parse_from_rfc3339("2026-08-18T22:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            time_zone: None,
+        }),
+        ..CalendarEventPatch::default()
+    });
+    let mut keys: Vec<_> = time_only.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["end", "start"]);
+
+    let title_only = patch_body(&CalendarEventPatch {
+        title: Some("Renamed".to_string()),
+        ..CalendarEventPatch::default()
+    });
+    let keys: Vec<_> = title_only.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(keys, ["summary"]);
+
+    assert!(
+        patch_body(&CalendarEventPatch::default())
+            .as_object()
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -740,6 +1145,7 @@ fn conference_writes_declare_conference_support() {
 #[test]
 fn drafts_carry_conference_requests_and_their_parameter() {
     let draft = CalendarEventDraft {
+        idempotency_key: None,
         title: "Kickoff".to_string(),
         description: None,
         location: None,
@@ -758,6 +1164,7 @@ fn drafts_carry_conference_requests_and_their_parameter() {
         transparency: None,
         reminders: None,
         conference: Some(ConferenceChange::GoogleMeet),
+        out_of_office: None,
     };
 
     let body = draft_body(&draft);
@@ -767,6 +1174,101 @@ fn drafts_carry_conference_requests_and_their_parameter() {
         "hangoutsMeet"
     );
     assert_eq!(conference_query(&body), Some(CONFERENCE_DATA_VERSION));
+}
+
+fn timed_draft(out_of_office: Option<OutOfOfficeProperties>) -> CalendarEventDraft {
+    CalendarEventDraft {
+        idempotency_key: None,
+        title: "Away".to_string(),
+        description: None,
+        location: None,
+        time: EventTime::Timed {
+            starts_at: DateTime::parse_from_rfc3339("2026-07-24T14:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            ends_at: DateTime::parse_from_rfc3339("2026-07-24T18:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            time_zone: None,
+        },
+        attendees: Vec::new(),
+        recurrence_lines: Vec::new(),
+        visibility: None,
+        transparency: None,
+        reminders: None,
+        conference: None,
+        out_of_office,
+    }
+}
+
+#[test]
+fn an_out_of_office_draft_declares_its_type_blocks_time_and_carries_its_properties() {
+    let body = draft_body(&timed_draft(Some(OutOfOfficeProperties {
+        auto_decline_mode:
+            crate::domain::models::OutOfOfficeAutoDeclineMode::DeclineAllConflictingInvitations,
+        decline_message: Some("On vacation".to_string()),
+    })));
+
+    assert_eq!(body["eventType"], "outOfOffice");
+    // Google rejects a transparent out-of-office event: it must block time.
+    assert_eq!(body["transparency"], "opaque");
+    assert_eq!(
+        body["outOfOfficeProperties"]["autoDeclineMode"],
+        "declineAllConflictingInvitations"
+    );
+    assert_eq!(
+        body["outOfOfficeProperties"]["declineMessage"],
+        "On vacation"
+    );
+}
+
+#[test]
+fn an_out_of_office_draft_without_a_message_omits_it_and_defaults_to_declining_nothing() {
+    let body = draft_body(&timed_draft(Some(OutOfOfficeProperties::default())));
+
+    assert_eq!(
+        body["outOfOfficeProperties"]["autoDeclineMode"],
+        "declineNone"
+    );
+    assert!(
+        body["outOfOfficeProperties"]
+            .as_object()
+            .unwrap()
+            .get("declineMessage")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_regular_draft_never_writes_an_event_type_or_out_of_office_block() {
+    let body = draft_body(&timed_draft(None));
+
+    assert!(body.as_object().unwrap().get("eventType").is_none());
+    assert!(
+        body.as_object()
+            .unwrap()
+            .get("outOfOfficeProperties")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_patch_can_replace_out_of_office_properties_without_touching_the_immutable_type() {
+    let body = patch_body(&CalendarEventPatch {
+        out_of_office: Some(OutOfOfficeProperties {
+            auto_decline_mode:
+                crate::domain::models::OutOfOfficeAutoDeclineMode::DeclineOnlyNewConflictingInvitations,
+            decline_message: None,
+        }),
+        ..CalendarEventPatch::default()
+    });
+
+    assert_eq!(
+        body["outOfOfficeProperties"]["autoDeclineMode"],
+        "declineOnlyNewConflictingInvitations"
+    );
+    // The event type is immutable, so a patch never restates it.
+    assert!(body.as_object().unwrap().get("eventType").is_none());
 }
 
 #[test]
@@ -866,4 +1368,99 @@ fn conference_data_survives_the_raw_payload_round_trip() {
         conference_url(round_tripped.conference_data.as_ref()).as_deref(),
         Some("https://meet.google.com/abc-defg-hij")
     );
+}
+
+#[cfg(feature = "inbound")]
+#[tokio::test]
+async fn keyed_create_recovers_lost_response_and_duplicate_conflict_without_second_insert() {
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::StatusCode,
+        response::IntoResponse,
+        routing::{get, post},
+    };
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    #[derive(Clone)]
+    struct Remote {
+        event: Arc<Mutex<Option<serde_json::Value>>>,
+        posts: Arc<AtomicUsize>,
+        insert_status: StatusCode,
+    }
+    async fn read(State(s): State<Remote>) -> axum::response::Response {
+        match s.event.lock().unwrap().clone() {
+            Some(event) => Json(event).into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+    async fn insert(
+        State(s): State<Remote>,
+        Json(body): Json<serde_json::Value>,
+    ) -> axum::response::Response {
+        s.posts.fetch_add(1, Ordering::SeqCst);
+        let mut event = body;
+        event["iCalUID"] = serde_json::json!("stable@example.test");
+        event["created"] = serde_json::json!("2026-07-20T14:00:00Z");
+        event["updated"] = serde_json::json!("2026-07-20T14:00:00Z");
+        *s.event.lock().unwrap() = Some(event);
+        (
+            s.insert_status,
+            Json(serde_json::json!({"error":{"message":"injected uncertain result"}})),
+        )
+            .into_response()
+    }
+    for insert_status in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::CONFLICT] {
+        let remote = Remote {
+            event: Default::default(),
+            posts: Default::default(),
+            insert_status,
+        };
+        let app = Router::new()
+            .route("/calendars/primary/events", post(insert))
+            .route("/calendars/primary/events/{id}", get(read))
+            .with_state(remote.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = GoogleCalendarClient {
+            client: Client::new(),
+            gate: UnmeteredGate,
+            api_base: endpoint,
+        };
+        let target = GoogleCalendarTarget {
+            owner_id: "macro|test@example.test".into(),
+            email_link_id: Uuid::now_v7(),
+            account_id: Uuid::now_v7(),
+            calendar_id: Uuid::now_v7(),
+            provider_calendar_id: "primary".into(),
+            is_read_only: false,
+            range: OccurrenceRange::maintenance_horizon(Utc::now()),
+        };
+        let mut draft = timed_draft(None);
+        draft.idempotency_key = Some(Uuid::now_v7());
+        let first = client.create_event("test-token", &target, &draft).await;
+        assert_eq!(first.is_ok(), insert_status == StatusCode::CONFLICT);
+        client
+            .create_event("test-token", &target, &draft)
+            .await
+            .unwrap();
+        assert_eq!(remote.posts.load(Ordering::SeqCst), 1);
+        let provider_id = remote.event.lock().unwrap().as_ref().unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            provider_id,
+            crate::domain::models::creation_provider_id(
+                draft.idempotency_key.unwrap(),
+                &target.owner_id
+            )
+        );
+        task.abort();
+    }
 }

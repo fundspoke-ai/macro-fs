@@ -10,6 +10,11 @@ export const FileTypeMap = {
   },
   pdf: { extension: 'pdf', mime: 'application/pdf', app: 'pdf' },
   md: { extension: 'md', mime: 'text/markdown', app: 'md' },
+  spreadsheet: {
+    extension: 'spreadsheet',
+    mime: 'application/x-macro-spreadsheet',
+    app: 'document',
+  },
   canvas: {
     extension: 'canvas',
     mime: 'application/x-macro-canvas',
@@ -545,6 +550,9 @@ export const FileTypeMap = {
   ps: { extension: 'ps', mime: 'application/postscript', app: 'vector' },
   dxf: { extension: 'dxf', mime: 'image/vnd.dxf', app: 'vector' },
   dwg: { extension: 'dwg', mime: 'image/vnd.dwg', app: 'vector' },
+  fig: { extension: 'fig', mime: 'application/x-figma', app: 'vector' },
+  psd: { extension: 'psd', mime: 'image/vnd.adobe.photoshop', app: 'vector' },
+  psb: { extension: 'psb', mime: 'image/vnd.adobe.photoshop', app: 'vector' },
   stl: { extension: 'stl', mime: 'model/stl', app: '3d' },
   obj: { extension: 'obj', mime: 'model/obj', app: '3d' },
   fbx: { extension: 'fbx', mime: 'application/octet-stream', app: '3d' },

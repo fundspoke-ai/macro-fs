@@ -1,21 +1,144 @@
 use std::collections::HashMap;
 
+use entity_registry::{BotFacts, EntityRegistryResult, OwnerGrantPolicy};
+use entity_registry_db_utils::OwnedEntityRegistrar;
 use macro_db_migrator::MACRO_DB_MIGRATIONS;
 use macro_user_id::{cowlike::CowLike, user_id::MacroUserIdStr};
 use model::document::FileType;
 use model::folder::{FileSystemNode, FileSystemNodeWithIds, FolderItem};
 use model::item::Item;
 use model::project::ProjectPreviewV2;
-use models_permissions::share_permission::access_level::AccessLevel;
-use sqlx::{Pool, Postgres};
+use model_owner::Owner;
+use models_permissions::share_permission::{
+    LinkShare, SharePermissionV2, UpdateSharePermissionRequestV2, access_level::AccessLevel,
+};
+use sqlx::{PgPool, Pool, Postgres, Row};
 
 use super::PgProjectRepo;
 use crate::domain::models::{CreateProjectArgs, EditProjectArgs, UploadFolderRepoArgs};
 use crate::domain::ports::ProjectRepo;
 
+#[derive(Clone)]
+pub(super) struct NoBots;
+
+impl BotFacts for NoBots {
+    async fn sponsor(&self, _bot: bot_id::BotId) -> EntityRegistryResult<Option<Owner>> {
+        Ok(None)
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct SponsoredBy(pub(super) Owner);
+
+impl BotFacts for SponsoredBy {
+    async fn sponsor(&self, _bot: bot_id::BotId) -> EntityRegistryResult<Option<Owner>> {
+        Ok(Some(self.0.clone()))
+    }
+}
+
+pub(super) type TestRepo = PgProjectRepo<NoBots>;
+
+pub(super) fn test_repo_with<B: BotFacts>(pool: PgPool, bots: B) -> PgProjectRepo<B> {
+    PgProjectRepo::new(pool, OwnedEntityRegistrar::new(OwnerGrantPolicy::new(bots)))
+}
+
+pub(super) fn test_repo(pool: PgPool) -> TestRepo {
+    test_repo_with(pool, NoBots)
+}
+
 const ROOT_ID: &str = "10000000-0000-0000-0000-000000000001";
 const CHILD_ID: &str = "10000000-0000-0000-0000-000000000002";
 const DELETED_ID: &str = "10000000-0000-0000-0000-000000000009";
+const DOCUMENT_ID: &str = "20000000-0000-0000-0000-000000000001";
+const DELETED_DOCUMENT_ID: &str = "20000000-0000-0000-0000-000000000002";
+const CHAT_ID: &str = "30000000-0000-0000-0000-000000000001";
+const DELETED_CHAT_ID: &str = "30000000-0000-0000-0000-000000000002";
+
+fn project_owner() -> Owner {
+    Owner::User(MacroUserIdStr::try_from("macro|owner@test.com").unwrap())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct StoredSharePermission {
+    link_share: Option<String>,
+    link_share_access_level: Option<String>,
+}
+
+struct EntityRow {
+    owner_type: String,
+    owner_id: String,
+    entity_type: String,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn fetch_entity_row(pool: &Pool<Postgres>, id: &str) -> EntityRow {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            owner_type::text AS owner_type,
+            owner_id,
+            entity_type,
+            deleted_at
+        FROM entity
+        WHERE id = $1
+        "#,
+    )
+    .bind(uuid::Uuid::parse_str(id).unwrap())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    EntityRow {
+        owner_type: row.get("owner_type"),
+        owner_id: row.get("owner_id"),
+        entity_type: row.get("entity_type"),
+        deleted_at: row.get("deleted_at"),
+    }
+}
+
+async fn count_entity_rows(pool: &Pool<Postgres>) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM entity")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn count_entity_rows_for_ids(pool: &Pool<Postgres>, ids: &[String]) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM entity WHERE id::text = ANY($1)")
+        .bind(ids)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn count_entity_rows_for_id(pool: &Pool<Postgres>, id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM entity WHERE id::text = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn project_share_permission_columns(
+    pool: &Pool<Postgres>,
+    project_id: &str,
+) -> StoredSharePermission {
+    sqlx::query_as!(
+        StoredSharePermission,
+        r#"
+        SELECT
+            permission."linkShare" AS "link_share?",
+            permission."linkShareAccessLevel"::text AS "link_share_access_level?"
+        FROM "SharePermission" permission
+        JOIN "ProjectPermission" project_permission
+            ON project_permission."sharePermissionId" = permission.id
+        WHERE project_permission."projectId" = $1
+        "#,
+        project_id,
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
 
 #[sqlx::test(
     migrator = "MACRO_DB_MIGRATIONS",
@@ -24,7 +147,7 @@ const DELETED_ID: &str = "10000000-0000-0000-0000-000000000009";
 async fn history_listing_differs_from_owner_pending_listing(
     pool: Pool<Postgres>,
 ) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool);
+    let repo = test_repo(pool);
 
     let viewed = repo.get_projects_for_user("macro|viewer@test.com").await?;
     assert_eq!(
@@ -66,7 +189,7 @@ async fn history_listing_differs_from_owner_pending_listing(
 async fn basic_lookup_includes_deleted_but_full_lookup_excludes_it(
     pool: Pool<Postgres>,
 ) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool);
+    let repo = test_repo(pool);
 
     let basic = repo
         .get_basic_project(DELETED_ID)
@@ -86,7 +209,7 @@ async fn basic_lookup_includes_deleted_but_full_lookup_excludes_it(
 async fn children_are_depth_one_filtered_and_type_ordered(
     pool: Pool<Postgres>,
 ) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool);
+    let repo = test_repo(pool);
     let children = repo.get_project_children(ROOT_ID).await?;
 
     let children = children
@@ -118,7 +241,7 @@ async fn children_are_depth_one_filtered_and_type_ordered(
 async fn preview_preserves_found_and_missing_input_entries(
     pool: Pool<Postgres>,
 ) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool);
+    let repo = test_repo(pool);
     let missing = "10000000-0000-0000-0000-000000000099".to_owned();
     let previews = repo
         .batch_get_project_preview(&[CHILD_ID.to_owned(), missing.clone()])
@@ -145,11 +268,12 @@ async fn preview_preserves_found_and_missing_input_entries(
 async fn reads_share_permissions_and_bumps_modified_timestamp(
     pool: Pool<Postgres>,
 ) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool);
+    let repo = test_repo(pool);
     let permission = repo.get_project_share_permission(ROOT_ID).await?;
     assert_eq!(permission.id, "share-root");
     assert_eq!(permission.owner, "macro|owner@test.com");
-    assert_eq!(permission.public_access_level, Some(AccessLevel::Edit));
+    assert_eq!(permission.link_share, Some(LinkShare::Public));
+    assert_eq!(permission.link_share_access_level, Some(AccessLevel::Edit));
     assert_eq!(
         permission.channel_share_permissions.expect("channel").len(),
         1
@@ -175,12 +299,11 @@ async fn reads_share_permissions_and_bumps_modified_timestamp(
     fixtures(path = "../../../fixtures", scripts("projects_test_data"))
 )]
 async fn create_is_atomic_and_inserts_all_metadata(pool: Pool<Postgres>) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool.clone());
-    let permission =
-        models_permissions::share_permission::SharePermissionV2::new_project_share_permission();
+    let repo = test_repo(pool.clone());
+    let permission = SharePermissionV2::new_project_share_permission(None);
     let project = repo
         .create_project(CreateProjectArgs {
-            user_id: "macro|owner@test.com".to_owned(),
+            owner: project_owner(),
             name: "Created".to_owned(),
             parent_id: Some(ROOT_ID.to_owned()),
             share_permission: permission.clone(),
@@ -202,10 +325,25 @@ async fn create_is_atomic_and_inserts_all_metadata(pool: Pool<Postgres>) -> anyh
     .fetch_one(&pool)
     .await?;
     assert_eq!(metadata_count, 1);
+    assert_eq!(
+        project_share_permission_columns(&pool, &project.id).await,
+        StoredSharePermission {
+            link_share: None,
+            link_share_access_level: None,
+        }
+    );
+
+    let entity = fetch_entity_row(&pool, &project.id).await;
+    assert_eq!(entity.owner_type, "user");
+    assert_eq!(entity.owner_id, "macro|owner@test.com");
+    assert_eq!(entity.entity_type, "project");
+    assert_eq!(entity.deleted_at, None);
+
+    let entity_count_before_failed_create = count_entity_rows(&pool).await;
 
     assert!(
         repo.create_project(CreateProjectArgs {
-            user_id: "macro|owner@test.com".to_owned(),
+            owner: project_owner(),
             name: "Must roll back".to_owned(),
             parent_id: Some("missing-parent".to_owned()),
             share_permission: permission,
@@ -219,6 +357,109 @@ async fn create_is_atomic_and_inserts_all_metadata(pool: Pool<Postgres>) -> anyh
     .fetch_one(&pool)
     .await?;
     assert_eq!(rolled_back, 0);
+    let rolled_back_entity: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM entity
+        JOIN "Project" ON "Project".id = entity.id::text
+        WHERE "Project".name = 'Must roll back'
+        "#,
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(rolled_back_entity, 0);
+    assert_eq!(
+        count_entity_rows(&pool).await,
+        entity_count_before_failed_create
+    );
+    Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+struct OwnershipRowCounts {
+    projects: i64,
+    entities: i64,
+    grants: i64,
+}
+
+async fn ownership_row_counts(pool: &Pool<Postgres>) -> OwnershipRowCounts {
+    sqlx::query_as!(
+        OwnershipRowCounts,
+        r#"
+        SELECT
+            (SELECT COUNT(*) FROM "Project") AS "projects!",
+            (SELECT COUNT(*) FROM entity) AS "entities!",
+            (SELECT COUNT(*) FROM entity_access) AS "grants!"
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(
+    migrator = "MACRO_DB_MIGRATIONS",
+    fixtures(path = "../../../fixtures", scripts("projects_test_data"))
+)]
+async fn unsponsored_bot_owner_leaves_no_project_rows(pool: Pool<Postgres>) -> anyhow::Result<()> {
+    let bot_project = || CreateProjectArgs {
+        owner: Owner::Bot(bot_id::BotId::TEST_A),
+        name: "Bot project".to_owned(),
+        parent_id: None,
+        share_permission: SharePermissionV2::new_project_share_permission(None),
+    };
+    let before = ownership_row_counts(&pool).await;
+
+    assert!(
+        test_repo(pool.clone())
+            .create_project(bot_project())
+            .await
+            .is_err()
+    );
+    assert_eq!(ownership_row_counts(&pool).await, before);
+
+    test_repo_with(pool.clone(), SponsoredBy(project_owner()))
+        .create_project(bot_project())
+        .await?;
+    assert_eq!(
+        ownership_row_counts(&pool).await,
+        OwnershipRowCounts {
+            projects: before.projects + 1,
+            entities: before.entities + 1,
+            grants: before.grants + 2,
+        }
+    );
+    Ok(())
+}
+
+#[sqlx::test(
+    migrator = "MACRO_DB_MIGRATIONS",
+    fixtures(path = "../../../fixtures", scripts("projects_test_data"))
+)]
+async fn create_defaults_enabled_link_share_to_view(pool: Pool<Postgres>) -> anyhow::Result<()> {
+    let repo = test_repo(pool.clone());
+    let mut permission = SharePermissionV2::new_project_share_permission(None);
+    permission.link_share = Some(LinkShare::Team);
+
+    let project = repo
+        .create_project(CreateProjectArgs {
+            owner: project_owner(),
+            name: "Team project".to_owned(),
+            parent_id: None,
+            share_permission: permission,
+        })
+        .await?;
+
+    assert_eq!(
+        project_share_permission_columns(&pool, &project.id).await,
+        StoredSharePermission {
+            link_share: Some("TEAM".to_owned()),
+            link_share_access_level: Some("view".to_owned()),
+        }
+    );
+    let permission = repo.get_project_share_permission(&project.id).await?;
+    assert_eq!(permission.link_share, Some(LinkShare::Team));
+    assert_eq!(permission.link_share_access_level, Some(AccessLevel::View));
     Ok(())
 }
 
@@ -227,7 +468,7 @@ async fn create_is_atomic_and_inserts_all_metadata(pool: Pool<Postgres>) -> anyh
     fixtures(path = "../../../fixtures", scripts("projects_test_data"))
 )]
 async fn edit_supports_parent_flags_and_sharing(pool: Pool<Postgres>) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool);
+    let repo = test_repo(pool.clone());
     let unchanged = repo
         .edit_project(EditProjectArgs {
             project_id: CHILD_ID.to_owned(),
@@ -235,6 +476,7 @@ async fn edit_supports_parent_flags_and_sharing(pool: Pool<Postgres>) -> anyhow:
             update_parent: false,
             parent_id: None,
             share_permission: None,
+            team_share: None,
         })
         .await?;
     assert_eq!(unchanged.parent_id.as_deref(), Some(ROOT_ID));
@@ -246,6 +488,7 @@ async fn edit_supports_parent_flags_and_sharing(pool: Pool<Postgres>) -> anyhow:
             update_parent: true,
             parent_id: Some("10000000-0000-0000-0000-000000000005".to_owned()),
             share_permission: None,
+            team_share: None,
         })
         .await?;
     assert_eq!(
@@ -253,25 +496,122 @@ async fn edit_supports_parent_flags_and_sharing(pool: Pool<Postgres>) -> anyhow:
         Some("10000000-0000-0000-0000-000000000005")
     );
 
-    let cleared = repo
+    let updated = repo
         .edit_project(EditProjectArgs {
             project_id: ROOT_ID.to_owned(),
             name: None,
             update_parent: true,
             parent_id: None,
-            share_permission: Some(
-                models_permissions::share_permission::UpdateSharePermissionRequestV2 {
-                    is_public: Some(false),
-                    public_access_level: Some(AccessLevel::Edit),
-                    channel_share_permissions: None,
-                },
-            ),
+            share_permission: Some(UpdateSharePermissionRequestV2 {
+                link_share: Some(Some(LinkShare::Team)),
+                link_share_access_level: Some(None),
+                team_share_access_level: None,
+                channel_share_permissions: None,
+            }),
+            team_share: None,
         })
         .await?;
-    assert!(cleared.parent_id.is_none());
+    assert!(updated.parent_id.is_none());
+    assert_eq!(
+        project_share_permission_columns(&pool, ROOT_ID).await,
+        StoredSharePermission {
+            link_share: Some("TEAM".to_owned()),
+            link_share_access_level: Some("view".to_owned()),
+        }
+    );
+
+    repo.edit_project(EditProjectArgs {
+        project_id: ROOT_ID.to_owned(),
+        name: None,
+        update_parent: false,
+        parent_id: None,
+        share_permission: Some(UpdateSharePermissionRequestV2 {
+            link_share: None,
+            link_share_access_level: Some(Some(AccessLevel::Comment)),
+            team_share_access_level: None,
+            channel_share_permissions: None,
+        }),
+        team_share: None,
+    })
+    .await?;
+    assert_eq!(
+        project_share_permission_columns(&pool, ROOT_ID).await,
+        StoredSharePermission {
+            link_share: Some("TEAM".to_owned()),
+            link_share_access_level: Some("comment".to_owned()),
+        }
+    );
+
+    repo.edit_project(EditProjectArgs {
+        project_id: ROOT_ID.to_owned(),
+        name: None,
+        update_parent: false,
+        parent_id: None,
+        share_permission: Some(UpdateSharePermissionRequestV2 {
+            link_share: Some(Some(LinkShare::Public)),
+            link_share_access_level: Some(Some(AccessLevel::Edit)),
+            team_share_access_level: None,
+            channel_share_permissions: None,
+        }),
+        team_share: None,
+    })
+    .await?;
+    let before_omitted_update = project_share_permission_columns(&pool, ROOT_ID).await;
+    assert_eq!(
+        before_omitted_update,
+        StoredSharePermission {
+            link_share: Some("PUBLIC".to_owned()),
+            link_share_access_level: Some("edit".to_owned()),
+        }
+    );
+
+    repo.edit_project(EditProjectArgs {
+        project_id: ROOT_ID.to_owned(),
+        name: None,
+        update_parent: false,
+        parent_id: None,
+        share_permission: Some(UpdateSharePermissionRequestV2 {
+            link_share: None,
+            link_share_access_level: None,
+            team_share_access_level: None,
+            channel_share_permissions: None,
+        }),
+        team_share: None,
+    })
+    .await?;
+    assert_eq!(
+        project_share_permission_columns(&pool, ROOT_ID).await,
+        before_omitted_update
+    );
+
+    repo.edit_project(EditProjectArgs {
+        project_id: ROOT_ID.to_owned(),
+        name: None,
+        update_parent: false,
+        parent_id: None,
+        share_permission: Some(UpdateSharePermissionRequestV2 {
+            link_share: Some(None),
+            link_share_access_level: Some(Some(AccessLevel::Edit)),
+            team_share_access_level: None,
+            channel_share_permissions: None,
+        }),
+        team_share: None,
+    })
+    .await?;
+    assert_eq!(
+        project_share_permission_columns(&pool, ROOT_ID).await,
+        StoredSharePermission {
+            link_share: None,
+            link_share_access_level: None,
+        }
+    );
     let permission = repo.get_project_share_permission(ROOT_ID).await?;
-    assert!(!permission.is_public);
-    assert_eq!(permission.public_access_level, None);
+    assert_eq!(permission.link_share, None);
+    assert_eq!(permission.link_share_access_level, None);
+    assert_eq!(
+        permission.channel_share_permissions.expect("channel").len(),
+        1
+    );
     Ok(())
 }
 
@@ -280,7 +620,7 @@ async fn edit_supports_parent_flags_and_sharing(pool: Pool<Postgres>) -> anyhow:
     fixtures(path = "../../../fixtures", scripts("projects_test_data"))
 )]
 async fn recursive_detection_and_soft_delete_output(pool: Pool<Postgres>) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool.clone());
+    let repo = test_repo(pool.clone());
     assert!(repo.is_project_recursively_nested(ROOT_ID, ROOT_ID).await?);
     assert!(
         repo.is_project_recursively_nested(ROOT_ID, CHILD_ID)
@@ -303,6 +643,27 @@ async fn recursive_detection_and_soft_delete_output(pool: Pool<Postgres>) -> any
     .fetch_one(&pool)
     .await?;
     assert_eq!(remaining_history, 0);
+    let root_entity = fetch_entity_row(&pool, ROOT_ID).await;
+    assert!(root_entity.deleted_at.is_some());
+    assert!(
+        fetch_entity_row(&pool, DOCUMENT_ID)
+            .await
+            .deleted_at
+            .is_some()
+    );
+    assert!(
+        fetch_entity_row(&pool, DELETED_DOCUMENT_ID)
+            .await
+            .deleted_at
+            .is_some()
+    );
+    assert!(fetch_entity_row(&pool, CHAT_ID).await.deleted_at.is_some());
+    assert!(
+        fetch_entity_row(&pool, DELETED_CHAT_ID)
+            .await
+            .deleted_at
+            .is_some()
+    );
     Ok(())
 }
 
@@ -313,7 +674,7 @@ async fn recursive_detection_and_soft_delete_output(pool: Pool<Postgres>) -> any
 async fn revert_restores_subtree_and_handles_parent_state(
     pool: Pool<Postgres>,
 ) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool.clone());
+    let repo = test_repo(pool.clone());
     sqlx::query!(
         r#"UPDATE "Project" SET "parentId" = $2 WHERE id = $1"#,
         ROOT_ID,
@@ -334,6 +695,7 @@ async fn revert_restores_subtree_and_handles_parent_state(
             .is_none()
     );
     assert!(repo.get_project_by_id(CHILD_ID).await?.is_some());
+    assert_eq!(fetch_entity_row(&pool, ROOT_ID).await.deleted_at, None);
 
     repo.soft_delete_project(CHILD_ID).await?;
     repo.revert_delete_project(CHILD_ID, Some(ROOT_ID.to_owned()))
@@ -356,7 +718,7 @@ async fn revert_restores_subtree_and_handles_parent_state(
 async fn purge_returns_outputs_and_removes_access_and_permissions(
     pool: Pool<Postgres>,
 ) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool.clone());
+    let repo = test_repo(pool.clone());
     let deleted = repo.soft_delete_project(ROOT_ID).await?;
     let document_id = &deleted.document_ids[0];
     let bom_id = sqlx::query_scalar!(
@@ -398,6 +760,7 @@ async fn purge_returns_outputs_and_removes_access_and_permissions(
     .fetch_one(&pool)
     .await?;
     assert_eq!(remaining_access, 0);
+    assert_eq!(count_entity_rows_for_ids(&pool, &purged_ids).await, 0);
     let remaining_permissions = sqlx::query_scalar!(
         r#"SELECT COUNT(*) AS "count!" FROM "ProjectPermission" WHERE "projectId" = ANY($1)"#,
         &result.project_ids,
@@ -413,7 +776,7 @@ async fn purge_returns_outputs_and_removes_access_and_permissions(
     fixtures(path = "../../../fixtures", scripts("projects_test_data"))
 )]
 async fn purge_rolls_back_all_deletions(pool: Pool<Postgres>) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool.clone());
+    let repo = test_repo(pool.clone());
     repo.soft_delete_project(ROOT_ID).await?;
 
     let mut transaction = pool.begin().await?;
@@ -429,6 +792,7 @@ async fn purge_rolls_back_all_deletions(pool: Pool<Postgres>) -> anyhow::Result<
     .fetch_one(&pool)
     .await?;
     assert_eq!(access_count, 2);
+    assert_eq!(count_entity_rows_for_id(&pool, ROOT_ID).await, 1);
     let permission_count = sqlx::query_scalar!(
         r#"SELECT COUNT(*) AS "count!" FROM "ProjectPermission" WHERE "projectId" = $1"#,
         ROOT_ID,
@@ -439,14 +803,7 @@ async fn purge_rolls_back_all_deletions(pool: Pool<Postgres>) -> anyhow::Result<
     Ok(())
 }
 
-#[sqlx::test(
-    migrator = "MACRO_DB_MIGRATIONS",
-    fixtures(path = "../../../fixtures", scripts("projects_test_data"))
-)]
-async fn upload_folder_preserves_tree_metadata_and_compensates(
-    pool: Pool<Postgres>,
-) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool.clone());
+fn nested_upload_args() -> anyhow::Result<UploadFolderRepoArgs> {
     let file = FolderItem {
         name: "nested.pdf".to_owned(),
         full_name: "nested.pdf".to_owned(),
@@ -464,17 +821,72 @@ async fn upload_folder_preserves_tree_metadata_and_compensates(
         ),
         ("Empty".to_owned(), FileSystemNode::Folder(HashMap::new())),
     ]));
-    let result = repo
-        .upload_folder(UploadFolderRepoArgs {
-            user_id: MacroUserIdStr::parse_from_str("macro|owner@test.com")?.into_owned(),
-            share_permission:
-                models_permissions::share_permission::SharePermissionV2::new_project_share_permission(),
-            root_folder,
-            root_folder_name: "Upload".to_owned(),
-            upload_request_id: "lambda-request-id".to_owned(),
-            parent_id: Some(ROOT_ID.to_owned()),
-        })
-        .await?;
+    let mut share_permission = SharePermissionV2::new_project_share_permission(None);
+    share_permission.link_share = Some(LinkShare::Team);
+    Ok(UploadFolderRepoArgs {
+        user_id: MacroUserIdStr::parse_from_str("macro|owner@test.com")?.into_owned(),
+        share_permission,
+        root_folder,
+        root_folder_name: "Upload".to_owned(),
+        upload_request_id: "lambda-request-id".to_owned(),
+        parent_id: Some(ROOT_ID.to_owned()),
+    })
+}
+
+async fn direct_grants(pool: &Pool<Postgres>, id: &str) -> Vec<(String, String, String)> {
+    sqlx::query!(
+        r#"
+        SELECT source_type::text AS "source_type!", source_id,
+               access_level::text AS "access_level!"
+        FROM entity_access
+        WHERE entity_id::text = $1 AND granted_from_project_id IS NULL
+        ORDER BY source_type::text, source_id
+        "#,
+        id,
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| (row.source_type, row.source_id, row.access_level))
+    .collect()
+}
+
+#[derive(Debug, PartialEq)]
+struct UploaderRows {
+    upload_projects: i64,
+    documents: i64,
+    entities: i64,
+    grants: i64,
+}
+
+async fn uploader_rows(pool: &Pool<Postgres>) -> UploaderRows {
+    sqlx::query_as!(
+        UploaderRows,
+        r#"
+        SELECT
+            (SELECT COUNT(*) FROM "Project" WHERE "uploadRequestId" = 'lambda-request-id')
+                AS "upload_projects!",
+            (SELECT COUNT(*) FROM "Document" WHERE owner = $1) AS "documents!",
+            (SELECT COUNT(*) FROM entity WHERE owner_id = $1) AS "entities!",
+            (SELECT COUNT(*) FROM entity_access WHERE source_id = $1) AS "grants!"
+        "#,
+        "macro|owner@test.com",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(
+    migrator = "MACRO_DB_MIGRATIONS",
+    fixtures(path = "../../../fixtures", scripts("projects_test_data"))
+)]
+async fn upload_folder_preserves_tree_metadata_and_compensates(
+    pool: Pool<Postgres>,
+) -> anyhow::Result<()> {
+    let repo = test_repo(pool.clone());
+    let result = repo.upload_folder(nested_upload_args()?).await?;
 
     assert_eq!(result.project_ids.len(), 3);
     assert_eq!(result.documents.len(), 1);
@@ -501,6 +913,53 @@ async fn upload_folder_preserves_tree_metadata_and_compensates(
         .iter()
         .map(|document| document.document_id.clone())
         .collect::<Vec<_>>();
+    let created_permissions = sqlx::query_scalar!(
+        r#"
+        WITH created_permission_ids AS (
+            SELECT "sharePermissionId" AS id
+            FROM "ProjectPermission"
+            WHERE "projectId" = ANY($1)
+            UNION
+            SELECT "sharePermissionId" AS id
+            FROM "DocumentPermission"
+            WHERE "documentId" = ANY($2)
+        )
+        SELECT COUNT(*) AS "count!"
+        FROM "SharePermission" permission
+        WHERE permission.id IN (SELECT id FROM created_permission_ids)
+          AND permission."linkShare" = 'TEAM'
+          AND permission."linkShareAccessLevel" = 'view'
+        "#,
+        &result.project_ids,
+        &document_ids,
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(created_permissions, 4);
+
+    let uploader_grant = || {
+        (
+            "user".to_owned(),
+            "macro|owner@test.com".to_owned(),
+            "owner".to_owned(),
+        )
+    };
+    for project_id in &result.project_ids {
+        let entity = fetch_entity_row(&pool, project_id).await;
+        assert_eq!(entity.owner_type, "user");
+        assert_eq!(entity.owner_id, "macro|owner@test.com");
+        assert_eq!(entity.entity_type, "project");
+        assert_eq!(direct_grants(&pool, project_id).await, [uploader_grant()]);
+    }
+    let document_entity = fetch_entity_row(&pool, &result.documents[0].document_id).await;
+    assert_eq!(document_entity.owner_type, "user");
+    assert_eq!(document_entity.owner_id, "macro|owner@test.com");
+    assert_eq!(document_entity.entity_type, "document");
+    assert_eq!(
+        direct_grants(&pool, &result.documents[0].document_id).await,
+        [uploader_grant()]
+    );
+
     repo.delete_uploaded_tree(&result.project_ids, &document_ids)
         .await?;
     let remaining = sqlx::query_scalar!(
@@ -517,6 +976,50 @@ async fn upload_folder_preserves_tree_metadata_and_compensates(
     .fetch_one(&pool)
     .await?;
     assert_eq!(remaining_access, 0);
+    assert_eq!(
+        count_entity_rows_for_ids(&pool, &result.project_ids).await,
+        0
+    );
+    assert_eq!(count_entity_rows_for_ids(&pool, &document_ids).await, 0);
+    Ok(())
+}
+
+#[sqlx::test(
+    migrator = "MACRO_DB_MIGRATIONS",
+    fixtures(path = "../../../fixtures", scripts("projects_test_data"))
+)]
+async fn upload_folder_rolls_back_the_whole_tree_when_a_registration_fails(
+    pool: Pool<Postgres>,
+) -> anyhow::Result<()> {
+    let repo = test_repo(pool.clone());
+    let before = uploader_rows(&pool).await;
+    sqlx::raw_sql(
+        r#"
+        CREATE FUNCTION reject_document_grant() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'injected document grant failure'; END $$;
+        CREATE TRIGGER reject_document_grant BEFORE INSERT ON entity_access
+        FOR EACH ROW WHEN (NEW.entity_type = 'document') EXECUTE FUNCTION reject_document_grant();
+    "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    assert!(repo.upload_folder(nested_upload_args()?).await.is_err());
+    assert_eq!(uploader_rows(&pool).await, before);
+
+    sqlx::raw_sql("DROP TRIGGER reject_document_grant ON entity_access")
+        .execute(&pool)
+        .await?;
+    repo.upload_folder(nested_upload_args()?).await?;
+    assert_eq!(
+        uploader_rows(&pool).await,
+        UploaderRows {
+            upload_projects: before.upload_projects + 3,
+            documents: before.documents + 1,
+            entities: before.entities + 4,
+            grants: before.grants + 4,
+        }
+    );
     Ok(())
 }
 
@@ -527,7 +1030,7 @@ async fn upload_folder_preserves_tree_metadata_and_compensates(
 async fn mark_uploaded_is_recursive_and_rejects_missing_root(
     pool: Pool<Postgres>,
 ) -> anyhow::Result<()> {
-    let repo = PgProjectRepo::new(pool.clone());
+    let repo = test_repo(pool.clone());
     let uploaded_tree = repo
         .mark_projects_uploaded("10000000-0000-0000-0000-000000000006")
         .await?;

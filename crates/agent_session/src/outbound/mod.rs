@@ -1,0 +1,18 @@
+//! Adapters implementing the domain ports for external systems.
+
+pub mod postgres;
+
+/// Internal transport for coding agent discovery and dispatch.
+pub mod coding_agents_client;
+
+/// Haiku-backed automatic session naming.
+pub mod name_generator;
+
+/// Streaming a live session's log to a channel's viewers.
+pub mod connection_gateway_realtime;
+
+/// Publishing lifecycle facts to the event broker.
+pub mod broker_lifecycle_publisher;
+
+/// Mirroring each appended log run to the event broker.
+pub mod broker_log_realtime;

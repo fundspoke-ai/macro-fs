@@ -13,21 +13,23 @@ if (!url || !actAs || !botToken) {
 
 const env = (process.env.MACRO_ENV ?? 'dev') as Env;
 const port = Number(process.env.PORT ?? 8787);
-const macro = new Macro({
-  env,
-  auth: { type: 'bot', token: botToken },
-}).requestedAs(actAs);
+const bot = new Macro({ env, auth: { type: 'bot', token: botToken } });
+const macro = bot.requestedAs(bot.users.byId(actAs));
 
 // `as const` keeps the literal types so `.on()` infers each event's payload;
 // `satisfies` makes a typo in this list a compile error.
 const ALL_EVENTS = [
+  'agent_session.deleted',
+  'agent_session.input_received',
+  'agent_session.opened',
+  'agent_session.renamed',
+  'agent_session.settled',
+  'agent_session.stopped',
+  'agent_session.turn_ended',
+  'agent_session.turn_started',
+  'agent_session.waiting_for_input',
   'channel.created',
   'channel.deleted',
-  'channel.message_attachment_created',
-  'channel.message_attachment_removed',
-  'channel.message_deleted',
-  'channel.message_patched',
-  'channel.message_posted',
   'channel.participant_added',
   'channel.participant_removed',
   'channel.updated',
@@ -35,6 +37,12 @@ const ALL_EVENTS = [
   'document.created',
   'document.deleted',
   'document.updated',
+  'message.attachment_created',
+  'message.attachment_removed',
+  'message.deleted',
+  'message.mentioned',
+  'message.patched',
+  'message.posted',
 ] as const satisfies readonly EventName[];
 
 // Filled in once registration returns the signing secret; until then (i.e.
@@ -80,4 +88,26 @@ const events = new Macro({
 for (const name of ALL_EVENTS) {
   events.on(name, (event) => console.log(name, event.metadata));
 }
+
+// Handlers also get ORM handles for whatever the payload names — no going back
+// to the SDK with an id. The set is exact per event, so `e.document` exists
+// here and `e.channel` would not compile.
+events.on('document.created', async (e) => {
+  const owner = await e.owner.name();
+  console.log(
+    `  -> ${await e.document.name()} created by ${owner ?? 'someone'}`,
+  );
+});
+
+events.on('message.posted', async (e) => {
+  // `sender` is undefined when a bot posted: the wire type is a bare string
+  // for both, so only a real user id resolves to a handle.
+  const from = e.sender ? ((await e.sender.name()) ?? e.sender.id) : 'a bot';
+  const where =
+    e.target.type === 'channel'
+      ? `in ${await e.target.channel.name()}`
+      : `on ${await e.target.document.name()}`;
+  console.log(`  -> ${from} posted ${where}`);
+});
+
 receiver = events.webhook();

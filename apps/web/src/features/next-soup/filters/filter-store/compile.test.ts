@@ -35,6 +35,16 @@ describe('defineQueryFilters', () => {
 });
 
 describe('compileToAst', () => {
+  it('compiles mail done as archive visibility, independent of notification state', () => {
+    for (const done of [true, false]) {
+      const ast = compileToAst(
+        queryStateFrom(
+          defineQueryFilters({ emailView: 'all', include: { emailDone: done } })
+        )
+      );
+      expect(ast.ef).toEqual({ l: { InboxVisible: !done } });
+    }
+  });
   it('NIL-excludes calendar events from query states that predate the target', () => {
     const ast = compileToAst(
       queryStateFrom({ include: { threadId: ['thread-1'] } })
@@ -165,25 +175,11 @@ describe('compileToAst', () => {
     );
 
     expect(ast.fef).toEqual({
-      '&': [{ l: { fes: 'github_pull_request' } }, { l: { nd: false } }],
+      '&': [
+        { l: { fes: 'github_pull_request' } },
+        { '|': [{ l: { ns: 'unseen' } }, { l: { ns: 'seen' } }] },
+      ],
     });
-  });
-
-  it('compiles the reminder opt-in to a bare Include literal', () => {
-    const ast = compileToAst(
-      queryStateFrom({ include: { includeReminders: true } })
-    );
-
-    // Reminders are off in Soup unless a view asks; this literal is the ask.
-    expect(ast.remf).toEqual({ l: 'inc' });
-  });
-
-  it('leaves reminders unrequested when a view does not opt in', () => {
-    const ast = compileToAst(
-      queryStateFrom({ include: { documentDone: false } })
-    );
-
-    expect(ast.remf).toBeUndefined();
   });
 
   it('compiles channel message thread ids onto regular channel filters', () => {

@@ -67,8 +67,8 @@ fn expected_matrix_covers_owner_team_channel_public_edges() {
     assert_eq!(level(&rows, "document:design-doc", "carol"), None);
     assert_eq!(level(&rows, "document:design-doc", "eve"), None);
 
-    // Public document is visible to everyone.
-    for user in ["alice", "bob", "carol", "dave", "eve"] {
+    // PUBLIC link sharing makes the document visible to everyone.
+    for user in ["alice", "bob", "carol", "dave", "erin", "eve"] {
         assert!(level(&rows, "document:handbook", user).is_some(), "{user}");
     }
     assert_eq!(
@@ -76,12 +76,19 @@ fn expected_matrix_covers_owner_team_channel_public_edges() {
         Some(AccessLevel::View)
     );
 
-    // Unshared document stays private.
+    // TEAM link sharing applies to the owner's team and not to outsiders.
     assert_eq!(
         level(&rows, "document:bob-notes", "bob"),
         Some(AccessLevel::Owner)
     );
-    for user in ["alice", "carol", "dave", "eve"] {
+    for user in ["alice", "carol", "erin"] {
+        assert_eq!(
+            level(&rows, "document:bob-notes", user),
+            Some(AccessLevel::View),
+            "{user}"
+        );
+    }
+    for user in ["dave", "eve"] {
         assert_eq!(level(&rows, "document:bob-notes", user), None, "{user}");
     }
 
@@ -192,6 +199,35 @@ fn mentions_grant_channel_view_to_projects_and_calls() {
 }
 
 #[test]
+fn team_link_share_fails_closed_when_owner_has_no_team() {
+    let spec = ScenarioSpec::parse(
+        &serde_json::json!({
+            "scenario": "team-link-without-owner-team",
+            "users": {
+                "owner": { "email": "owner@x.local" },
+                "other": { "email": "other@x.local" }
+            },
+            "documents": {
+                "doc": {
+                    "owner": "owner",
+                    "link_share": "TEAM",
+                    "link_share_access_level": "comment"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let rows = expected_matrix(&spec);
+
+    assert_eq!(
+        level(&rows, "document:doc", "owner"),
+        Some(AccessLevel::Owner)
+    );
+    assert_eq!(level(&rows, "document:doc", "other"), None);
+}
+
+#[test]
 fn expected_matrix_row_count_matches_entities() {
     let spec = example();
     let rows = expected_matrix(&spec);
@@ -211,8 +247,8 @@ fn task_expectations_cover_team_share_and_inheritance() {
     let spec = example();
     let rows = expected_matrix(&spec);
 
-    // ship-tags: alice owns it; the team gets comment via share_with_team;
-    // the project's team view is subsumed by comment; dave/eve see nothing.
+    // ship-tags: alice owns it; the team gets edit via share_with_team;
+    // the project's team view is subsumed by edit; dave/eve see nothing.
     // erin is an assignee, but her edit comes from the direct share, not the
     // assignment.
     assert_eq!(
@@ -221,15 +257,15 @@ fn task_expectations_cover_team_share_and_inheritance() {
     );
     assert_eq!(
         level(&rows, "task:ship-tags", "bob"),
-        Some(AccessLevel::Comment)
+        Some(AccessLevel::Edit)
     );
     assert_eq!(
         level(&rows, "task:ship-tags", "carol"),
-        Some(AccessLevel::Comment)
+        Some(AccessLevel::Edit)
     );
     assert_eq!(level(&rows, "task:ship-tags", "dave"), None);
     assert_eq!(level(&rows, "task:ship-tags", "eve"), None);
-    // erin has a direct edit share, which wins over the team's comment.
+    // erin has a direct edit share, which matches the team's edit.
     assert_eq!(
         level(&rows, "task:ship-tags", "erin"),
         Some(AccessLevel::Edit)
@@ -255,7 +291,7 @@ fn task_expectations_cover_team_share_and_inheritance() {
     );
     assert_eq!(
         level(&rows, "task:write-docs", "carol"),
-        Some(AccessLevel::Comment)
+        Some(AccessLevel::Edit)
     );
     assert_eq!(level(&rows, "task:write-docs", "dave"), None);
     assert_eq!(

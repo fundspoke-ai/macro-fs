@@ -1,12 +1,10 @@
 import { filterSoupItemByRequestBody } from '@app/features/next-soup/filters/query-filters';
 import { useFeatureFlag } from '@app/lib/analytics/posthog';
-import {
-  ENABLE_GRAPHQL_SOUP_FLAG,
-  ENABLE_GRAPHQL_SOUP_OVERRIDE,
-} from '@core/constant/featureFlags';
+import { enableGraphqlSoup } from '@core/constant/featureFlags';
 import { throwOnErr } from '@core/util/result';
 import type { EntityData } from '@entity';
 import {
+  groupedSortMethod,
   makeGroupComparator,
   parseGroupMeta,
   serializeGroupByField,
@@ -32,10 +30,16 @@ import {
   type StaleTime,
   useInfiniteQuery,
 } from '@tanstack/solid-query';
-import type { Accessor } from 'solid-js';
+import { type Accessor, onCleanup } from 'solid-js';
 import { queryClient } from '../client';
+import { registerActiveGraphqlSoupQuery } from './graphql/active-queries';
 import { createGraphqlGroupedSoupAstItemsQuery } from './graphql/grouped-items';
 import { createGraphqlSoupAstItemsQuery } from './graphql/items';
+import { soupPageTimestamp } from './page-timestamp';
+import {
+  createSoupRequestSignal,
+  SOUP_NETWORK_QUERY_OPTIONS,
+} from './request-timeout';
 
 export type SoupParams = Params;
 
@@ -62,14 +66,24 @@ export type SoupAstItemsQueryArgs = {
 export type SoupApiItemFilter = (item: SoupApiItem) => boolean;
 
 interface SoupItemsQueryOptions {
+  networkPaused?: boolean;
+  keepPreviousData?: boolean;
   enabled?: boolean;
   staleTime?: StaleTime;
+  /** Channel navigation reads bounded unread evidence, not notification history. */
+  graphqlProjection?: 'channel-list';
+  /** Seed mixed lists from indexed non-email members; keep the full server query. */
+  graphqlLocalReconciliation?: 'without-email';
   meta?: {
     groupBy?: GroupByField;
     groupKey?: string;
     itemFilter?: (item: SoupApiItem) => boolean;
+    /** Gates optimistic cache inserts only — fetched rows never run through it. */
+    insertFilter?: (item: SoupApiItem) => boolean;
   };
   showSupportedForeignEntities?: boolean;
+  /** Resets view-owned GraphQL state before a mutation-driven network refresh. */
+  onBeforeGraphqlRefresh?: () => void;
 }
 
 /**
@@ -91,10 +105,15 @@ export type SoupAstItemsFlatPage = {
   kind: 'flat';
   items: SoupApiItem[];
   nextCursor: string | null;
+  oldestFetchedTimestamp?: number;
 };
 
 export type SoupAstItemsData = {
+  /** Local Mail results cover synchronized metadata, not the entire mailbox. */
+  cachedMail?: boolean;
   entities: EntityData[];
+  /** Descending page coverage, independent of optimistic/local row membership. */
+  oldestFetchedTimestamp?: number;
   groups: GroupMeta[] | undefined;
   /** Raw API item pool. Only present when query is grouped. */
   itemsById?: SoupAstItemsGroupedPage['items'];
@@ -162,14 +181,10 @@ const useRestSoupAstItemsQuery = (
       queryKey: soupKeys.astItems({ params, body, groupBy, transport })
         .queryKey,
       queryFn: async (ctx): Promise<SoupAstItemsPage> => {
-        if (groupBy) {
-          let sort_method = params.sort_method ?? undefined;
+        const signal = createSoupRequestSignal(ctx.signal);
 
-          // TODO(dev-rb/soup): This is temporary fix since we don't support
-          // 'frecency' for group by. Replace with proper types
-          if (sort_method === 'frecency') {
-            sort_method = 'updated_at';
-          }
+        if (groupBy) {
+          const sort_method = groupedSortMethod(params.sort_method);
 
           const fetchRest = async () => {
             const response = await throwOnErr(
@@ -181,6 +196,7 @@ const useRestSoupAstItemsQuery = (
                     sort_method,
                   },
                   body,
+                  signal,
                 })
             );
 
@@ -211,6 +227,7 @@ const useRestSoupAstItemsQuery = (
                   ...body,
                   ...params,
                 },
+                signal,
               })
           );
 
@@ -220,6 +237,10 @@ const useRestSoupAstItemsQuery = (
           kind: 'flat',
           items: response.items,
           nextCursor: response.next_cursor ?? null,
+          oldestFetchedTimestamp: soupPageTimestamp(
+            response.items.map(mapApiSoupItemToEntity),
+            params.sort_method
+          ),
         };
       },
       initialPageParam: null as string | null,
@@ -275,9 +296,25 @@ const useRestSoupAstItemsQuery = (
           );
         });
 
-        return { entities, groups: undefined };
+        const pageTimestamps = data.pages.flatMap((page) =>
+          page.kind === 'flat' && page.oldestFetchedTimestamp !== undefined
+            ? [page.oldestFetchedTimestamp]
+            : []
+        );
+        return {
+          entities,
+          groups: undefined,
+          oldestFetchedTimestamp:
+            pageTimestamps.length > 0 ? Math.min(...pageTimestamps) : undefined,
+        };
       },
-      enabled: options?.().enabled,
+      enabled: options?.().enabled !== false && !options?.().networkPaused,
+      // Do not spin through background retries while the explicit load-error
+      // state is visible. NWPathMonitor lets TanStack pause an offline query
+      // and resume it automatically when the path becomes available again.
+      ...SOUP_NETWORK_QUERY_OPTIONS,
+      // A timed-out native request should reach the view's load-error state.
+      // Retry remains available explicitly from that state.
       staleTime: options?.().staleTime,
       placeholderData: (prev, prevQuery) => {
         // Keep the previous rows on screen while params/filters change, but
@@ -309,6 +346,8 @@ export type SoupAstItemsQueryTransport = 'rest' | 'graphql';
 export type SoupAstItemsQuery = {
   readonly data: SoupAstItemsData | undefined;
   readonly error: Error | null;
+  /** Includes paused initial requests, whose data resource is not readable yet. */
+  readonly isPending: boolean;
   readonly isLoading: boolean;
   readonly isFetching: boolean;
   readonly isPlaceholderData: boolean;
@@ -334,9 +373,7 @@ export function useSoupAstItemsQuery(
   args: Accessor<SoupAstItemsQueryArgs>,
   options?: Accessor<SoupItemsQueryOptions>
 ): SoupAstItemsQuery {
-  const graphqlSoupFlag = useFeatureFlag(ENABLE_GRAPHQL_SOUP_FLAG, {
-    enabledOverride: ENABLE_GRAPHQL_SOUP_OVERRIDE,
-  });
+  const graphqlSoupFlag = useFeatureFlag(enableGraphqlSoup);
 
   const queryEnabled = () => options?.().enabled !== false;
   const graphqlRequested = () => {
@@ -351,6 +388,10 @@ export function useSoupAstItemsQuery(
     () => ({
       enabled:
         graphqlRequested() && queryEnabled() && args().groupBy === undefined,
+      networkPaused: options?.().networkPaused,
+      keepPreviousData: options?.().keepPreviousData,
+      projection: options?.().graphqlProjection,
+      localReconciliation: options?.().graphqlLocalReconciliation,
       showSupportedForeignEntities: options?.().showSupportedForeignEntities,
     })
   );
@@ -363,6 +404,8 @@ export function useSoupAstItemsQuery(
     () => ({
       enabled:
         graphqlRequested() && queryEnabled() && args().groupBy !== undefined,
+      networkPaused: options?.().networkPaused,
+      keepPreviousData: options?.().keepPreviousData,
       showSupportedForeignEntities: options?.().showSupportedForeignEntities,
     })
   );
@@ -379,6 +422,20 @@ export function useSoupAstItemsQuery(
       enabled: queryEnabled() && !usesGraphql(),
     };
   });
+
+  onCleanup(
+    registerActiveGraphqlSoupQuery({
+      isEnabled: () =>
+        usesGraphql() &&
+        activeGraphqlQuery().isEnabled() &&
+        !options?.().networkPaused,
+      refresh: async () => {
+        activeGraphqlQuery().resetToInitialPage();
+        options?.().onBeforeGraphqlRefresh?.();
+        await activeGraphqlQuery().refresh();
+      },
+    })
+  );
 
   const resetRestToInitialPage = () => {
     const { params, body, groupBy, transport } = args();
@@ -404,6 +461,14 @@ export function useSoupAstItemsQuery(
         ? (activeGraphqlQuery().error() ?? null)
         : (restQuery.error ?? null);
     },
+    get isPending() {
+      if (!usesGraphql()) return restQuery.isPending;
+      const query = activeGraphqlQuery();
+      return (
+        query.isLoading() ||
+        (query.isEnabled() && query.data() === undefined && !query.error())
+      );
+    },
     get isLoading() {
       return usesGraphql()
         ? activeGraphqlQuery().isLoading()
@@ -415,7 +480,9 @@ export function useSoupAstItemsQuery(
         : restQuery.isFetching;
     },
     get isPlaceholderData() {
-      return usesGraphql() ? false : restQuery.isPlaceholderData;
+      return usesGraphql()
+        ? activeGraphqlQuery().isPlaceholderData()
+        : restQuery.isPlaceholderData;
     },
     get isFetchingNextPage() {
       return usesGraphql()

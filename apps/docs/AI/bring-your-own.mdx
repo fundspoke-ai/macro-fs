@@ -1,0 +1,97 @@
+---
+title: "Bring your own agent"
+sidebarTitle: "Bring your own agent"
+icon: "terminal"
+tag: "Coming soon"
+description: "Bring Claude Code, OpenCode, OpenClaw, or Hermes into your Macro workspace with macrod."
+---
+
+<Info>
+  Bring Your Own Agent will be available soon.
+</Info>
+
+Use your local coding agent from Macro. `macrod` runs on your computer, connects your agent to Macro, and keeps its sessions available from your workspace.
+
+## Agents and runtimes
+
+An **agent** combines a name, instructions, a default model, and a runtime. A **runtime** is the harness that powers it: Macro AI, a built-in coding harness, or an agent running on your own machine.
+
+Manage both in **Settings → General → Agents**. Connect your machine in **Runtimes**, then create an agent that uses it in **Agents**.
+
+## Before you start
+
+You need a macOS or Linux computer that can stay online and an installed, authenticated coding agent. `macrod` recognizes Claude Code, Codex, OpenCode, OpenClaw, and Hermes. You can also configure a custom command for an Agent Client Protocol (ACP) agent.
+
+`macrod` connects out to Macro. You do not need a public webhook endpoint, port forwarding, or an HTTPS tunnel.
+
+<Warning>
+  Your local agent can run commands and edit files on your computer. Choose a dedicated workspace and review access before sharing a runtime with your team. Leave permission bypass off unless you intend to allow actions without approval.
+</Warning>
+
+## Connect your runtime
+
+<Steps>
+  <Step title="Install macrod">
+    Download the `macrod` archive for your operating system and architecture from [Macro releases](https://github.com/macro-inc/macro/releases), then extract it.
+
+    Open **Settings → General → Agents → Runtimes → New runtime** in Macro. The page walks you through installation, configuration, and pairing.
+  </Step>
+
+  <Step title="Run macrod">
+    Open a terminal in the extracted folder and run:
+
+    ```bash
+    ./macrod
+    ```
+
+    Keep the terminal open while you use your runtime.
+
+    On first launch, **Quickstart** lists the agents available on your machine. Select one, or choose **Custom command** to enter an ACP launch command.
+
+    Set **Workspace** to the directory your agent should work in. Choose **Private** for your own runtime that only you can kick off, or **Team** to let teammates use your agent. If you run team mode, anyone can create agent sessions that run on your computer. By default, you'll be asked for permission requests based on the harness you run, such as for accessing files outside of your workspace; if you enable **Full Access** these prompts will automatically be approved.
+
+    <Frame caption="Configure your agent, workspace, and access before generating a pairing code.">
+      ![The macrod Quickstart configuration screen showing discovered agents, workspace, access, Full Access off, and the Create and pair button](/images/macrod-quickstart-example.png)
+    </Frame>
+
+    Select **Create and pair** to generate your device code.
+
+    <Note>
+      Claude Code and Codex use ACP adapters. Their presets require the agent's command, `npm`, and `npx` to be available in the shell where you start `macrod`.
+    </Note>
+  </Step>
+
+  <Step title="Enter your pairing code">
+    The **Pair macrod** panel shows a device code and a link to Macro. If you are already in the terminal overview, press <kbd>p</kbd> to open pairing. Press <kbd>c</kbd> to copy the code.
+
+    Open the pairing link, or go to **Settings → General → Agents → Runtimes → New runtime**. Enter your code and click **Look up**.
+
+    <Frame caption="Example only—enter the code from your own macrod terminal.">
+      ![The macrod terminal with a device code and approval link in the Pair macrod panel](/images/macrod-pairing-example.png)
+    </Frame>
+
+    Check that the code and computer match your terminal. Review the runtime name, **Private** or **Team** access, and permissions, then click **Approve**.
+
+    `macrod` connects automatically after approval. It saves your configuration and credential in `macrod.toml` in the directory where you started it. Keep this file private; do not commit it to a repository.
+  </Step>
+</Steps>
+
+## Create an agent that uses your runtime
+
+Return to the **Agents** tab and click **New agent**. Give your agent a name and instructions, choose your connected machine under **Runtime**, and select a default model.
+
+Review sharing and channel access, then save the agent. @mention it in a channel it can access to start a session on your machine.
+
+## Keep your runtime connected
+
+Leave `macrod` running and your computer awake while you use the runtime. Its terminal shows your sessions, configuration, and logs. You can also check the runtime in **Settings → General → Agents → Runtimes**.
+
+To reconnect later, run `macrod` from the same directory so it loads your saved configuration. If you revoke the runtime, pair it again before using it.
+
+## Troubleshooting
+
+- **Your agent is missing from Quickstart:** check that it is installed and its command is available in the terminal where you launch `macrod`. For a different ACP agent, use **Custom command**.
+- **Your code is invalid or expired:** start a new pairing from the terminal and enter the new code. The code in the screenshot is only an example.
+- **Your runtime is offline:** check that your computer is awake, `macrod` is running, and it can reach Macro. Check the terminal's **Logs** tab for errors.
+
+To learn more about using agents in your workspace, see [Agents](/product/agents).

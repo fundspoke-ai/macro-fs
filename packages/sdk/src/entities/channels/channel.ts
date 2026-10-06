@@ -3,7 +3,8 @@ import type {
   GetChannelAttachmentsResponses,
   GetChannelParticipantsResponses,
   GetChannelResponses,
-  TypingAction,
+  MessageCursor,
+  MessageTimelineQuery,
 } from '../../../generated/storage/types.gen';
 import { type RichMessage, toBody } from '../../mentions';
 import { paginate, unwrap } from '../../utils';
@@ -13,6 +14,7 @@ import { entitySearch } from '../search';
 import type { Team } from '../teams/team';
 import type { User } from '../users/user';
 import { Message } from './message';
+import { postToChannel } from './post';
 import type { Thread } from './thread';
 
 type ChannelDetail = GetChannelResponses[200];
@@ -99,41 +101,55 @@ export class Channel extends PropertiedEntity<ChannelDetail> {
   /** The channel's type (e.g. `public`, `dm`, `private`). */
   readonly type = this.field('channel_type');
 
-  /** Post a message. Plain text, or a rich body composed with `msg`. */
+  /**
+   * Post a message. Plain text, or a rich body composed with `msg`.
+   *
+   * Works with a channel webhook token as well as a normal one — see
+   * {@link postToChannel} for which endpoint that picks and what it costs.
+   */
   async send(
     body: string | RichMessage,
     opts?: { thread?: Thread },
   ): Promise<Message> {
-    const { content, mentions } = toBody(body);
-    const res = unwrap(
-      await this.client.storage.postMessage({
-        path: { channel_id: this.id },
-        body: {
-          content,
-          mentions,
-          attachments: [],
-          thread_id: opts?.thread?.rootId ?? null,
-          nonce: crypto.randomUUID(),
-        },
-      }),
+    const id = await postToChannel(
+      this.client,
+      opts?.thread ?? this,
+      toBody(body),
     );
-    return Message.byId(this.client, this.id, res.id);
+    return Message.byId(this.client, this.id, id);
   }
 
-  /** The messages in this channel, most recent first, auto-paginated. */
+  /** Root messages in this channel, most recent first, auto-paginated. */
   messages(opts?: { pageSize?: number }): AsyncGenerator<Message> {
-    return paginate(async (cursor) => {
+    return this.timeline({ limit: opts?.pageSize });
+  }
+
+  /**
+   * Root messages created or replied to at or after `after`, most recent
+   * first, auto-paginated. Use it to catch up after a disconnect.
+   */
+  messagesAfter(
+    after: Date | string,
+    opts?: { pageSize?: number },
+  ): AsyncGenerator<Message> {
+    return this.timeline({
+      activity_after: after instanceof Date ? after.toISOString() : after,
+      limit: opts?.pageSize,
+    });
+  }
+
+  private timeline(
+    selection: Omit<MessageTimelineQuery, 'cursor'>,
+  ): AsyncGenerator<Message> {
+    return paginate<Message, MessageCursor>(async (cursor) => {
       const page = unwrap(
-        await this.client.storage.getChannelMessages({
-          path: { channel_id: this.id },
-          query: {
-            ...(opts?.pageSize ? { limit: opts.pageSize } : {}),
-            ...(cursor ? { cursor } : {}),
-          },
+        await this.client.storage.messageTimeline({
+          path: { parent_type: 'channel', parent_id: this.id },
+          query: { selection: JSON.stringify({ ...selection, cursor }) },
         }),
       );
       return {
-        items: page.items.map((m) => Message.from(this.client, m)),
+        items: page.items.map((m) => Message.from(this.client, this.id, m)),
         nextCursor: page.next_cursor,
       };
     });
@@ -216,13 +232,16 @@ export class Channel extends PropertiedEntity<ChannelDetail> {
 
   /** Broadcast a typing indicator, optionally scoped to a thread. */
   async typing(
-    action: TypingAction,
+    action: 'start' | 'stop',
     opts?: { thread?: Thread },
   ): Promise<void> {
     unwrap(
-      await this.client.storage.postTyping({
-        path: { channel_id: this.id },
-        body: { action, thread_id: opts?.thread?.rootId ?? null },
+      await this.client.storage.entityMessageTyping({
+        path: { parent_type: 'channel', parent_id: this.id },
+        body: {
+          active: action === 'start',
+          thread_id: opts?.thread?.rootId ?? null,
+        },
       }),
     );
   }

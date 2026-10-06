@@ -7,6 +7,7 @@ use crate::domain::{
     ports::SoupService,
 };
 use ai_toolset::{AsyncTool, RequestContext, ServiceContext, ToolCallError, ToolResult};
+use ai_toolset::{ToolAnnotated, ToolAnnotations};
 use async_trait::async_trait;
 use email::domain::{models::PreviewView, ports::EmailService};
 use filter_ast::Expr;
@@ -145,7 +146,7 @@ pub enum EntityItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         file_type: Option<String>,
         /// The document's sub type: "task" for Macro tasks, "snippet" for snippets,
-        /// "skill" for skills.
+        /// "skill" for skills, "initiative_description" for an initiative's description.
         #[serde(skip_serializing_if = "Option::is_none")]
         sub_type: Option<String>,
         /// Tags on the document visible to the user.
@@ -261,6 +262,7 @@ impl EntityItem {
                         SoupDocumentSubType::Task { .. } => "task",
                         SoupDocumentSubType::Snippet {} => "snippet",
                         SoupDocumentSubType::Skill {} => "skill",
+                        SoupDocumentSubType::InitiativeDescription {} => "initiative_description",
                     }
                     .to_string()
                 }),
@@ -302,13 +304,19 @@ impl EntityItem {
                 created_by: record.created_by,
                 tags: resolve_applied_tags(&record.extra.properties, tag_map),
             },
-            // `entity_filter_ast` force-filters CrmCompany and Reminder out —
+            // `entity_filter_ast` force-filters CrmCompany out —
             // kept loud here so a contract break is obvious, not silent.
-            SoupItem::CrmCompany(_) => {
+            SoupItem::CrmContact(_) | SoupItem::CrmCompany(_) => {
                 unreachable!("ListEntities tool does not surface CrmCompany rows")
             }
-            SoupItem::Reminder(_) => {
-                unreachable!("ListEntities tool does not surface Reminder rows")
+            SoupItem::Initiative(_) => {
+                unreachable!("ListEntities tool does not surface Initiative rows")
+            }
+            SoupItem::AgentSession(_) => {
+                unreachable!("ListEntities tool does not surface AgentSession rows")
+            }
+            SoupItem::DatabaseRow(_) => {
+                unreachable!("ListEntities tool does not surface DatabaseRow rows")
             }
             SoupItem::ForeignEntity(foreign_entity) => EntityItem::ForeignEntity {
                 id: foreign_entity.id,
@@ -352,14 +360,17 @@ fn any_item_has_tags(items: &[EnrichedSoupItem]) -> bool {
             SoupItem::Document(doc) => &doc.extra.properties,
             SoupItem::Chat(chat) => &chat.extra.properties,
             SoupItem::Project(project) => &project.extra.properties,
+            SoupItem::Initiative(initiative) => &initiative.extra.properties,
             SoupItem::EmailThread(thread) => &thread.extra.properties,
             SoupItem::CalendarEvent(event) => &event.extra.properties,
             SoupItem::CrmCompany(company) => &company.extra.properties,
             SoupItem::Channel(_)
             | SoupItem::ChannelThread(_)
             | SoupItem::Call(_)
+            | SoupItem::CrmContact(_)
             | SoupItem::ForeignEntity(_)
-            | SoupItem::Reminder(_) => return false,
+            | SoupItem::AgentSession(_)
+            | SoupItem::DatabaseRow(_) => return false,
         };
         properties
             .iter()
@@ -539,6 +550,7 @@ impl ListEntities {
         };
 
         let ast = EntityFilterAst {
+            favorites_only: None,
             calendar_event_filter: None,
             document_filter: self.document_filter.clone(),
             project_filter: self.project_filter.clone(),
@@ -558,10 +570,14 @@ impl ListEntities {
             // CrmCompany not in the tool surface — force-filter so the
             // AI never sees one.
             crm_company_filter: Some(Arc::new(Expr::val(CrmCompanyLiteral::Id(Uuid::nil())))),
+            crm_contact_filter: None,
             foreign_entity_filter: self.foreign_entity_filter.clone(),
-            // Reminders are opt-in in Soup, so leaving this unset is already
-            // what keeps them out of the tool surface — no force-filter needed.
-            reminder_filter: None,
+            github_pull_request_filter: None,
+            // Agent sessions are opt-in too; unset keeps them off the tool surface.
+            agent_session_filter: None,
+            initiative_filter: None,
+            // Database rows are opt-in as well; the tool never names a table.
+            database_row_filter: None,
             properties_filter,
         };
 
@@ -581,6 +597,7 @@ impl ListEntities {
         };
 
         EntityFilterAst {
+            favorites_only: ast.favorites_only,
             calendar_event_filter: if include_types.contains(&ItemType::CalendarEvent) {
                 ast.calendar_event_filter
             } else {
@@ -629,13 +646,16 @@ impl ListEntities {
             // Preserve the upstream nil filter — no ItemType::CrmCompany
             // to toggle against.
             crm_company_filter: ast.crm_company_filter,
+            crm_contact_filter: None,
             foreign_entity_filter: if include_types.contains(&ItemType::ForeignEntity) {
                 ast.foreign_entity_filter
             } else {
                 Some(Arc::new(Expr::val(ForeignEntityLiteral::Id(Uuid::nil()))))
             },
-            // Same as CrmCompany — no ItemType::Reminder to toggle against.
-            reminder_filter: ast.reminder_filter,
+            github_pull_request_filter: None,
+            agent_session_filter: ast.agent_session_filter,
+            initiative_filter: None,
+            database_row_filter: None,
             properties_filter: ast.properties_filter,
         }
     }
@@ -657,6 +677,10 @@ impl ListEntities {
             .clone()
             .or_else(|| self.email_preset.is_some().then_some(vec![ItemType::Email]))
     }
+}
+
+impl ToolAnnotated for ListEntities {
+    const ANNOTATIONS: ToolAnnotations = ToolAnnotations::read_only("Browse workspace");
 }
 
 #[async_trait]

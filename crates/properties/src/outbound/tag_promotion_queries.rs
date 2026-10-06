@@ -34,7 +34,10 @@ pub async fn promote_tag_option(
 ) -> anyhow::Result<TagPromotionOutcome> {
     let mut tx = pool.begin().await?;
 
-    lock_definition(&mut tx, target_definition_id).await?;
+    for definition in std::collections::BTreeSet::from([source_definition_id, target_definition_id])
+    {
+        lock_definition(&mut tx, definition).await?;
+    }
 
     let Some(source) = load_option(&mut tx, option_id, source_definition_id).await? else {
         anyhow::bail!("tag option {option_id} is not owned by definition {source_definition_id}");
@@ -122,7 +125,10 @@ pub async fn merge_tag_option(
 ) -> anyhow::Result<Option<TagRemapOutcome>> {
     let mut tx = pool.begin().await?;
 
-    lock_definition(&mut tx, target_definition_id).await?;
+    for definition in std::collections::BTreeSet::from([source_definition_id, target_definition_id])
+    {
+        lock_definition(&mut tx, definition).await?;
+    }
 
     let Some(target) = load_option(&mut tx, target_option_id, target_definition_id).await? else {
         tx.rollback().await?;
@@ -324,6 +330,7 @@ async fn remap_entity_values(
             entity_type as "entity_type: EntityType",
             property_definition_id,
             values as "value: serde_json::Value",
+            NULL as "previous: serde_json::Value",
             created_at,
             updated_at
         "#,
@@ -364,7 +371,8 @@ async fn remap_entity_values(
     .execute(&mut **tx)
     .await?;
 
-    rows.into_iter()
+    Ok(rows
+        .into_iter()
         .map(EntityPropertyMutationRow::into_snapshot)
-        .collect()
+        .collect::<Result<_, _>>()?)
 }

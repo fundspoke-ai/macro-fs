@@ -1,5 +1,6 @@
 import { useSplitLayout } from '@components/app/split-layout/layout';
 import { useSplitPanelOrThrow } from '@components/app/split-layout/layoutUtils';
+import { useMacroMentionLinkResolver } from '@components/app/split-layout/split-router/mention-links';
 import { buildConfig } from '@core/component/LexicalMarkdown/builder/MarkdownConfigBuilder';
 import { MarkdownShell } from '@core/component/LexicalMarkdown/builder/MarkdownShell';
 import { createLexicalWrapper } from '@core/component/LexicalMarkdown/context/LexicalWrapperContext';
@@ -44,6 +45,7 @@ import {
   Show,
   untrack,
 } from 'solid-js';
+import { EditorSystemMessage } from './EditorSystemMessage';
 
 function composerTitleNavigationPlugin(
   bodyEditor: Accessor<LexicalEditor | undefined>
@@ -169,7 +171,7 @@ function ComposeSkillTitleEditor(props: {
     <div class="relative w-full">
       <div
         contentEditable={!props.disabled()}
-        class="ph-no-capture w-full text-xl font-medium outline-none whitespace-pre-wrap wrap-break-words"
+        class="ph-no-capture w-full text-xl font-medium outline-none whitespace-pre-wrap wrap-break-word"
         ref={(el) => {
           props.ref?.(el);
           onElementConnect(el, () => onConnect(el));
@@ -324,6 +326,7 @@ export function ComposeSkill(props: ComposeSkillProps) {
   };
 
   onMount(() => {
+    splitPanel.handle.setDisplayName('New skill');
     const container = containerRef();
     if (container) {
       attachHotkeys(container);
@@ -342,6 +345,7 @@ export function ComposeSkill(props: ComposeSkillProps) {
   });
 
   const editorConfig = buildConfig('markdown')
+    .withAppLinkResolver(useMacroMentionLinkResolver())
     .withMentions()
     .withEmojis()
     .withActions()
@@ -422,7 +426,9 @@ export function ComposeSkill(props: ComposeSkillProps) {
       <Show when={errorMessage()}>
         <div class="w-full border-b border-edge-muted" />
         <div class="p-2">
-          <div class="text-sm text-failure-ink px-3 py-2">{errorMessage()}</div>
+          <EditorSystemMessage variant="error">
+            {errorMessage()}
+          </EditorSystemMessage>
         </div>
       </Show>
 
@@ -430,9 +436,9 @@ export function ComposeSkill(props: ComposeSkillProps) {
         <Button
           onClick={handleCreateSkill}
           disabled={title().trim().length === 0 || isCreating()}
-          variant={title().trim().length === 0 ? 'ghost' : 'active'}
+          variant="strong"
           depth={3}
-          class="gap-3 rounded-lg border-0"
+          class="gap-3"
         >
           Create Skill
           <Hotkey shortcut="cmd+enter" theme="current" />

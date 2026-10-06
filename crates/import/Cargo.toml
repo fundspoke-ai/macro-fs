@@ -5,6 +5,8 @@ publish = false
 version = "0.1.0"
 
 [dependencies]
+ai_billing = { path = "../ai_billing" }
+rootcause = { workspace = true }
 agent = { path = "../agent" }
 ai_toolset = { path = "../ai_toolset" }
 ai_usage = { path = "../ai_usage" }
@@ -19,7 +21,7 @@ macro_authorization = { path = "../macro_authorization", default-features = fals
   "axum",
 ] }
 macro_user_id = { path = "../macro_user_id" }
-mcp_client = { path = "../mcp_client" }
+mcp_select = { path = "../mcp_select" }
 model-entity = { path = "../model-entity" }
 models_properties = { path = "../models_properties" }
 properties = { path = "../properties", default-features = false, features = [
@@ -40,3 +42,5 @@ workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 macro_db_migrator = { path = "../macro_db_migrator" }
+model_user = { path = "../model_user" }
+tower = { workspace = true, features = ["util"] }

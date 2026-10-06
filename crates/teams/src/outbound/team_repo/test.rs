@@ -4,6 +4,7 @@ use sqlx::{Pool, Postgres, Row};
 
 ///! Tests for the team_repo implementation for teams
 use super::*;
+use crate::domain::model::SeatPlan;
 
 #[sqlx::test(
     migrator = "MACRO_DB_MIGRATIONS",
@@ -175,6 +176,7 @@ async fn test_create_team(pool: Pool<Postgres>) -> anyhow::Result<()> {
             "Product Team",
             "PRODUCT_TEAM",
             Some(&"sub_test".parse().unwrap()),
+            SeatPlan::Premium,
         )
         .await?;
 
@@ -186,7 +188,7 @@ async fn test_create_team(pool: Pool<Postgres>) -> anyhow::Result<()> {
 
     // Create team with too large a name
     let err = team_repo
-        .create_team(&user_id, "12345678901234567890123456789012345678901234567890123456789000000000000000000000000000000000000000000000", "MACRO", Some(&"sub_test".parse().unwrap()))
+        .create_team(&user_id, "12345678901234567890123456789012345678901234567890123456789000000000000000000000000000000000000000000000", "MACRO", Some(&"sub_test".parse().unwrap()), SeatPlan::Premium)
         .await
         .err()
         .unwrap();
@@ -230,6 +232,7 @@ async fn test_move_github_app_installation_to_team_moves_existing_user_rows(
             "GitHub Owner Team",
             "GITHUB_OWNER_TEAM",
             Some(&"sub_test".parse().unwrap()),
+            SeatPlan::Premium,
         )
         .await?;
     let team_id = team.id().to_string();
@@ -352,6 +355,7 @@ async fn test_move_github_app_installation_to_team_noops_when_user_has_no_rows(
             "GitHub Owner Team",
             "GITHUB_OWNER_TEAM",
             Some(&"sub_test".parse().unwrap()),
+            SeatPlan::Premium,
         )
         .await?;
 
@@ -1394,6 +1398,7 @@ async fn test_patch_team_normalizes_slug_to_screaming_snake_case(
         name: Some("New Name".to_string()),
         slug: Some("my-team  slug".to_string()),
         user_role_updates: None,
+        default_link_share: None,
     };
 
     team_repo.patch_team(&team_id, &req).await?;
@@ -1422,6 +1427,7 @@ async fn test_patch_team_rejects_invalid_slug_without_updating_name(
         name: Some("Should Not Apply".to_string()),
         slug: Some("bad.slug".to_string()),
         user_role_updates: None,
+        default_link_share: None,
     };
 
     let err = team_repo.patch_team(&team_id, &req).await.err().unwrap();
@@ -1449,11 +1455,60 @@ async fn test_patch_team_rejects_too_long_slug(pool: Pool<Postgres>) -> anyhow::
         name: None,
         slug: Some("THIS_SLUG_IS_WAY_TOO_LONG".to_string()),
         user_role_updates: None,
+        default_link_share: None,
     };
 
     let err = team_repo.patch_team(&team_id, &req).await.err().unwrap();
 
     assert!(matches!(err, TeamError::BadRequest(_)));
+
+    Ok(())
+}
+
+#[sqlx::test(
+    migrator = "MACRO_DB_MIGRATIONS",
+    fixtures(path = "../../../fixtures", scripts("teams"))
+)]
+async fn test_patch_team_default_link_share_round_trip(pool: Pool<Postgres>) -> anyhow::Result<()> {
+    let team_repo = TeamRepositoryImpl::new(pool);
+    let team_id = macro_uuid::string_to_uuid("11111111-1111-1111-1111-111111111111")?;
+
+    // Existing teams default to TEAM via the column default.
+    let team = team_repo.get_team_by_id(&team_id).await?;
+    assert_eq!(team.team.default_link_share(), Some(LinkShare::Team));
+
+    // Providing a value updates it.
+    let req = PatchTeamRequest {
+        name: None,
+        slug: None,
+        user_role_updates: None,
+        default_link_share: Some(Some(LinkShare::Public)),
+    };
+    team_repo.patch_team(&team_id, &req).await?;
+    let team = team_repo.get_team_by_id(&team_id).await?;
+    assert_eq!(team.team.default_link_share(), Some(LinkShare::Public));
+
+    // Omitting the field leaves it unchanged.
+    let req = PatchTeamRequest {
+        name: Some("Renamed".to_string()),
+        slug: None,
+        user_role_updates: None,
+        default_link_share: None,
+    };
+    team_repo.patch_team(&team_id, &req).await?;
+    let team = team_repo.get_team_by_id(&team_id).await?;
+    assert_eq!(team.team.default_link_share(), Some(LinkShare::Public));
+
+    // An explicit null turns default link sharing off.
+    let req = PatchTeamRequest {
+        name: None,
+        slug: None,
+        user_role_updates: None,
+        default_link_share: Some(None),
+    };
+    team_repo.patch_team(&team_id, &req).await?;
+    let team = team_repo.get_team_by_id(&team_id).await?;
+    assert_eq!(team.team.default_link_share(), None);
 
     Ok(())
 }

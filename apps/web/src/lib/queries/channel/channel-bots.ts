@@ -25,11 +25,13 @@ type SyncBotChannelsParams = {
 
 type CreateChannelScopedBotParams = CreateChannelScopedBotRequest & {
   channelId: string;
+  has_agent?: boolean;
 };
 
 export function useChannelBotsQuery(channelId: () => string) {
   return useQuery(() => ({
     queryKey: channelKeys.channelBots(channelId()).queryKey,
+    enabled: !!channelId(),
     queryFn: async (): Promise<Bot[]> =>
       await throwOnErr(() =>
         storageServiceClient.getChannelBots({

@@ -91,8 +91,8 @@ export function createSplitFocusTracker(props: {
     }
 
     let splitWithFocus: SplitId | undefined;
-    // Only visible splits may claim activation — the mobile background
-    // split is excluded and can never become active.
+    // Only splits on screen may claim activation; on mobile that is the
+    // front pane, not the one mounted behind it.
     for (const split of props.splitManager.getVisibleSplits()) {
       if (isElementInPanel(split.id, element)) {
         splitWithFocus = split.id;
@@ -118,14 +118,7 @@ export function createSplitFocusTracker(props: {
     switch (event.type) {
       case SplitEvent.Insert: {
         if (event.activate === false) break;
-        // A fresh load replays its last Insert event once this tracker
-        // mounts, and the last URL split is often a restored Preview Pair's
-        // Viewer. The Viewer displays content passively while its Controller
-        // owns the keyboard (restorePreviewPair already returned activation
-        // to it), so initial focus follows the Controller too.
-        const splitId =
-          props.splitManager.controllerOf(event.splitId) ?? event.splitId;
-        focusSplitById(splitId);
+        focusSplitById(event.splitId);
         break;
       }
       case SplitEvent.Remove: {

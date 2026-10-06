@@ -1,0 +1,802 @@
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import { INITIAL_CACHE_REVISION } from '../protocol';
+import {
+  CACHE_COORDINATOR_PROTOCOL_VERSION,
+  CACHE_STORAGE_VERSION,
+  cacheDatabaseIdentity,
+  databaseOwnerLockName,
+  isCachePush,
+  isCacheRequest,
+  isCacheResponse,
+  isStaleCacheDatabaseIdentity,
+  tabIdFromLivenessLockName,
+  tabLivenessLockName,
+  UNVERSIONED_STORAGE_VERSION,
+  validateCleanupToPageEnvelope,
+  validateCoordinatorToEngineEnvelope,
+  validateCoordinatorToTabEnvelope,
+  validateEngineToCoordinatorEnvelope,
+  validatePageToCleanupEnvelope,
+  validatePageToEngineEnvelope,
+  validateTabToCoordinatorEnvelope,
+} from './coordinator-protocol';
+
+const version = {
+  coordinatorVersion: CACHE_COORDINATOR_PROTOCOL_VERSION,
+} as const;
+
+it.each([undefined, 'DRAFT_ALREADY_SENT', 'INTERNAL', 42, null])(
+  'validates optional rollback and settlement domain code %j',
+  (errorCode) => {
+    const expected = errorCode === undefined || typeof errorCode === 'string';
+    expect(
+      isCacheRequest({
+        id: 1,
+        kind: 'rollback-optimistic-write',
+        transactionId: '1',
+        leaseOwner: 'runner',
+        leaseGeneration: '1',
+        error: 'rejected',
+        errorCode,
+      })
+    ).toBe(expected);
+    expect(
+      isCachePush({
+        kind: 'mutation-settled',
+        settlement: {
+          transactionId: '1',
+          status: 'permanently-failed',
+          error: 'rejected',
+          errorCode,
+        },
+      })
+    ).toBe(expected);
+  }
+);
+
+const enginePort = {
+  postMessage() {},
+  close() {},
+  start() {},
+} as unknown as MessagePort;
+
+describe('coordinator runtime protocol', () => {
+  it('accepts a durable-generation read without caller parameters', () => {
+    const request = {
+      id: 1,
+      kind: 'current-storage-generation',
+    };
+    expect(isCacheRequest(request)).toBe(true);
+    expect(isCacheRequest({ ...request, unexpected: true })).toBe(false);
+  });
+  it('validates the staged startup handshake and rejects the old ungated protocol', () => {
+    const progress = {
+      ...version,
+      kind: 'engine-startup',
+      ownerEpoch: 1,
+      phase: 'loading-assets',
+      databaseAction: 'open-existing',
+      timeoutMs: 300_000,
+    };
+    expect(validateCoordinatorToTabEnvelope(progress).ok).toBe(true);
+    expect(
+      validateCoordinatorToTabEnvelope({
+        ...progress,
+        phase: 'opening-database',
+      }).ok
+    ).toBe(true);
+    for (const invalid of [
+      { phase: 'unknown' },
+      { timeoutMs: 0 },
+      { timeoutMs: Infinity },
+      { databaseAction: 'forget' },
+      { coordinatorVersion: 2 },
+    ]) {
+      expect(
+        validateCoordinatorToTabEnvelope({ ...progress, ...invalid }).ok
+      ).toBe(false);
+    }
+    const prepared = {
+      ...version,
+      kind: 'engine-assets-ready',
+      tabId: 'tab',
+      ownerEpoch: 1,
+    };
+    expect(validateEngineToCoordinatorEnvelope(prepared).ok).toBe(true);
+    expect(
+      validateEngineToCoordinatorEnvelope({ ...prepared, extra: true }).ok
+    ).toBe(false);
+    const grant = { ...version, kind: 'open-engine', ownerEpoch: 1 };
+    expect(validateCoordinatorToEngineEnvelope(grant).ok).toBe(true);
+    expect(
+      validateCoordinatorToEngineEnvelope({ ...grant, coordinatorVersion: 2 })
+        .ok
+    ).toBe(false);
+    // Protocol 5 and earlier granted storage right after assets loaded,
+    // before the lock.
+    expect(
+      validateCoordinatorToEngineEnvelope({ ...grant, coordinatorVersion: 5 })
+        .ok
+    ).toBe(false);
+  });
+
+  it('validates owner-lock retries, unavailability, and stale cleanup envelopes', () => {
+    const waiting = {
+      ...version,
+      kind: 'engine-startup',
+      ownerEpoch: 1,
+      phase: 'awaiting-owner-lock',
+      databaseAction: 'open-existing',
+      timeoutMs: 15_000,
+    };
+    expect(validateCoordinatorToTabEnvelope(waiting).ok).toBe(true);
+    for (const invalid of [
+      { ...waiting, timeoutMs: undefined },
+      { ...waiting, phase: 'owner-lock-blocked' },
+    ]) {
+      expect(validateCoordinatorToTabEnvelope(invalid).ok).toBe(false);
+    }
+    const acquired = {
+      ...version,
+      kind: 'owner-lock-acquired',
+      tabId: 'tab',
+      ownerEpoch: 1,
+    };
+    const busy = { ...acquired, kind: 'owner-lock-busy' };
+    const unavailable = { ...acquired, kind: 'owner-lock-unavailable' };
+    for (const valid of [acquired, busy, unavailable]) {
+      expect(validateEngineToCoordinatorEnvelope(valid).ok).toBe(true);
+    }
+    for (const invalid of [
+      { ...acquired, tabId: '' },
+      { ...acquired, ownerEpoch: 0 },
+      { ...acquired, extra: true },
+      { ...busy, attempt: 2 },
+      { ...unavailable, reason: 'extra' },
+    ]) {
+      expect(validateEngineToCoordinatorEnvelope(invalid).ok).toBe(false);
+    }
+
+    const cacheUnavailable = {
+      ...version,
+      kind: 'cache-unavailable',
+      reason: 'another app version holds the database',
+    };
+    const superseded = {
+      ...version,
+      kind: 'cache-superseded',
+      reason: 'a newer version of the app took over the local cache',
+    };
+    const removeStale = {
+      ...version,
+      kind: 'remove-stale-databases',
+      tabId: 'tab',
+      ownerEpoch: 2,
+    };
+    for (const valid of [cacheUnavailable, superseded, removeStale]) {
+      expect(validateCoordinatorToTabEnvelope(valid).ok).toBe(true);
+    }
+    for (const invalid of [
+      { ...cacheUnavailable, reason: '' },
+      { ...superseded, reason: '' },
+      { ...superseded, buildTime: 1 },
+      { ...removeStale, ownerEpoch: 0 },
+    ]) {
+      expect(validateCoordinatorToTabEnvelope(invalid).ok).toBe(false);
+    }
+
+    const cleanup = { ...version, kind: 'remove-stale-databases', scope: 's' };
+    expect(validatePageToCleanupEnvelope(cleanup).ok).toBe(true);
+    expect(validatePageToCleanupEnvelope({ ...cleanup, scope: '' }).ok).toBe(
+      false
+    );
+    const tally = {
+      ...version,
+      kind: 'stale-databases-removed',
+      removed: 1,
+      inUse: 0,
+      keptWithQueuedMutations: 2,
+      failed: false,
+    };
+    expect(validateCleanupToPageEnvelope(tally).ok).toBe(true);
+    for (const invalid of [
+      { ...tally, removed: -1 },
+      { ...tally, failed: 'no' },
+      { ...tally, extra: true },
+    ]) {
+      expect(validateCleanupToPageEnvelope(invalid).ok).toBe(false);
+    }
+    expect(
+      isCacheResponse({
+        id: 3,
+        ok: false,
+        error: 'owner lock is held elsewhere',
+        errorCode: 'owner-lock-unavailable',
+      })
+    ).toBe(true);
+  });
+
+  it('validates bounded reconciliation evidence without changing exact requests', () => {
+    const request = {
+      filters: {},
+      sortMethod: 'UPDATED_AT',
+      sortDirection: 'DESC',
+      limit: 20,
+    };
+    const valid = (baseline?: unknown) =>
+      isCacheRequest({
+        id: 1,
+        kind: 'entity-filter',
+        request: { ...request, baseline },
+      });
+    const entry = {
+      key: 'GraphqlSoupDocument:one',
+      sortTimestamp: '2026-01-01T00:00:00.123456Z',
+    };
+    expect(valid()).toBe(true);
+    expect(valid([])).toBe(true);
+    expect(valid([entry])).toBe(true);
+    expect(valid(Array(5001).fill(entry))).toBe(false);
+    expect(valid([{ ...entry, key: 'not-a-normalized-key' }])).toBe(false);
+    expect(valid([{ ...entry, sortTimestamp: 123 }])).toBe(false);
+    expect(valid([{ ...entry, unexpected: true }])).toBe(false);
+  });
+
+  it('validates cache RPCs and rejects unknown fields or kinds', () => {
+    expect(isCacheRequest({ id: 0, kind: 'clear' })).toBe(true);
+    expect(isCacheRequest({ id: 1, kind: 'current-revision' })).toBe(true);
+    expect(isCacheRequest({ id: 1, kind: 'read', query: '{ x }' })).toBe(true);
+    expect(
+      isCacheRequest({
+        id: 2,
+        kind: 'write',
+        originOpId: 'client:1',
+        registration: {
+          opId: 'client:1',
+          entityResolvers: [
+            {
+              parentType: 'GraphqlUser',
+              fieldName: 'emailThread',
+              targetType: 'GraphqlSoupEmailThread',
+              argumentPath: ['input', 'threadId'],
+            },
+          ],
+        },
+        query: '{ user { id } }',
+        data: { user: { id: 'user-1' } },
+      })
+    ).toBe(true);
+    expect(
+      isCacheRequest({
+        id: 2,
+        kind: 'write',
+        registration: { opId: '', entityResolvers: [] },
+        query: '{ user { id } }',
+        data: { user: { id: 'user-1' } },
+      })
+    ).toBe(false);
+    const enqueue = {
+      id: 2,
+      kind: 'enqueue-optimistic-mutation',
+      uuid: '00000000-0000-4000-8000-000000000001',
+      query: 'mutation Update { update }',
+      data: { update: true },
+      createdAtMs: 1,
+      owner: 'runner',
+      nowMs: 1,
+      leaseExpiresAtMs: 1_001,
+    };
+    expect(isCacheRequest(enqueue)).toBe(true);
+    expect(isCacheRequest({ ...enqueue, uuid: undefined })).toBe(false);
+    expect(
+      isCacheRequest({
+        id: 2,
+        kind: 'read-records-by-keys',
+        document: 'fragment Item on GraphqlSoupDocument { name }',
+        fragmentName: 'Item',
+        keys: ['GraphqlSoupDocument:one'],
+      })
+    ).toBe(true);
+    expect(
+      isCacheRequest({
+        id: 2,
+        kind: 'search',
+        request: {
+          profile: 'quick-access-v1',
+          buckets: ['document'],
+          query: 'plan',
+          limit: 20,
+          nowMs: 123,
+        },
+      })
+    ).toBe(true);
+    expect(
+      isCacheRequest({
+        id: 2,
+        kind: 'search',
+        request: {
+          profile: 'quick-access-v1',
+          buckets: ['document'],
+          query: 'plan',
+          limit: 20,
+          nowMs: 123,
+          extra: true,
+        },
+      })
+    ).toBe(false);
+    expect(isCacheRequest({ id: 1, kind: 'clear', surprise: true })).toBe(
+      false
+    );
+    expect(isCacheRequest({ id: 1, kind: 'future-kind' })).toBe(false);
+    expect(isCacheResponse({ id: 3, ok: true, result: undefined })).toBe(true);
+    expect(isCacheResponse({ id: 3, ok: false, error: 'failed' })).toBe(true);
+    expect(
+      isCacheResponse({
+        id: 3,
+        ok: false,
+        error: 'failed',
+        errorCode: 'owner-epoch-lost',
+      })
+    ).toBe(true);
+    expect(
+      isCacheResponse({
+        id: 3,
+        ok: false,
+        error: 'failed',
+        errorCode: 'future-code',
+      })
+    ).toBe(false);
+    expect(isCacheResponse({ id: 3, ok: false, error: 4 })).toBe(false);
+    expect(
+      isCachePush({
+        kind: 'cache-changed',
+        revision: INITIAL_CACHE_REVISION,
+      })
+    ).toBe(true);
+    expect(
+      isCachePush({
+        kind: 'mutation-settled',
+        settlement: { transactionId: '1', status: 'committed' },
+      })
+    ).toBe(true);
+  });
+
+  it('enforces search and record-key bounds at coordinator ingress', () => {
+    const validSearch = {
+      profile: 'quick-access-v1',
+      buckets: ['document'],
+      query: 'plan',
+      limit: 20,
+      nowMs: 123,
+    };
+    const acceptsSearch = (request: Record<string, unknown>) =>
+      isCacheRequest({ id: 2, kind: 'search', request });
+
+    expect(acceptsSearch({ ...validSearch, limit: 501 })).toBe(false);
+    expect(acceptsSearch({ ...validSearch, query: 'é'.repeat(257) })).toBe(
+      false
+    );
+    expect(acceptsSearch({ ...validSearch, buckets: ['Invalid'] })).toBe(false);
+    expect(acceptsSearch({ ...validSearch, nowMs: -1 })).toBe(false);
+    expect(
+      acceptsSearch({
+        ...validSearch,
+        cursor: { timestampMs: 1, recordKey: 'ROOT_QUERY' },
+      })
+    ).toBe(false);
+
+    const selectionRequest = (keys: string[]) =>
+      isCacheRequest({
+        id: 2,
+        kind: 'read-records-by-keys',
+        document: 'fragment Item on GraphqlSoupDocument { name }',
+        fragmentName: 'Item',
+        keys,
+      });
+    expect(selectionRequest(['ROOT_QUERY'])).toBe(false);
+    expect(selectionRequest([`Thing:${'x'.repeat(1024)}`])).toBe(false);
+  });
+
+  it.each([
+    {
+      ...version,
+      kind: 'register-tab',
+      scope: 'scope',
+      tabId: 'tab',
+      livenessLockName: 'graphql-cache-tab:scope:tab',
+      buildTime: 1_790_000_000_000,
+    },
+    {
+      ...version,
+      kind: 'cache-request',
+      tabId: 'tab',
+      request: { id: 1, kind: 'clear' },
+    },
+    {
+      ...version,
+      kind: 'attach-engine-port',
+      tabId: 'tab',
+      ownerEpoch: 1,
+      enginePort,
+    },
+    {
+      ...version,
+      kind: 'graceful-departure',
+      tabId: 'tab',
+      ownerEpoch: 1,
+    },
+    {
+      ...version,
+      kind: 'navigation-departure',
+      tabId: 'tab',
+      ownerEpoch: 1,
+      reason: 'pagehide',
+    },
+    {
+      ...version,
+      kind: 'engine-lost',
+      tabId: 'tab',
+      ownerEpoch: 1,
+      reason: 'failed',
+    },
+    {
+      ...version,
+      kind: 'disconnect-tab',
+      tabId: 'tab',
+      reason: 'closed',
+    },
+  ])('accepts tab envelope $kind', (message) => {
+    expect(validateTabToCoordinatorEnvelope(message)).toEqual({
+      ok: true,
+      value: message,
+    });
+  });
+
+  it.each([
+    { ...version, kind: 'registered', tabId: 'tab' },
+    {
+      ...version,
+      kind: 'become-owner',
+      scope: 'scope',
+      tabId: 'tab',
+      ownerEpoch: 1,
+      databaseAction: 'open-existing',
+      ownerLockName: 'owner-lock',
+    },
+    {
+      ...version,
+      kind: 'cache-message',
+      message: { id: 1, ok: true, result: null },
+    },
+    {
+      ...version,
+      kind: 'terminate-engine',
+      tabId: 'tab',
+      ownerEpoch: 1,
+      reason: 'failed',
+    },
+    {
+      ...version,
+      kind: 'retire-complete',
+      tabId: 'tab',
+      ownerEpoch: 1,
+    },
+    {
+      ...version,
+      kind: 'engine-replaced',
+      ownerEpoch: 2,
+      openOutcome: 'opened-existing',
+    },
+    { ...version, kind: 'protocol-error', error: 'bad envelope' },
+    { ...version, kind: 'terminal-error', error: 'recovery exhausted' },
+  ])('accepts coordinator-to-tab envelope $kind', (message) => {
+    expect(validateCoordinatorToTabEnvelope(message).ok).toBe(true);
+  });
+
+  it.each([
+    'opened-existing',
+    'opened-new',
+    'reset-incompatible',
+    'reset-corrupt',
+    'reset-storage-uncertain',
+  ])(
+    'retains the validated storage outcome %s on replacement',
+    (openOutcome) => {
+      const message = {
+        ...version,
+        kind: 'engine-replaced',
+        ownerEpoch: 2,
+        openOutcome,
+      };
+      expect(validateCoordinatorToTabEnvelope(message)).toEqual({
+        ok: true,
+        value: message,
+      });
+    }
+  );
+
+  it.each([undefined, null, 'open-existing', 'unknown'])(
+    'rejects ambiguous replacement storage outcome %s',
+    (openOutcome) => {
+      expect(
+        validateCoordinatorToTabEnvelope({
+          ...version,
+          kind: 'engine-replaced',
+          ownerEpoch: 2,
+          openOutcome,
+        }).ok
+      ).toBe(false);
+    }
+  );
+
+  it('rejects the old protocol rather than guessing whether storage survived', () => {
+    expect(
+      validateCoordinatorToTabEnvelope({
+        coordinatorVersion: 3,
+        kind: 'engine-replaced',
+        ownerEpoch: 2,
+      }).ok
+    ).toBe(false);
+  });
+
+  it('validates activation and both direct-port directions', () => {
+    expect(
+      validatePageToEngineEnvelope({
+        ...version,
+        kind: 'activate-engine',
+        scope: 'scope',
+        tabId: 'tab',
+        ownerEpoch: 1,
+        databaseAction: 'wipe-before-open',
+        ownerLockName: 'owner-lock',
+      }).ok
+    ).toBe(true);
+    expect(
+      validateCoordinatorToEngineEnvelope({
+        ...version,
+        kind: 'engine-request',
+        ownerEpoch: 1,
+        routeId: 7,
+        request: { id: 7, kind: 'clear' },
+      }).ok
+    ).toBe(true);
+    expect(
+      validateCoordinatorToEngineEnvelope({
+        ...version,
+        kind: 'engine-request',
+        ownerEpoch: 1,
+        routeId: 7,
+        request: { id: 6, kind: 'clear' },
+      }).ok
+    ).toBe(false);
+    expect(
+      validateEngineToCoordinatorEnvelope({
+        ...version,
+        kind: 'engine-ready',
+        tabId: 'tab',
+        ownerEpoch: 1,
+        ownerLockName: 'owner-lock',
+        ownerLockHeld: true,
+        databaseActionProof: 'wiped-before-open',
+        openOutcome: 'reset-storage-uncertain',
+      }).ok
+    ).toBe(true);
+    expect(
+      validateEngineToCoordinatorEnvelope({
+        ...version,
+        kind: 'engine-ready',
+        tabId: 'tab',
+        ownerEpoch: 1,
+        ownerLockName: 'owner-lock',
+        ownerLockHeld: false,
+        databaseActionProof: 'wiped-before-open',
+        openOutcome: 'reset-storage-uncertain',
+      }).ok
+    ).toBe(false);
+    expect(
+      validateEngineToCoordinatorEnvelope({
+        ...version,
+        kind: 'engine-fatal',
+        tabId: 'tab',
+        ownerEpoch: 1,
+        reason: 'reset',
+        fatalCode: 'storage-reset-required',
+      }).ok
+    ).toBe(true);
+    expect(
+      validateEngineToCoordinatorEnvelope({
+        ...version,
+        kind: 'activation-failed',
+        tabId: 'tab',
+        ownerEpoch: 1,
+        reason: 'open failed',
+        failureCode: 'recovery-open-failed',
+      }).ok
+    ).toBe(true);
+    expect(
+      validateEngineToCoordinatorEnvelope({
+        ...version,
+        kind: 'activation-failed',
+        tabId: 'tab',
+        ownerEpoch: 1,
+        reason: 'OPFS sync handle open failed (NoModificationAllowedError)',
+        failureCode: 'storage-busy',
+      }).ok
+    ).toBe(true);
+    expect(
+      validateEngineToCoordinatorEnvelope({
+        ...version,
+        kind: 'activation-failed',
+        tabId: 'tab',
+        ownerEpoch: 1,
+        reason: 'open failed',
+        failureCode: 'busy',
+      }).ok
+    ).toBe(false);
+    expect(
+      validateEngineToCoordinatorEnvelope({
+        ...version,
+        kind: 'engine-response',
+        ownerEpoch: 1,
+        routeId: 7,
+        response: {
+          id: 7,
+          ok: false,
+          error: 'forged topology loss',
+          errorCode: 'owner-epoch-lost',
+        },
+      }).ok
+    ).toBe(false);
+  });
+
+  it('rejects missing versions, non-positive epochs, extra fields, and malformed nested payloads', () => {
+    expect(
+      validateTabToCoordinatorEnvelope({
+        kind: 'register-tab',
+        scope: 'scope',
+        tabId: 'tab',
+        livenessLockName: 'lock',
+        buildTime: 0,
+      }).ok
+    ).toBe(false);
+    // Every page reports its build, which decides database takeovers.
+    expect(
+      validateTabToCoordinatorEnvelope({
+        ...version,
+        kind: 'register-tab',
+        scope: 'scope',
+        tabId: 'tab',
+        livenessLockName: 'lock',
+      }).ok
+    ).toBe(false);
+    expect(
+      validateCoordinatorToTabEnvelope({
+        ...version,
+        kind: 'engine-replaced',
+        ownerEpoch: 0,
+      }).ok
+    ).toBe(false);
+    expect(
+      validateCoordinatorToTabEnvelope({
+        coordinatorVersion: CACHE_COORDINATOR_PROTOCOL_VERSION + 1,
+        kind: 'engine-replaced',
+        ownerEpoch: 1,
+      }).ok
+    ).toBe(false);
+    expect(
+      validateEngineToCoordinatorEnvelope({
+        ...version,
+        kind: 'heartbeat-ack',
+        ownerEpoch: 1,
+        heartbeatId: 1,
+        extra: true,
+      }).ok
+    ).toBe(false);
+    expect(
+      validateCoordinatorToEngineEnvelope({
+        ...version,
+        kind: 'engine-request',
+        ownerEpoch: 1,
+        routeId: 1,
+        request: { id: 1, kind: 'unknown' },
+      }).ok
+    ).toBe(false);
+  });
+
+  it('derives the exact UTF-8 canonical turso-opfs lock name', () => {
+    // The current versions keep the unversioned name, and so the lock that
+    // builds before versioned names hold.
+    expect(databaseOwnerLockName('scope')).toBe(
+      'macro:turso-opfs:v1:19:graphql-cache:scope'
+    );
+    expect(databaseOwnerLockName('é')).toBe(
+      'macro:turso-opfs:v1:16:graphql-cache:é'
+    );
+  });
+
+  it('mirrors the storage versions the Rust crates embed in database names', () => {
+    const repositoryRoot = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../../../..'
+    );
+    const rustSource = (path: string): string =>
+      readFileSync(resolve(repositoryRoot, path), 'utf8');
+    const rustConstant = (path: string, name: string): number => {
+      const found = new RegExp(`pub const ${name}: u32 = (\\d+);`).exec(
+        rustSource(path)
+      );
+      if (!found?.[1]) throw new Error(`${name} not found in ${path}`);
+      return Number(found[1]);
+    };
+    const unversioned =
+      /pub const UNVERSIONED_STORAGE_VERSIONS: \(u32, u32, u32\) = \((\d+), (\d+), (\d+)\);/.exec(
+        rustSource('crates/client/cache-core/src/codec.rs')
+      );
+    if (!unversioned) throw new Error('UNVERSIONED_STORAGE_VERSIONS not found');
+    expect(UNVERSIONED_STORAGE_VERSION).toEqual({
+      schemaCompatibilityEpoch: Number(unversioned[1]),
+      formatVersion: Number(unversioned[2]),
+      storageSchemaVersion: Number(unversioned[3]),
+    });
+    expect(CACHE_STORAGE_VERSION).toEqual({
+      schemaCompatibilityEpoch: rustConstant(
+        'crates/client/cache-core/src/codec.rs',
+        'CACHE_SCHEMA_COMPATIBILITY_EPOCH'
+      ),
+      formatVersion: rustConstant(
+        'crates/client/cache-core/src/codec.rs',
+        'CACHE_FORMAT_VERSION'
+      ),
+      storageSchemaVersion: rustConstant(
+        'crates/client/cache-turso/src/storage.rs',
+        'STORAGE_SCHEMA_VERSION'
+      ),
+    });
+  });
+
+  it("recognizes only this scope's older databases as stale", () => {
+    const { schemaCompatibilityEpoch, formatVersion, storageSchemaVersion } =
+      CACHE_STORAGE_VERSION;
+    const own = cacheDatabaseIdentity('a');
+    const versioned = (storage: number): string =>
+      `graphql-cache:a:s${schemaCompatibilityEpoch}.v${formatVersion}.t${storage}`;
+    // The current versions still open the unversioned name.
+    expect(own).toBe('graphql-cache:a');
+    expect(isStaleCacheDatabaseIdentity('a', own)).toBe(false);
+    // Another spelling of this build's own versions is never opened again.
+    expect(
+      isStaleCacheDatabaseIdentity('a', versioned(storageSchemaVersion))
+    ).toBe(true);
+    expect(isStaleCacheDatabaseIdentity('a', 'graphql-cache:a:s1.v2.t3')).toBe(
+      true
+    );
+    expect(
+      isStaleCacheDatabaseIdentity('a', versioned(storageSchemaVersion - 1))
+    ).toBe(true);
+    for (const other of [
+      // A newer build may come back after a rollback, so it keeps its file.
+      versioned(storageSchemaVersion + 1),
+      'graphql-cache:a:s99.v0.t0',
+      'graphql-cache:b:s1.v2.t3',
+      'graphql-cache:ab',
+      'graphql-cache:a-wal',
+      'graphql-cache:a:s1.v2',
+      'graphql-cache:a:s1.v2.t3.x',
+      'graphql-cache:quarantine:a',
+    ]) {
+      expect(isStaleCacheDatabaseIdentity('a', other)).toBe(false);
+    }
+    expect(
+      tabIdFromLivenessLockName('a', tabLivenessLockName('a', 'tab-1'))
+    ).toBe('tab-1');
+    expect(
+      tabIdFromLivenessLockName('a', tabLivenessLockName('ab', 'tab-1'))
+    ).toBeUndefined();
+    expect(
+      tabIdFromLivenessLockName('a', 'graphql-cache-tab:a:')
+    ).toBeUndefined();
+  });
+});

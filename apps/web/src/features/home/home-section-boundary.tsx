@@ -1,13 +1,8 @@
+import { DebugSuspense } from '@channel/DebugSuspense';
 import RefreshIcon from '@phosphor/arrow-clockwise.svg';
 import WarningIcon from '@phosphor/warning.svg';
 import { Button } from '@ui';
-import {
-  createSignal,
-  ErrorBoundary,
-  type JSX,
-  Show,
-  Suspense,
-} from 'solid-js';
+import { createSignal, ErrorBoundary, type JSX, Show } from 'solid-js';
 
 interface HomeSectionBoundaryProps {
   title: string;
@@ -50,7 +45,7 @@ function HomeSectionError(props: HomeSectionErrorProps) {
 
           <div class="mt-2 flex gap-2">
             <Button
-              variant="base"
+              variant="outline"
               size="sm"
               depth={2}
               class="w-fit bg-surface"
@@ -77,10 +72,10 @@ function HomeSectionError(props: HomeSectionErrorProps) {
 function HomeSectionFallback() {
   return (
     <div class="space-y-3">
-      <div class="skeleton-shimmer h-4 w-32 rounded-full bg-ink/10" />
+      <div class="skeleton-shimmer h-4 w-32 rounded-full bg-skeleton" />
       <div class="space-y-2">
-        <div class="skeleton-shimmer h-12 rounded-xl bg-hover/60" />
-        <div class="skeleton-shimmer h-12 rounded-xl bg-hover/40" />
+        <div class="skeleton-shimmer h-12 rounded-xl bg-skeleton" />
+        <div class="skeleton-shimmer h-12 rounded-xl bg-skeleton" />
       </div>
     </div>
   );
@@ -97,7 +92,8 @@ export function HomeSectionBoundary(props: HomeSectionBoundaryProps) {
         />
       )}
     >
-      <Suspense
+      <DebugSuspense
+        name={`Home.section.${props.title}`}
         fallback={
           props.fallback === undefined ? (
             <HomeSectionFallback />
@@ -107,7 +103,7 @@ export function HomeSectionBoundary(props: HomeSectionBoundaryProps) {
         }
       >
         {props.children}
-      </Suspense>
+      </DebugSuspense>
     </ErrorBoundary>
   );
 }

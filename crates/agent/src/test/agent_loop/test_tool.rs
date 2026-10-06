@@ -5,6 +5,7 @@ use crate::stream::ToolResponse;
 use ai_toolset::{
     AsyncTool, AsyncToolCollection, RequestContext, ServiceContext, ToolCallError, ToolResult,
 };
+use ai_toolset::{ToolAnnotated, ToolAnnotations};
 use async_trait::async_trait;
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 use schemars::JsonSchema;
@@ -16,6 +17,10 @@ use std::sync::Arc;
 #[schemars(title = "echo_tool", description = "Echoes its input back.")]
 struct EchoTool {
     value: String,
+}
+
+impl ToolAnnotated for EchoTool {
+    const ANNOTATIONS: ToolAnnotations = ToolAnnotations::read_only("Echo");
 }
 
 #[async_trait]
@@ -35,6 +40,10 @@ impl AsyncTool<()> for EchoTool {
 #[derive(Deserialize, JsonSchema)]
 #[schemars(title = "boom_tool", description = "Always fails.")]
 struct BoomTool {}
+
+impl ToolAnnotated for BoomTool {
+    const ANNOTATIONS: ToolAnnotations = ToolAnnotations::read_only("Boom");
+}
 
 #[async_trait]
 impl AsyncTool<()> for BoomTool {
@@ -97,6 +106,42 @@ async fn tool_call_error_emits_call_and_error_response() {
     assert!(
         result.error.is_none(),
         "a tool error must not stop the loop, got {:?}",
+        result.error
+    );
+    assert_eq!(result.content(), "done", "the loop should continue");
+}
+
+/// Invalid tool arguments
+/// A call whose arguments don't match the tool's input schema must come back to
+/// the model as a typed error naming what was wrong, so it can correct the call
+/// instead of retrying the same input.
+#[tokio::test]
+async fn invalid_tool_arguments_emit_error_naming_the_problem() {
+    let model = tool_then_done([MockStreamEvent::tool_call(
+        "call-1",
+        "echo_tool",
+        serde_json::json!({ "value": 123 }),
+    )]);
+    let toolset = util::single_tool_set::<EchoTool, ()>();
+    let mut session = util::session(toolset, Arc::new(()), model).await;
+
+    let result = util::drive(&mut session, "call echo with a bad argument").await;
+
+    let call = result
+        .tool_calls()
+        .into_iter()
+        .find(|call| call.name == "echo_tool")
+        .expect("the mistyped call should be emitted");
+    let response = result
+        .tool_response(&call.id)
+        .expect("the mistyped call's response should be emitted");
+    assert!(
+        matches!(response, ToolResponse::Err { description, .. } if description.contains("expected a string")),
+        "the error should carry the serde detail, got {response:?}"
+    );
+    assert!(
+        result.error.is_none(),
+        "invalid arguments must not stop the loop, got {:?}",
         result.error
     );
     assert_eq!(result.content(), "done", "the loop should continue");

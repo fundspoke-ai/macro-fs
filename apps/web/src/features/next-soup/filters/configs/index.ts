@@ -10,7 +10,12 @@ export * from './general';
 export * from './task';
 
 import type { FilterGroupConfig } from './base';
-import { companyOwnerFilter, companyStageFilter } from './company';
+import {
+  companyNeedsFollowUpFilter,
+  companyOwnerFilter,
+  companyRecentlyActiveFilter,
+  companyStageFilter,
+} from './company';
 import {
   DOCUMENT_CONTEXTUAL_FILTERS,
   emailAttachmentsFilter,
@@ -27,20 +32,17 @@ import {
 } from './email';
 import {
   activeAgentFilter,
+  calendarFilter,
   callsFilter,
   channelsFilter,
   crmCompanyActiveFilter,
   crmCompanyFilter,
   crmCompanyHiddenFilter,
   documentOrFileFilter,
-  doneRemindersFilter,
   filesAndFolderFilter,
-  firedRemindersFilter,
   foldersFilter,
   inFolderFilter,
   notTaskFilter,
-  remindersFilter,
-  scheduledRemindersFilter,
   searchSupportedFilter,
 } from './entity';
 import { ENTITY_TYPE_FILTERS } from './entity-type';
@@ -91,18 +93,17 @@ export const SOUP_FILTERS = [
   notTaskFilter,
   documentOrFileFilter,
   activeTaskFilter,
+  calendarFilter,
   callsFilter,
   crmCompanyFilter,
   crmCompanyActiveFilter,
   crmCompanyHiddenFilter,
   companyOwnerFilter,
+  companyNeedsFollowUpFilter,
+  companyRecentlyActiveFilter,
   companyStageFilter,
   emailAttachmentsFilter,
   inFolderFilter,
-  remindersFilter,
-  firedRemindersFilter,
-  scheduledRemindersFilter,
-  doneRemindersFilter,
   searchSupportedFilter,
   ...ENTITY_TYPE_FILTERS,
   ...TASK_STATUS_FILTERS,

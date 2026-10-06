@@ -6,6 +6,8 @@
  */
 import type {
   AddServerRequest,
+  AiAdmissionErrorBody,
+  BrowsePipedreamMcpCatalogParams,
   CallToolRequest,
   CallToolResponse,
   ChatHistory,
@@ -14,6 +16,7 @@ import type {
   CompleteOnboardingRequest,
   CreateChatRequest,
   DeleteMcpServerParams,
+  DeletePipedreamMcpConnectionParams,
   DocumentTextPart,
   ErrorBody,
   ErrorResponse,
@@ -29,6 +32,11 @@ import type {
   OnboardingRow,
   OnboardingState,
   PatchChatRequest,
+  PipedreamCatalogResponse,
+  PipedreamCompleteRequest,
+  PipedreamConnectionResponse,
+  PipedreamTokenResponse,
+  PipedreamUpdateRequest,
   ProjectionStateResponse,
   RejectToolCallRequest,
   RunImportOutcome,
@@ -61,6 +69,11 @@ export type setPricingHandlerResponse200 = {
   status: 200;
 };
 
+export type setPricingHandlerResponse400 = {
+  data: ErrorBody;
+  status: 400;
+};
+
 export type setPricingHandlerResponse403 = {
   data: ErrorBody;
   status: 403;
@@ -75,6 +88,7 @@ export type setPricingHandlerResponseSuccess = setPricingHandlerResponse200 & {
   headers: Headers;
 };
 export type setPricingHandlerResponseError = (
+  | setPricingHandlerResponse400
   | setPricingHandlerResponse403
   | setPricingHandlerResponse500
 ) & {
@@ -483,6 +497,11 @@ export type createChatResponse401 = {
   status: 401;
 };
 
+export type createChatResponse403 = {
+  data: string;
+  status: 403;
+};
+
 export type createChatResponse500 = {
   data: string;
   status: 500;
@@ -493,6 +512,7 @@ export type createChatResponseSuccess = createChatResponse200 & {
 };
 export type createChatResponseError = (
   | createChatResponse401
+  | createChatResponse403
   | createChatResponse500
 ) & {
   headers: Headers;
@@ -1250,6 +1270,61 @@ export const runImportHandler = async (
 };
 
 /**
+ * @summary Discover candidates for user selection without auto-importing them.
+ */
+export type discoverHandlerResponse204 = {
+  data: void;
+  status: 204;
+};
+
+export type discoverHandlerResponse400 = {
+  data: void;
+  status: 400;
+};
+
+export type discoverHandlerResponse500 = {
+  data: void;
+  status: 500;
+};
+
+export type discoverHandlerResponseSuccess = discoverHandlerResponse204 & {
+  headers: Headers;
+};
+export type discoverHandlerResponseError = (
+  | discoverHandlerResponse400
+  | discoverHandlerResponse500
+) & {
+  headers: Headers;
+};
+
+export type discoverHandlerResponse =
+  | discoverHandlerResponseSuccess
+  | discoverHandlerResponseError;
+
+export const getDiscoverHandlerUrl = (source: string) => {
+  return `/import/runs/${source}/discover`;
+};
+
+export const discoverHandler = async (
+  source: string,
+  options?: RequestInit
+): Promise<discoverHandlerResponse> => {
+  const res = await fetch(getDiscoverHandlerUrl(source), {
+    ...options,
+    method: 'POST',
+  });
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: discoverHandlerResponse['data'] = body ? JSON.parse(body) : {};
+  return {
+    data,
+    status: res.status,
+    headers: res.headers,
+  } as discoverHandlerResponse;
+};
+
+/**
  * @summary Dismiss one source's import section.
  */
 export type dismissRunHandlerResponse204 = {
@@ -1317,9 +1392,19 @@ export type retryGatherHandlerResponse400 = {
   status: 400;
 };
 
+export type retryGatherHandlerResponse402 = {
+  data: AiAdmissionErrorBody;
+  status: 402;
+};
+
 export type retryGatherHandlerResponse500 = {
   data: void;
   status: 500;
+};
+
+export type retryGatherHandlerResponse503 = {
+  data: AiAdmissionErrorBody;
+  status: 503;
 };
 
 export type retryGatherHandlerResponseSuccess =
@@ -1328,7 +1413,9 @@ export type retryGatherHandlerResponseSuccess =
   };
 export type retryGatherHandlerResponseError = (
   | retryGatherHandlerResponse400
+  | retryGatherHandlerResponse402
   | retryGatherHandlerResponse500
+  | retryGatherHandlerResponse503
 ) & {
   headers: Headers;
 };
@@ -1921,6 +2008,419 @@ export const completeHandler = async (
   } as completeHandlerResponse;
 };
 
+/**
+ * Results come from Pipedream's app directory, most popular first.
+ * @summary Browse or search the catalog of connectable apps.
+ */
+export type browsePipedreamMcpCatalogResponse200 = {
+  data: PipedreamCatalogResponse;
+  status: 200;
+};
+
+export type browsePipedreamMcpCatalogResponse401 = {
+  data: string;
+  status: 401;
+};
+
+export type browsePipedreamMcpCatalogResponse500 = {
+  data: ErrorResponse;
+  status: 500;
+};
+
+export type browsePipedreamMcpCatalogResponse501 = {
+  data: ErrorResponse;
+  status: 501;
+};
+
+export type browsePipedreamMcpCatalogResponseSuccess =
+  browsePipedreamMcpCatalogResponse200 & {
+    headers: Headers;
+  };
+export type browsePipedreamMcpCatalogResponseError = (
+  | browsePipedreamMcpCatalogResponse401
+  | browsePipedreamMcpCatalogResponse500
+  | browsePipedreamMcpCatalogResponse501
+) & {
+  headers: Headers;
+};
+
+export type browsePipedreamMcpCatalogResponse =
+  | browsePipedreamMcpCatalogResponseSuccess
+  | browsePipedreamMcpCatalogResponseError;
+
+export const getBrowsePipedreamMcpCatalogUrl = (
+  params?: BrowsePipedreamMcpCatalogParams
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/pipedream/mcp/catalog?${stringifiedParams}`
+    : `/pipedream/mcp/catalog`;
+};
+
+export const browsePipedreamMcpCatalog = async (
+  params?: BrowsePipedreamMcpCatalogParams,
+  options?: RequestInit
+): Promise<browsePipedreamMcpCatalogResponse> => {
+  const res = await fetch(getBrowsePipedreamMcpCatalogUrl(params), {
+    ...options,
+    method: 'GET',
+  });
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: browsePipedreamMcpCatalogResponse['data'] = body
+    ? JSON.parse(body)
+    : {};
+  return {
+    data,
+    status: res.status,
+    headers: res.headers,
+  } as browsePipedreamMcpCatalogResponse;
+};
+
+/**
+ * Verifies with Pipedream that the account exists and was connected for
+the authenticated user before persisting anything.
+ * @summary Register a connected account reported by the Pipedream Connect UI.
+ */
+export type completePipedreamMcpConnectionResponse200 = {
+  data: PipedreamConnectionResponse;
+  status: 200;
+};
+
+export type completePipedreamMcpConnectionResponse401 = {
+  data: string;
+  status: 401;
+};
+
+export type completePipedreamMcpConnectionResponse404 = {
+  data: ErrorResponse;
+  status: 404;
+};
+
+export type completePipedreamMcpConnectionResponse500 = {
+  data: ErrorResponse;
+  status: 500;
+};
+
+export type completePipedreamMcpConnectionResponse501 = {
+  data: ErrorResponse;
+  status: 501;
+};
+
+export type completePipedreamMcpConnectionResponseSuccess =
+  completePipedreamMcpConnectionResponse200 & {
+    headers: Headers;
+  };
+export type completePipedreamMcpConnectionResponseError = (
+  | completePipedreamMcpConnectionResponse401
+  | completePipedreamMcpConnectionResponse404
+  | completePipedreamMcpConnectionResponse500
+  | completePipedreamMcpConnectionResponse501
+) & {
+  headers: Headers;
+};
+
+export type completePipedreamMcpConnectionResponse =
+  | completePipedreamMcpConnectionResponseSuccess
+  | completePipedreamMcpConnectionResponseError;
+
+export const getCompletePipedreamMcpConnectionUrl = () => {
+  return `/pipedream/mcp/complete`;
+};
+
+export const completePipedreamMcpConnection = async (
+  pipedreamCompleteRequest: PipedreamCompleteRequest,
+  options?: RequestInit
+): Promise<completePipedreamMcpConnectionResponse> => {
+  const res = await fetch(getCompletePipedreamMcpConnectionUrl(), {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(pipedreamCompleteRequest),
+  });
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: completePipedreamMcpConnectionResponse['data'] = body
+    ? JSON.parse(body)
+    : {};
+  return {
+    data,
+    status: res.status,
+    headers: res.headers,
+  } as completePipedreamMcpConnectionResponse;
+};
+
+/**
+ * @summary List the MCP apps connected by the authenticated user.
+ */
+export type listPipedreamMcpConnectionsResponse200 = {
+  data: PipedreamConnectionResponse[];
+  status: 200;
+};
+
+export type listPipedreamMcpConnectionsResponse401 = {
+  data: string;
+  status: 401;
+};
+
+export type listPipedreamMcpConnectionsResponse500 = {
+  data: ErrorResponse;
+  status: 500;
+};
+
+export type listPipedreamMcpConnectionsResponseSuccess =
+  listPipedreamMcpConnectionsResponse200 & {
+    headers: Headers;
+  };
+export type listPipedreamMcpConnectionsResponseError = (
+  | listPipedreamMcpConnectionsResponse401
+  | listPipedreamMcpConnectionsResponse500
+) & {
+  headers: Headers;
+};
+
+export type listPipedreamMcpConnectionsResponse =
+  | listPipedreamMcpConnectionsResponseSuccess
+  | listPipedreamMcpConnectionsResponseError;
+
+export const getListPipedreamMcpConnectionsUrl = () => {
+  return `/pipedream/mcp/connections`;
+};
+
+export const listPipedreamMcpConnections = async (
+  options?: RequestInit
+): Promise<listPipedreamMcpConnectionsResponse> => {
+  const res = await fetch(getListPipedreamMcpConnectionsUrl(), {
+    ...options,
+    method: 'GET',
+  });
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listPipedreamMcpConnectionsResponse['data'] = body
+    ? JSON.parse(body)
+    : {};
+  return {
+    data,
+    status: res.status,
+    headers: res.headers,
+  } as listPipedreamMcpConnectionsResponse;
+};
+
+/**
+ * @summary Rename or enable/disable a connected app.
+ */
+export type updatePipedreamMcpConnectionResponse200 = {
+  data: PipedreamConnectionResponse;
+  status: 200;
+};
+
+export type updatePipedreamMcpConnectionResponse401 = {
+  data: string;
+  status: 401;
+};
+
+export type updatePipedreamMcpConnectionResponse404 = {
+  data: ErrorResponse;
+  status: 404;
+};
+
+export type updatePipedreamMcpConnectionResponse500 = {
+  data: ErrorResponse;
+  status: 500;
+};
+
+export type updatePipedreamMcpConnectionResponseSuccess =
+  updatePipedreamMcpConnectionResponse200 & {
+    headers: Headers;
+  };
+export type updatePipedreamMcpConnectionResponseError = (
+  | updatePipedreamMcpConnectionResponse401
+  | updatePipedreamMcpConnectionResponse404
+  | updatePipedreamMcpConnectionResponse500
+) & {
+  headers: Headers;
+};
+
+export type updatePipedreamMcpConnectionResponse =
+  | updatePipedreamMcpConnectionResponseSuccess
+  | updatePipedreamMcpConnectionResponseError;
+
+export const getUpdatePipedreamMcpConnectionUrl = () => {
+  return `/pipedream/mcp/connections`;
+};
+
+export const updatePipedreamMcpConnection = async (
+  pipedreamUpdateRequest: PipedreamUpdateRequest,
+  options?: RequestInit
+): Promise<updatePipedreamMcpConnectionResponse> => {
+  const res = await fetch(getUpdatePipedreamMcpConnectionUrl(), {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(pipedreamUpdateRequest),
+  });
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: updatePipedreamMcpConnectionResponse['data'] = body
+    ? JSON.parse(body)
+    : {};
+  return {
+    data,
+    status: res.status,
+    headers: res.headers,
+  } as updatePipedreamMcpConnectionResponse;
+};
+
+/**
+ * @summary Disconnect an app, revoking its Pipedream account.
+ */
+export type deletePipedreamMcpConnectionResponse204 = {
+  data: void;
+  status: 204;
+};
+
+export type deletePipedreamMcpConnectionResponse401 = {
+  data: string;
+  status: 401;
+};
+
+export type deletePipedreamMcpConnectionResponse500 = {
+  data: ErrorResponse;
+  status: 500;
+};
+
+export type deletePipedreamMcpConnectionResponseSuccess =
+  deletePipedreamMcpConnectionResponse204 & {
+    headers: Headers;
+  };
+export type deletePipedreamMcpConnectionResponseError = (
+  | deletePipedreamMcpConnectionResponse401
+  | deletePipedreamMcpConnectionResponse500
+) & {
+  headers: Headers;
+};
+
+export type deletePipedreamMcpConnectionResponse =
+  | deletePipedreamMcpConnectionResponseSuccess
+  | deletePipedreamMcpConnectionResponseError;
+
+export const getDeletePipedreamMcpConnectionUrl = (
+  params: DeletePipedreamMcpConnectionParams
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/pipedream/mcp/connections?${stringifiedParams}`
+    : `/pipedream/mcp/connections`;
+};
+
+export const deletePipedreamMcpConnection = async (
+  params: DeletePipedreamMcpConnectionParams,
+  options?: RequestInit
+): Promise<deletePipedreamMcpConnectionResponse> => {
+  const res = await fetch(getDeletePipedreamMcpConnectionUrl(params), {
+    ...options,
+    method: 'DELETE',
+  });
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: deletePipedreamMcpConnectionResponse['data'] = body
+    ? JSON.parse(body)
+    : {};
+  return {
+    data,
+    status: res.status,
+    headers: res.headers,
+  } as deletePipedreamMcpConnectionResponse;
+};
+
+/**
+ * The frontend opens Pipedream's hosted Connect UI with this token; the
+user picks (or is deep-linked into) an app and authorizes it there.
+ * @summary Create a short-lived Pipedream Connect token for the authenticated user.
+ */
+export type createPipedreamMcpTokenResponse200 = {
+  data: PipedreamTokenResponse;
+  status: 200;
+};
+
+export type createPipedreamMcpTokenResponse401 = {
+  data: string;
+  status: 401;
+};
+
+export type createPipedreamMcpTokenResponse500 = {
+  data: ErrorResponse;
+  status: 500;
+};
+
+export type createPipedreamMcpTokenResponse501 = {
+  data: ErrorResponse;
+  status: 501;
+};
+
+export type createPipedreamMcpTokenResponseSuccess =
+  createPipedreamMcpTokenResponse200 & {
+    headers: Headers;
+  };
+export type createPipedreamMcpTokenResponseError = (
+  | createPipedreamMcpTokenResponse401
+  | createPipedreamMcpTokenResponse500
+  | createPipedreamMcpTokenResponse501
+) & {
+  headers: Headers;
+};
+
+export type createPipedreamMcpTokenResponse =
+  | createPipedreamMcpTokenResponseSuccess
+  | createPipedreamMcpTokenResponseError;
+
+export const getCreatePipedreamMcpTokenUrl = () => {
+  return `/pipedream/mcp/token`;
+};
+
+export const createPipedreamMcpToken = async (
+  options?: RequestInit
+): Promise<createPipedreamMcpTokenResponse> => {
+  const res = await fetch(getCreatePipedreamMcpTokenUrl(), {
+    ...options,
+    method: 'POST',
+  });
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createPipedreamMcpTokenResponse['data'] = body
+    ? JSON.parse(body)
+    : {};
+  return {
+    data,
+    status: res.status,
+    headers: res.headers,
+  } as createPipedreamMcpTokenResponse;
+};
+
 export type getBatchPreviewResponse200 = {
   data: GetBatchPreviewResponse;
   status: 200;
@@ -1996,13 +2496,18 @@ export type sendChatMessageResponse401 = {
 };
 
 export type sendChatMessageResponse402 = {
-  data: void;
+  data: ChatMessageError;
   status: 402;
 };
 
 export type sendChatMessageResponse403 = {
-  data: void;
+  data: ChatMessageError;
   status: 403;
+};
+
+export type sendChatMessageResponse503 = {
+  data: ChatMessageError;
+  status: 503;
 };
 
 export type sendChatMessageResponseSuccess = sendChatMessageResponse200 & {
@@ -2013,6 +2518,7 @@ export type sendChatMessageResponseError = (
   | sendChatMessageResponse401
   | sendChatMessageResponse402
   | sendChatMessageResponse403
+  | sendChatMessageResponse503
 ) & {
   headers: Headers;
 };
@@ -2114,13 +2620,23 @@ export type structuredCompletionResponse401 = {
 };
 
 export type structuredCompletionResponse402 = {
-  data: void;
+  data: StructuredCompletionError;
   status: 402;
+};
+
+export type structuredCompletionResponse403 = {
+  data: StructuredCompletionError;
+  status: 403;
 };
 
 export type structuredCompletionResponse500 = {
   data: StructuredCompletionError;
   status: 500;
+};
+
+export type structuredCompletionResponse503 = {
+  data: StructuredCompletionError;
+  status: 503;
 };
 
 export type structuredCompletionResponseSuccess =
@@ -2131,7 +2647,9 @@ export type structuredCompletionResponseError = (
   | structuredCompletionResponse400
   | structuredCompletionResponse401
   | structuredCompletionResponse402
+  | structuredCompletionResponse403
   | structuredCompletionResponse500
+  | structuredCompletionResponse503
 ) & {
   headers: Headers;
 };

@@ -16,7 +16,7 @@ postcard = { workspace = true }
 redis = { workspace = true, features = ["aio", "tokio-comp", "tokio-rustls-comp"] }
 sync_service_bebop_schema = { path = "../sync-service/bebop-schema", features = ["bebop-owned-all"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }

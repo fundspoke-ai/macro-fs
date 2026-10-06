@@ -1,7 +1,9 @@
 use std::sync::LazyLock;
 
 use anyhow::Context;
+use authentication_service::service::signup_policy::SignupPolicy;
 use database_env_vars::{DatabaseUrl, RedisUri};
+use gtm_invite::domain::models::{GtmInviteConfig, PromoCode};
 use macro_auth::InternalApiKey;
 pub use macro_env::Environment;
 use macro_env_var::{env_vars, maybe_env_vars};
@@ -39,6 +41,21 @@ maybe_env_vars! {
     pub struct MicrosoftClientId;
     pub struct MicrosoftClientSecret;
     pub struct MicrosoftTenantId;
+    pub struct MicrosoftTokenKmsKeyId;
+    /// KMS key that encrypts users' Cursor API keys. Deliberately not the
+    /// Microsoft one: sharing it would grant whatever decrypts Cursor keys
+    /// access to the key protecting everyone's mailbox credentials.
+    ///
+    /// Optional *here* only because Pulumi injects it into the task
+    /// definition rather than Doppler, and the Doppler config validator
+    /// deserializes this struct from Doppler alone — a required field it
+    /// cannot see fails CI. The service still refuses to start without it;
+    /// see [`Config::cursor_api_key_kms_key_id`], which also reads the
+    /// process environment because `MacroConfig` does not fall back to it
+    /// when `APP_SECRETS_JSON` is present.
+    pub struct CursorApiKeyKmsKeyId;
+    /// Dedicated CMK for encrypted Codex OAuth envelopes, injected by infrastructure.
+    pub struct CodexOauthKmsKeyId;
     pub struct GaMeasurementId;
     pub struct GaApiSecret;
     pub struct MetaPixelId;
@@ -47,6 +64,16 @@ maybe_env_vars! {
     pub struct PosthogApiKey;
     pub struct PosthogHost;
     pub struct LoopsApiKey;
+    /// JSON array of exact email addresses allowed to sign up in Develop.
+    pub struct DevelopmentSignupAllowlistJson;
+    /// Stripe promotion code GTM invite links grant at checkout. Defaults to `1MF`.
+    pub struct GtmInvitePromoCode;
+    /// Hours a GTM invite link stays openable after creation. Defaults to 48.
+    pub struct GtmInviteLinkTtlHours;
+    /// Stripe price id for the Max plan seat. Optional so the service can
+    /// deploy before the price exists in Stripe; until it is set, Max checkout
+    /// and plan changes answer 400 and every subscription maps to Premium.
+    pub struct StripeMaxPriceId;
 }
 
 /// The configuration parameters for the application.
@@ -60,6 +87,26 @@ maybe_env_vars! {
 // #[macro_config::from_ref_all]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub struct Config {
+    /// Default-off quota admission and prospective usage counting.
+    #[macro_config_default(ai_billing::AiUsageEnforcement::Disabled)]
+    pub enable_ai_usage_enforcement: ai_billing::AiUsageEnforcement,
+    /// Default-off settlement of usage past allowances: prepaid credit
+    /// consumption and Stripe overage collection. This service owns Stripe, so
+    /// its policy decides every settlement, however it was requested.
+    #[macro_config_default(ai_billing::AiUsageBilling::Disabled)]
+    pub enable_ai_usage_billing: ai_billing::AiUsageBilling,
+    /// The free plan's hard monthly AI cap, in cents at provider cost.
+    /// Mandatory; set in Doppler.
+    pub ai_usage_free_included_allowance_cents: ai_billing::IncludedAllowanceCents,
+    /// In-plan AI allowance per Premium seat per period, in cents at provider
+    /// cost. Mandatory; set in Doppler.
+    pub ai_usage_included_allowance_cents: ai_billing::IncludedAllowanceCents,
+    /// In-plan AI allowance per Max seat per period, in cents at provider
+    /// cost. Mandatory; set in Doppler.
+    pub ai_usage_max_included_allowance_cents: ai_billing::IncludedAllowanceCents,
+    /// Markup on paid AI usage past the allowance, as a whole percent of
+    /// provider cost. Mandatory; set in Doppler.
+    pub ai_usage_overage_markup_percent: ai_billing::OverageMarkupPercent,
     #[allow(dead_code)]
     pub base_url: BaseUrl,
     /// The connection URL for the Postgres database this application should use.
@@ -88,6 +135,14 @@ pub struct Config {
     pub microsoft_client_secret: MicrosoftClientSecret,
     /// Microsoft Entra tenant ID.
     pub microsoft_tenant_id: MicrosoftTenantId,
+    /// KMS key used to encrypt Microsoft refresh-token data keys.
+    pub microsoft_token_kms_key_id: MicrosoftTokenKmsKeyId,
+    /// KMS key used to encrypt users' Cursor API keys. Required in practice —
+    /// read through [`Config::cursor_api_key_kms_key_id`], which refuses an
+    /// absent or blank value at startup.
+    pub cursor_api_key_kms_key_id: CursorApiKeyKmsKeyId,
+    /// Dedicated Codex envelope encryption CMK; absent deployments return 503 for Codex.
+    pub codex_oauth_kms_key_id: CodexOauthKmsKeyId,
     /// Stripe secret key
     pub stripe_secret_key: StripeSecretKey,
     /// The port to listen for HTTP requests on.
@@ -121,8 +176,24 @@ pub struct Config {
     /// Loops API key (optional). When set, Macro sign-ups are added to our
     /// Loops audience.
     pub loops_api_key: LoopsApiKey,
-    /// The stripe price id
+    /// JSON array of exact non-Macro email addresses allowed to sign up in Develop.
+    ///
+    /// All `@macro.com` email addresses are allowed by the Develop policy automatically.
+    pub development_signup_allowlist_json: DevelopmentSignupAllowlistJson,
+    /// Whether Develop allows every public signup without reading
+    /// `DEVELOPMENT_SIGNUP_ALLOWLIST_JSON`. Production and Local ignore it.
+    #[macro_config_default(false)]
+    pub development_bypass_signup_allowlist: bool,
+    /// Stripe promotion code applied at checkout for accounts that signed up
+    /// through a GTM invite link (optional, defaults to `1MF`).
+    pub gtm_invite_promo_code: GtmInvitePromoCode,
+    /// Hours a GTM invite link can be opened and redeemed (optional, defaults to 48).
+    pub gtm_invite_link_ttl_hours: GtmInviteLinkTtlHours,
+    /// The stripe price id for the Premium plan seat
     pub stripe_price_id: StripePriceId,
+    /// The stripe price id for the Max plan seat (optional, see
+    /// [`StripeMaxPriceId`])
+    pub stripe_max_price_id: StripeMaxPriceId,
     /// The internal api key
     pub internal_api_key: InternalApiKey,
     /// Comma-separated Kafka bootstrap servers for the macro event broker.
@@ -139,12 +210,66 @@ pub(crate) struct MicrosoftCredentials {
     pub(crate) client_id: String,
     pub(crate) client_secret: String,
     pub(crate) tenant_id: String,
+    pub(crate) token_kms_key_id: String,
 }
 
 impl Config {
+    /// The AI pricing every billing component is composed with. Every value
+    /// is validated when the configuration loads.
+    pub fn ai_pricing(&self) -> ai_billing::AiPricing {
+        ai_billing::AiPricing::new(
+            ai_billing::PlanAllowances {
+                free: self.ai_usage_free_included_allowance_cents,
+                premium: self.ai_usage_included_allowance_cents,
+                max: self.ai_usage_max_included_allowance_cents,
+            },
+            self.ai_usage_overage_markup_percent,
+        )
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
-        macro_config::ConfigLoader::load::<Config>()
-            .context("failed to load authentication service config")
+        let enforcement = ai_usage::config::load_ai_usage_enforcement()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let billing = ai_billing::config::load_ai_usage_billing()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let mut config = macro_config::ConfigLoader::load::<Config>()
+            .context("failed to load authentication service config")?;
+        config.enable_ai_usage_enforcement = enforcement;
+        config.enable_ai_usage_billing = billing;
+        Ok(config)
+    }
+
+    /// The KMS key that encrypts Cursor API keys.
+    ///
+    /// # Errors
+    /// If it is unset or blank. There is no "this deployment does not accept
+    /// Cursor keys" mode to fall back to: registering a key is a plain
+    /// feature of the settings surface, and a service that cannot encrypt one
+    /// should fail at startup rather than at the first user who tries.
+    pub(crate) fn cursor_api_key_kms_key_id(&self) -> anyhow::Result<String> {
+        // `MacroConfig` will not see a Pulumi-injected process env var once
+        // Doppler's `APP_SECRETS_JSON` is present. Re-read through the env-var
+        // type, which does fall back to process env.
+        let from_process_env = CursorApiKeyKmsKeyId::new();
+        resolve_cursor_api_key_kms_key_id(
+            &self.cursor_api_key_kms_key_id,
+            from_process_env
+                .as_ref()
+                .and_then(CursorApiKeyKmsKeyId::value),
+        )
+    }
+
+    /// Resolve the dedicated CMK, including Pulumi-injected process environment.
+    pub(crate) fn codex_oauth_kms_key_id(&self) -> Option<String> {
+        let process = CodexOauthKmsKeyId::new();
+        nonblank_value(self.codex_oauth_kms_key_id.value())
+            .or_else(|| {
+                process
+                    .as_ref()
+                    .and_then(CodexOauthKmsKeyId::value)
+                    .and_then(|value| nonblank_value(Some(value)))
+            })
+            .map(str::to_owned)
     }
 
     /// Resolves Microsoft credentials, enforcing that all values are configured together.
@@ -153,7 +278,34 @@ impl Config {
             &self.microsoft_client_id,
             &self.microsoft_client_secret,
             &self.microsoft_tenant_id,
+            &self.microsoft_token_kms_key_id,
         )
+    }
+
+    /// Resolves the signup policy for the configured environment.
+    pub(crate) fn signup_policy(&self) -> anyhow::Result<SignupPolicy> {
+        self.signup_policy_for_environment(self.environment)
+    }
+
+    /// Resolves the signup policy for an explicit environment.
+    pub(crate) fn signup_policy_for_environment(
+        &self,
+        environment: Environment,
+    ) -> anyhow::Result<SignupPolicy> {
+        // Temporarily open Develop signups even when Doppler disables the bypass.
+        // Remove this override to restore the configured allowlist policy.
+        let bypass_allowlist =
+            self.development_bypass_signup_allowlist || matches!(environment, Environment::Develop);
+        resolve_signup_policy(
+            environment,
+            bypass_allowlist,
+            &self.development_signup_allowlist_json,
+        )
+    }
+
+    /// Resolves the offer GTM invite links carry.
+    pub(crate) fn gtm_invite_config(&self) -> anyhow::Result<GtmInviteConfig> {
+        resolve_gtm_invite_config(&self.gtm_invite_promo_code, &self.gtm_invite_link_ttl_hours)
     }
 }
 
@@ -161,26 +313,101 @@ fn resolve_microsoft_credentials(
     client_id: &MicrosoftClientId,
     client_secret: &MicrosoftClientSecret,
     tenant_id: &MicrosoftTenantId,
+    token_kms_key_id: &MicrosoftTokenKmsKeyId,
 ) -> anyhow::Result<Option<MicrosoftCredentials>> {
     let client_id = nonblank_value(client_id.value());
     let client_secret = nonblank_value(client_secret.value());
     let tenant_id = nonblank_value(tenant_id.value());
+    let token_kms_key_id = nonblank_value(token_kms_key_id.value());
 
     match (client_id, client_secret, tenant_id) {
         (None, None, None) => Ok(None),
-        (Some(client_id), Some(client_secret), Some(tenant_id)) => Ok(Some(MicrosoftCredentials {
-            client_id: client_id.to_owned(),
-            client_secret: client_secret.to_owned(),
-            tenant_id: tenant_id.to_owned(),
-        })),
+        (Some(client_id), Some(client_secret), Some(tenant_id)) => {
+            let token_kms_key_id = token_kms_key_id.context(
+                "MICROSOFT_TOKEN_KMS_KEY_ID must be set to a nonblank value when Microsoft OAuth is enabled",
+            )?;
+            Ok(Some(MicrosoftCredentials {
+                client_id: client_id.to_owned(),
+                client_secret: client_secret.to_owned(),
+                tenant_id: tenant_id.to_owned(),
+                token_kms_key_id: token_kms_key_id.to_owned(),
+            }))
+        }
         _ => anyhow::bail!(
             "MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, and MICROSOFT_TENANT_ID must all be set to nonblank values or all be unset"
         ),
     }
 }
 
+fn resolve_signup_policy(
+    environment: Environment,
+    development_bypass_signup_allowlist: bool,
+    development_signup_allowlist_json: &DevelopmentSignupAllowlistJson,
+) -> anyhow::Result<SignupPolicy> {
+    match environment {
+        Environment::Production | Environment::Local => Ok(SignupPolicy::allow_all()),
+        Environment::Develop if development_bypass_signup_allowlist => {
+            Ok(SignupPolicy::allow_all())
+        }
+        Environment::Develop => {
+            let raw_allowlist = nonblank_value(development_signup_allowlist_json.value())
+                .context("DEVELOPMENT_SIGNUP_ALLOWLIST_JSON is required in Develop")?;
+            SignupPolicy::from_allowlist_json(raw_allowlist)
+                .context("DEVELOPMENT_SIGNUP_ALLOWLIST_JSON is invalid")
+        }
+    }
+}
+
+/// The promotion code applied when `GTM_INVITE_PROMO_CODE` is unset: 100% off
+/// the first month, created in Stripe for exactly this program.
+const DEFAULT_GTM_INVITE_PROMO_CODE: &str = "1MF";
+/// How long an invite link stays usable when `GTM_INVITE_LINK_TTL_HOURS` is unset.
+const DEFAULT_GTM_INVITE_LINK_TTL_HOURS: i64 = 48;
+/// Free months the default promotion grants, for user-facing copy.
+const GTM_INVITE_FREE_MONTHS: u8 = 1;
+
+fn resolve_gtm_invite_config(
+    promo_code: &GtmInvitePromoCode,
+    link_ttl_hours: &GtmInviteLinkTtlHours,
+) -> anyhow::Result<GtmInviteConfig> {
+    let promo_code: PromoCode = nonblank_value(promo_code.value())
+        .unwrap_or(DEFAULT_GTM_INVITE_PROMO_CODE)
+        .parse()
+        .context("GTM_INVITE_PROMO_CODE is invalid")?;
+    let link_ttl_hours: i64 = match nonblank_value(link_ttl_hours.value()) {
+        Some(hours) => hours
+            .trim()
+            .parse()
+            .context("GTM_INVITE_LINK_TTL_HOURS must be a whole number of hours")?,
+        None => DEFAULT_GTM_INVITE_LINK_TTL_HOURS,
+    };
+    if link_ttl_hours <= 0 {
+        anyhow::bail!("GTM_INVITE_LINK_TTL_HOURS must be positive");
+    }
+    Ok(GtmInviteConfig {
+        promo_code,
+        link_ttl: chrono::Duration::hours(link_ttl_hours),
+        free_months: GTM_INVITE_FREE_MONTHS,
+    })
+}
+
 fn nonblank_value(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.trim().is_empty())
+}
+
+/// Pulumi injects `CURSOR_API_KEY_KMS_KEY_ID` as a container env var, not
+/// through Doppler. ECS always has `APP_SECRETS_JSON`, and `MacroConfig` will
+/// not look at process env once that blob is present, so the field on `Config`
+/// is unset in deployed environments. `CursorApiKeyKmsKeyId::new()` still
+/// falls back to process env, which is what `process_env` is.
+fn resolve_cursor_api_key_kms_key_id(
+    configured: &CursorApiKeyKmsKeyId,
+    process_env: Option<&str>,
+) -> anyhow::Result<String> {
+    nonblank_value(configured.value())
+        .or_else(|| nonblank_value(process_env))
+        .map(str::to_owned)
+        .context("CURSOR_API_KEY_KMS_KEY_ID is required")
 }
 
 #[cfg(test)]

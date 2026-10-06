@@ -68,6 +68,16 @@ export type AppEvents = {
    * linked, an email-code signup with none. `entry_step` is where the
    * user landed ('email' unless a persisted step was restored).
    */
+  /** A GTM invite welcome page resolved its link (`/invite?token=`). */
+  gtm_invite_opened: { status: string };
+  /** The recipient pressed Continue on the welcome page. */
+  gtm_invite_continue: { authenticated: boolean };
+  /** An account was attributed to an invite link and granted its offer. */
+  gtm_invite_redeemed: { link_id: string; promo_code: string };
+  /** The plan step showed the free-month offer instead of the picker. */
+  gtm_invite_offer_viewed: { link_id: string; promo_code: string };
+  /** Staff created an invite link in the internal portal. */
+  gtm_invite_link_created: { link_id: string };
   onboarding_v4_started: {
     signup_method: 'google' | 'email_code';
     entry_step: string;
@@ -99,11 +109,13 @@ export type AppEvents = {
    * everything connected along the way.
    */
   onboarding_v4_completed: {
-    plan: 'free' | 'premium';
+    plan: 'free' | 'premium' | 'max';
     plan_skipped: boolean;
     emails_connected: number;
     connectors_connected: string[];
   };
+  /** A @macro.com account used the staff Bypass button; `step` is where. */
+  onboarding_v4_bypassed: { step: string };
 
   subscription_start: Record<string, unknown>;
   subscription_cancel: Record<string, unknown>;
@@ -135,7 +147,6 @@ export type AppEvents = {
   command_menu_use: { itemType: string };
   create_menu_open: { from: string };
   hotkey_use: Record<string, unknown>;
-  preview_panel_use: Record<string, unknown>;
   mentions_menu_use: { itemType: string };
   snippets_menu_use: Record<string, unknown>;
   split_created: { from: string };
@@ -165,10 +176,12 @@ export type AppEvents = {
   share_entity: EntityEventPayload & {
     shareMethod?:
       | 'public_link'
+      | 'team_link'
       | 'channel'
       | 'forward'
       | 'attachment_public'
       | (string & {});
+    linkShare?: 'PUBLIC' | 'TEAM';
   };
 
   task_copy_branch_name: Record<string, unknown>;
@@ -177,10 +190,29 @@ export type AppEvents = {
 
   ai_message_sent: Record<string, unknown>;
   ai_attachment_add: Record<string, unknown>;
+  /** A paid user opened Stripe Checkout for an AI credit pack. */
+  ai_credits_checkout_start: { amountCents: number };
+  /** A payer changed their AI usage billing (overage) settings. */
+  ai_overage_updated: { enabled: boolean; limitCents: number };
+  /** An existing subscriber moved between Premium and Max. */
+  plan_changed: { plan: 'premium' | 'max'; from?: string };
 
   email_message_sent: Record<string, unknown>;
 
   channel_message_sent: Record<string, unknown>;
+  channel_messages_load: {
+    channelId: string;
+    path: 'catch_up' | 'full';
+    reason:
+      | 'watermark'
+      | 'list_ahead'
+      | 'no_cache'
+      | 'cache_not_at_latest'
+      | 'load_around'
+      | 'delta_overflow'
+      | 'catch_up_error';
+    after?: string;
+  };
   channel_reaction: {
     emoji: string;
     action: 'add' | 'remove';

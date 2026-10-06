@@ -6,8 +6,8 @@ import { WebsocketEvent } from '../core/websocket-event';
 /** The slice of {@link Websocket} the signal needs — satisfied by the
  * concrete websocket and by virtual sockets (e.g. the gateway sync
  * transport's per-document sockets). */
-export type StateSignalSocket = Pick<
-  Websocket<any, any>,
+export type StateSignalSocket<Send, Receive> = Pick<
+  Websocket<Send, Receive>,
   'connectionState' | 'addEventListener' | 'removeEventListener'
 >;
 
@@ -17,8 +17,8 @@ export type StateSignalSocket = Pick<
  * @param ws The websocket to track the connection state of.
  * @returns A reactive signal that tracks the connection state of the websocket.
  */
-export function createWebsocketStateSignal(
-  ws: StateSignalSocket
+export function createWebsocketStateSignal<Send, Receive>(
+  ws: StateSignalSocket<Send, Receive>
 ): Accessor<WebsocketConnectionState> {
   const [state, setState] = createSignal(ws.connectionState);
 
@@ -37,7 +37,8 @@ export function createWebsocketStateSignal(
       setState(WebsocketConnectionState.Closed);
     },
     [WebsocketEvent.Error]: () => {
-      setState(WebsocketConnectionState.Closing);
+      // URL/authorization failures have no native socket to emit Close.
+      setState(ws.connectionState);
     },
     [WebsocketEvent.Reconnect]: () => {
       setState(WebsocketConnectionState.Reconnecting);

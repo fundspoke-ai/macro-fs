@@ -13,13 +13,14 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
+use model_entity::Entity;
 use models_pagination::{CreatedAt, Query};
 
 use crate::domain::models::device::DeviceType;
 use crate::domain::models::{NotificationStatusPayload, TaggedContent};
 
 use crate::domain::models::email_notification_digest::ports::{ClaimResult, DigestBatch};
-use crate::domain::models::request::{NotificationEntityRef, NotificationListFilters};
+use crate::domain::models::request::{NotificationListFilters, NotificationStatus};
 use crate::domain::models::{
     DeviceEndpoint, DisabledNotificationType, NotificationExtEmail, NotificationIdAndCollapseKey,
     SendNotificationRequestBuilder, UserNotificationRow, VoipPushTarget,
@@ -93,20 +94,32 @@ pub trait NotificationRepository: Send + Sync + 'static {
         user_ids: &[MacroUserIdStr<'a>],
     ) -> impl Future<Output = Result<HashMap<MacroUserIdStr<'static>, Vec<DeviceEndpoint>>, Report>> + Send;
 
-    /// Mark notifications as seen and return the updated user-owned rows.
+    /// Atomically apply `MarkSeen` from [`super::models::NotificationAction`].
+    /// Preserve done state and any recorded viewing timestamp; return user-owned rows.
     fn mark_notifications_seen(
         &self,
         user_id: MacroUserIdStr<'_>,
         notification_ids: &[Uuid],
     ) -> impl Future<Output = Result<Vec<UserNotificationRow<serde_json::Value>>, Report>> + Send;
 
-    /// Mark notifications as done or undone and return the updated user-owned rows.
+    /// Atomically mark done, or reopen done notifications as seen.
+    /// Reopening leaves active states unchanged. Preserve viewing timestamps and
+    /// return the updated user-owned rows, following [`super::models::NotificationState::apply`].
     fn mark_notifications_done(
         &self,
         user_id: &MacroUserIdStr<'_>,
         notification_ids: &[Uuid],
         done: bool,
     ) -> impl Future<Output = Result<Vec<UserNotificationRow<serde_json::Value>>, Report>> + Send;
+
+    /// Get non-deleted, user-owned notification IDs associated with any primary or secondary
+    /// entity that need the requested status transition or an initial viewing timestamp.
+    fn get_notification_ids_for_entities(
+        &self,
+        user_id: MacroUserIdStr<'_>,
+        entities: &[Entity<'_>],
+        status: &NotificationStatus,
+    ) -> impl Future<Output = Result<Vec<Uuid>, Report>> + Send;
 
     /// Get basic notification data (collapse keys) needed for push clearing.
     fn get_basic_notifications(
@@ -116,7 +129,7 @@ pub trait NotificationRepository: Send + Sync + 'static {
 
     /// Return notification IDs that still exist for the user and are eligible for digest email.
     ///
-    /// Excludes notifications that are missing, soft-deleted, or already seen.
+    /// Includes only unseen notifications that exist and are not soft-deleted.
     fn get_digest_eligible_notification_ids(
         &self,
         user_id: MacroUserIdStr<'_>,
@@ -125,7 +138,7 @@ pub trait NotificationRepository: Send + Sync + 'static {
 
     /// Get a user's non-deleted notifications with cursor-based pagination.
     ///
-    /// The metadata JSON column is deserialized into `T`. `filters` controls done/seen status.
+    /// The metadata JSON column is deserialized into `T`. `filters` selects exact states.
     fn get_user_notifications<T: DeserializeOwned + Send>(
         &self,
         user_id: MacroUserIdStr<'_>,
@@ -146,14 +159,16 @@ pub trait NotificationRepository: Send + Sync + 'static {
         filters: NotificationListFilters,
     ) -> impl Future<Output = Result<Vec<UserNotificationRow<T>>, Report>> + Send;
 
-    /// Get a user's active notifications for multiple entities, grouped by requested entity.
+    /// Get viewer-owned notifications grouped by entity, filtering before each limit.
+    /// The default query preserves the complete active-notification edge.
     fn get_entity_notifications_batch(
         &self,
         user_id: MacroUserIdStr<'_>,
-        entity_refs: Vec<NotificationEntityRef>,
+        entities: Vec<Entity<'static>>,
+        query: super::models::entity_query::EntityNotificationQuery,
     ) -> impl Future<
         Output = Result<
-            HashMap<NotificationEntityRef, Vec<UserNotificationRow<serde_json::Value>>>,
+            HashMap<Entity<'static>, Vec<UserNotificationRow<serde_json::Value>>>,
             Report,
         >,
     > + Send;
@@ -516,6 +531,20 @@ pub trait NotificationIngressQueue: Send + Sync + 'static {
         &self,
         receipt_handle: &str,
     ) -> impl Future<Output = Result<(), Report>> + Send;
+}
+
+/// Outbound port for delivering one VoIP push to an already-resolved
+/// endpoint. Implemented by the SNS mobile adapter; the domain's
+/// [`VoipPushSender`] service depends on this instead of the concrete
+/// adapter type.
+pub trait VoipPushDelivery: Send + Sync + 'static {
+    /// Deliver one VoIP push to the endpoint, returning the provider
+    /// message id.
+    fn send_voip_push(
+        &self,
+        endpoint_arn: &str,
+        payload: &VoipPushPayload,
+    ) -> impl Future<Output = Result<String, Report>> + Send;
 }
 
 /// Port for sending VoIP push notifications (PushKit / CallKit) to iOS devices.

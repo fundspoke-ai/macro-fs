@@ -1,18 +1,14 @@
 use std::sync::{Arc, Mutex};
 
 use chrono::TimeZone;
-use chrono_tz::America::New_York;
 use macro_user_id::cowlike::CowLike;
 use macro_user_id::user_id::MacroUserIdStr;
-use model_entity::EntityType;
 use uuid::Uuid;
 
 use super::*;
-use crate::domain::models::{Reminder, ReminderCron, ReminderSchedule};
 use crate::domain::ports::RawDispatchMessage;
 
 const OWNER: &str = "macro|reminders-owner@macro.com";
-const DAILY_9AM: &str = "0 0 9 * * *";
 
 fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0)
@@ -36,21 +32,6 @@ fn owner() -> MacroUserIdStr<'static> {
         .into_owned()
 }
 
-fn reminder(id: Uuid, schedule: ReminderSchedule) -> Reminder {
-    Reminder {
-        id,
-        description: "Follow up".to_string(),
-        entity_type: Some(EntityType::Document),
-        entity_id: Some("doc-1".to_string()),
-        next_run_at: now(),
-        schedule,
-        enabled: true,
-        completed_at: None,
-        created_at: now(),
-        updated_at: now(),
-    }
-}
-
 fn uuid(n: u8) -> Uuid {
     Uuid::from_bytes([n; 16])
 }
@@ -64,19 +45,9 @@ fn firing(n: u8) -> DueFiring {
 
 fn due_once(n: u8) -> DueReminder {
     DueReminder {
-        reminder: reminder(uuid(n), ReminderSchedule::Once { remind_at: now() }),
-        owner_id: owner(),
-        scheduled_for: now(),
-    }
-}
-
-fn due_recurring(n: u8) -> DueReminder {
-    let schedule = ReminderSchedule::Recurring {
-        cron: ReminderCron::parse(DAILY_9AM).expect("valid cron"),
-        timezone: New_York,
-    };
-    DueReminder {
-        reminder: reminder(uuid(n), schedule),
+        reminder_id: uuid(n),
+        thread_id: uuid(n + 10),
+        description: "Follow up".into(),
         owner_id: owner(),
         scheduled_for: now(),
     }
@@ -149,7 +120,7 @@ impl ReminderDispatchRepo for FakeRepo {
             .due
             .iter()
             .map(|due| DueFiring {
-                reminder_id: due.reminder.id,
+                reminder_id: due.reminder_id,
                 scheduled_for: due.scheduled_for,
             })
             .collect())
@@ -163,7 +134,7 @@ impl ReminderDispatchRepo for FakeRepo {
             .due
             .iter()
             .find(|due| {
-                due.reminder.id == firing.reminder_id && due.scheduled_for == firing.scheduled_for
+                due.reminder_id == firing.reminder_id && due.scheduled_for == firing.scheduled_for
             })
             .cloned())
     }
@@ -228,10 +199,10 @@ impl ReminderNotifier for FakeNotifier {
     type Err = FakeErr;
 
     async fn notify(&self, due: &DueReminder) -> Result<(), Self::Err> {
-        if self.failing.lock().unwrap().contains(&due.reminder.id) {
+        if self.failing.lock().unwrap().contains(&due.reminder_id) {
             return Err(FakeErr);
         }
-        self.notified.lock().unwrap().push(due.reminder.id);
+        self.notified.lock().unwrap().push(due.reminder_id);
         Ok(())
     }
 }
@@ -307,22 +278,6 @@ async fn a_sweep_fans_out_one_message_per_due_firing() {
 }
 
 #[tokio::test]
-async fn a_sweep_fans_out_recurring_reminders_it_is_given() {
-    // The exclusion lives in the query, not the sweep: whatever the repo
-    // reports as due is fanned out, and `deliver` is what refuses to send it.
-    let repo = FakeRepo::with_due(vec![due_recurring(1)]);
-    let queue = FakeQueue::default();
-
-    let summary = service(repo, FakeNotifier::default(), queue.clone())
-        .sweep()
-        .await
-        .expect("sweep succeeds");
-
-    assert_eq!(summary.dispatched, 1);
-    assert_eq!(queue.published().len(), 1);
-}
-
-#[tokio::test]
 async fn an_empty_sweep_publishes_nothing() {
     let queue = FakeQueue::default();
 
@@ -359,8 +314,6 @@ async fn a_failed_listing_fails_the_sweep() {
     assert!(matches!(result, Err(ReminderError::Internal(_))));
 }
 
-// -------------------------------------------------------------- deliver
-
 #[tokio::test]
 async fn delivers_and_completes_a_due_one_shot() {
     let repo = FakeRepo::with_due(vec![due_once(1)]);
@@ -379,20 +332,24 @@ async fn delivers_and_completes_a_due_one_shot() {
 }
 
 #[tokio::test]
-async fn skips_a_recurring_reminder_without_claiming_it() {
-    let repo = FakeRepo::with_due(vec![due_recurring(1)]);
+async fn a_stale_one_shot_is_still_delivered() {
+    // Queue delays must not discard a snooze.
+    let stale_at = now() - Duration::days(2);
+    let mut due = due_once(1);
+    due.scheduled_for = stale_at;
+    let repo = FakeRepo::with_due(vec![due]);
     let notifier = FakeNotifier::default();
 
     let outcome = service(repo.clone(), notifier.clone(), FakeQueue::default())
-        .deliver(firing(1))
+        .deliver(DueFiring {
+            reminder_id: uuid(1),
+            scheduled_for: stale_at,
+        })
         .await
         .expect("delivery succeeds");
 
-    assert_eq!(outcome, DeliveryOutcome::SkippedRecurring);
-    // Nothing claimed: a recurring reminder must stay untouched for whenever
-    // recurring dispatch lands, not burn its occurrence row.
-    assert!(repo.claimed().is_empty());
-    assert!(notifier.notified().is_empty());
+    assert_eq!(outcome, DeliveryOutcome::Delivered);
+    assert_eq!(notifier.notified(), vec![uuid(1)]);
 }
 
 #[tokio::test]

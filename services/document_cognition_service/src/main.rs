@@ -2,6 +2,7 @@
 use crate::api::context::ApiContext;
 use ai_tools::{NoOpCallRtcClient, NoOpConnectionService, NoOpNotificationIngress};
 use anyhow::Context;
+use bots::outbound::pg_bots_repo::PgBotsRepo;
 use call::domain::service::{CallRecordQueryServiceImpl, CallServiceImpl};
 use call::inbound::toolset::CallToolContext;
 use call::outbound::pg_call_repo::PgCallRepo;
@@ -21,21 +22,27 @@ use email::domain::service::EmailServiceImpl;
 use email::outbound::EmailPgRepo;
 use email_service_client::{EmailServiceClient, EmailServiceClientExternal};
 use entity_access::{domain::service::EntityAccessServiceImpl, outbound::PgAccessRepository};
+use entity_registry::OwnerGrantPolicy;
+use entity_registry_db_utils::OwnedEntityRegistrar;
 use foreign_entity::{
     domain::service::ForeignEntityServiceImpl,
     outbound::pg_foreign_entity_repo::PgForeignEntityRepo,
 };
 use frecency::domain::services::FrecencyQueryServiceImpl;
 use frecency::outbound::postgres::FrecencyPgStorage;
+use github_pull_requests::{
+    domain::service::GithubPullRequestServiceImpl,
+    outbound::pg_github_pull_request_repo::PgGithubPullRequestRepo,
+};
 use macro_auth::middleware::decode_jwt::JwtValidationArgs;
 use macro_authorization::{
     InternalAuthConfig, MacroAuthJwtValidator, MacroAuthorizationServiceImpl,
-    MacroAuthorizationState,
+    MacroAuthorizationState, PgUserApiKeyAuthorizationRepo, PgUserApiKeyAuthorizer,
 };
 use macro_entrypoint::MacroEntrypoint;
 use macro_service_urls::{
-    ConnectionGatewayUrl, DocumentCognitionServiceUrl, DocumentStorageServiceUrl, EmailServiceUrl,
-    LexicalServiceUrl, StaticFileServiceUrl, SyncServiceUrl,
+    AuthServiceUrl, CalendarServiceUrl, ConnectionGatewayUrl, DocumentStorageServiceUrl,
+    EmailServiceUrl, LexicalServiceUrl, StaticFileServiceUrl, SyncServiceUrl,
 };
 use notification::domain::service::{
     NotificationReaderService, PlatformArnConfig, SqsNotificationIngress,
@@ -74,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
         .resolve_remote_secrets(Environment::new_or_prod(), &secretsmanager_client)
         .await
         .context("expected to be able to resolve config secrets")?;
+    let non_user_owners = config.non_user_owners()?;
 
     tracing::info!("initialized config");
 
@@ -152,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
                 default_user_id: None,
             },
             macro_authorization::NoBotAuthorizer,
+            PgUserApiKeyAuthorizer::new(PgUserApiKeyAuthorizationRepo::new(db.clone())),
         )));
 
     let lexical_client = Arc::new(lexical_client::LexicalClient::new(
@@ -248,8 +257,10 @@ async fn main() -> anyhow::Result<()> {
         frecency_storage,
     );
     let email_service_for_tools: Arc<ai_tools::ToolEmailService> = Arc::new(email_service.clone());
-    let foreign_entity_service =
-        ForeignEntityServiceImpl::new(PgForeignEntityRepo::new(db.clone()));
+    let github_pull_request_service = GithubPullRequestServiceImpl::new(
+        ForeignEntityServiceImpl::new(PgForeignEntityRepo::new(db.clone())),
+        PgGithubPullRequestRepo::new(db.clone()),
+    );
     let soup_service = Arc::new(soup::domain::service::SoupImpl::new(
         soup::outbound::pg_soup_repo::PgSoupRepo::new(ReadOnlyPool(db.clone())),
         frecency_service,
@@ -257,19 +268,25 @@ async fn main() -> anyhow::Result<()> {
         channels_service,
         CallRecordQueryServiceImpl::new(PgCallRepo::new(db.clone())),
         crm::domain::service::NoOpCrmService,
-        foreign_entity_service,
-        reminders::domain::service::NoOpRemindersService,
+        github_pull_request_service,
     ));
 
     tracing::info!("initialized soup service");
 
     let s3_client = macro_aws_config::s3_client().await;
+    let document_files = documents::outbound::s3_document_files::S3DocumentFiles::new(
+        db.clone(),
+        s3_client.clone(),
+        config.document_storage_bucket.to_string(),
+    );
     let s3_upload_adapter = S3UploadUrlAdapter::new(
         s3_client,
         config.document_storage_bucket.to_string(),
         config.docx_document_upload_bucket.to_string(),
     );
-    let document_repo = PgDocumentRepo::new(db.clone());
+    let owned_entity_registrar =
+        OwnedEntityRegistrar::new(OwnerGrantPolicy::new(PgBotsRepo::new(db.clone())));
+    let document_repo = PgDocumentRepo::new(db.clone(), owned_entity_registrar.clone());
 
     let cloudfront_config = CloudFrontConfig {
         distribution_url: config
@@ -285,8 +302,17 @@ async fn main() -> anyhow::Result<()> {
         presigned_url_expiry_seconds: 3600,
         browser_cache_expiry_seconds: 86400,
     };
-    let properties_service =
-        ai_tools::build_properties_service(db.clone(), entity_access_service.clone());
+    let event_broker_tracker = TaskTracker::new();
+    let macro_event_broker = macro_event_broker::MacroEventBrokerService::new(
+        macro_event_broker::KafkaEventPublisher::new(config.kafka_brokers.as_ref())
+            .context("failed to create kafka event publisher")?,
+        event_broker_tracker.clone(),
+    );
+    let properties_service = ai_tools::build_properties_service_with_broker(
+        db.clone(),
+        entity_access_service.clone(),
+        macro_event_broker.clone(),
+    );
     let task_properties_service = ai_tools::build_task_properties_adapter(
         db.clone(),
         properties_service.clone(),
@@ -299,12 +325,6 @@ async fn main() -> anyhow::Result<()> {
         import::outbound::document_properties::DocumentPropertiesApplicator::new(
             properties_service.clone(),
         );
-    let event_broker_tracker = TaskTracker::new();
-    let macro_event_broker = macro_event_broker::MacroEventBrokerService::new(
-        macro_event_broker::KafkaEventPublisher::new(config.kafka_brokers.as_ref())
-            .context("failed to create kafka event publisher")?,
-        event_broker_tracker.clone(),
-    );
     let document_service = DocumentServiceImpl::new(
         document_repo,
         cloudfront_config,
@@ -318,6 +338,19 @@ async fn main() -> anyhow::Result<()> {
         ForeignEntityServiceImpl::new(PgForeignEntityRepo::new(db.clone())),
         macro_event_broker.clone(),
     );
+    // Messages sent by AI tools (chat, agents) dispatch the same side effects
+    // as the document-storage message API, so mentions, replies and document
+    // comments notify recipients and stream to connected clients.
+    let channels_connection_gateway =
+        Arc::new(connection_gateway_client::ConnectionGatewayClient::new(
+            internal_api_key.clone(),
+            ConnectionGatewayUrl::new()?.to_string(),
+        ));
+    let side_effect_clients = ai_tools::ChannelSideEffectClients {
+        connection_gateway: channels_connection_gateway.clone(),
+        sqs: aws_sdk_sqs::Client::new(&aws_config),
+        macro_event_broker: macro_event_broker.clone(),
+    };
     let lexical_client_for_tools = (*lexical_client).clone();
     let document_tool_context = DocumentToolContext::new(
         document_service,
@@ -329,7 +362,16 @@ async fn main() -> anyhow::Result<()> {
             std::sync::Arc::new(reqwest::Client::new()),
         ),
         config.document_permission_jwt.as_ref().to_string(),
-    );
+        ai_tools::build_message_service_with_side_effects(
+            db.clone(),
+            lexical_client.clone(),
+            &side_effect_clients,
+        ),
+    )
+    .with_presentation_files(Arc::new(document_files.clone()))
+    .with_design_files(Arc::new(document_files.clone()))
+    .with_photoshop_files(Arc::new(document_files.clone()))
+    .with_illustrator_files(Arc::new(document_files));
 
     tracing::info!("initialized document tool context");
 
@@ -344,7 +386,10 @@ async fn main() -> anyhow::Result<()> {
             entity_access_service.clone(),
         ),
         chat: chat::inbound::attachment::ChatAttachmentService::new(
-            Arc::new(chat::outbound::postgres::PgChatRepo::new(db.clone())),
+            Arc::new(chat::outbound::postgres::PgChatRepo::new(
+                db.clone(),
+                owned_entity_registrar.clone(),
+            )),
             entity_access_service.clone(),
         ),
         channel: channels::inbound::attachment::ChannelAttachmentService::new(
@@ -357,7 +402,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let message_service = Arc::new(
         chat::domain::service::MessageServiceImpl::new(
-            chat::outbound::postgres::PgChatRepo::new(db.clone()),
+            chat::outbound::postgres::PgChatRepo::new(db.clone(), owned_entity_registrar.clone()),
             attachment_provider,
         )
         .with_event_broker(macro_event_broker.clone()),
@@ -371,8 +416,10 @@ async fn main() -> anyhow::Result<()> {
 
     let search_service_client = Arc::new(search_service_client);
 
-    let properties_tool_context =
-        ai_tools::build_properties_tool_context(properties_service, entity_access_service.clone());
+    let properties_tool_context = ai_tools::build_properties_tool_context(
+        properties_service.clone(),
+        entity_access_service.clone(),
+    );
 
     tracing::info!("initialized properties tool context");
 
@@ -395,6 +442,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(EntityAccessServiceImpl::new(PgAccessRepository::new(
             db.clone(),
         ))),
+        lexical_client.clone(),
     );
 
     tracing::info!("initialized email tool context");
@@ -414,7 +462,7 @@ async fn main() -> anyhow::Result<()> {
 
     let chat_tool_context = chat::inbound::toolset::ChatToolContext::new(
         chat::domain::service::ChatServiceImpl::new(
-            chat::outbound::postgres::PgChatRepo::new(db.clone()),
+            chat::outbound::postgres::PgChatRepo::new(db.clone(), owned_entity_registrar.clone()),
             Arc::new(ai_toolset::AsyncToolCollection::new()),
             (),
             entity_access_management::domain::service::EntityAccessManagementServiceImpl::new(
@@ -426,24 +474,65 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("initialized chat tool context");
 
-    // Channel messages sent by AI tools (chat, agents) dispatch the same side
-    // effects as the document-storage channel API, so mentions and replies
-    // notify recipients and stream to connected clients.
-    let channels_connection_gateway =
-        Arc::new(connection_gateway_client::ConnectionGatewayClient::new(
-            internal_api_key.clone(),
-            ConnectionGatewayUrl::new()?.to_string(),
-        ));
     let channel_tool_context = ai_tools::build_channel_tool_context_with_side_effects(
         db.clone(),
         lexical_client.clone(),
-        ai_tools::ChannelSideEffectClients {
-            connection_gateway: channels_connection_gateway.clone(),
-            sqs: aws_sdk_sqs::Client::new(&aws_config),
-            macro_event_broker: macro_event_broker.clone(),
-        },
+        &side_effect_clients,
     );
-    let recorder = ai_usage::pg_recorder(db.clone());
+    let user_permissions_service = Arc::new(
+        roles_and_permissions::domain::service::UserRolesAndPermissionsServiceImpl::new(
+            roles_and_permissions::outbound::pgpool::MacroDB::new(db.clone()),
+            roles_and_permissions::outbound::pgpool::MacroDB::new(db.clone()),
+        ),
+    );
+
+    // The AI billing gate reads allowances, credits, and overage state here;
+    // collection (Stripe) lives in the authentication service, which the
+    // recorder below asks to settle once a payer runs past their allowance
+    // and ENABLE_AI_USAGE_BILLING is enabled. This instance never settles.
+    let auth_service_client = Arc::new(authentication_service_client::AuthServiceClient::new(
+        config
+            .authentication_service_secret_key
+            .as_ref()
+            .to_string(),
+        AuthServiceUrl::new()?.to_string(),
+    ));
+    let ai_pricing = config.ai_pricing();
+    let ai_billing = Arc::new(
+        ai_billing::domain::BillingServiceImpl::new(
+            ai_billing::outbound::RolesTeamsEntitlementSource::new(
+                (*user_permissions_service).clone(),
+                teams::outbound::team_repo::TeamRepositoryImpl::new(db.clone()),
+            ),
+            ai_billing::outbound::PgUsageReader::new(db.clone()),
+            ai_billing::outbound::PgBillingRepo::new(db.clone(), ai_pricing),
+            ai_billing::outbound::HttpPaymentGateway::new(auth_service_client.clone()),
+            ai_pricing,
+        )
+        .with_enforcement(config.enable_ai_usage_enforcement),
+    );
+    let admission: Arc<dyn ai_billing::AiAdmissionService> =
+        Arc::new(ai_billing::BillingAdmissionService::new(
+            ai_billing.clone(),
+            config.enable_ai_usage_enforcement,
+        ));
+    let recorder: Arc<dyn ai_usage::UsageRecorder> =
+        Arc::new(ai_billing::outbound::SettlingUsageRecorder::new(
+            Arc::new(
+                ai_usage::domain::service::UsageServiceImpl::new(
+                    ai_usage::outbound::PgUsageRepo::new(db.clone()),
+                )
+                .with_enforcement(config.enable_ai_usage_enforcement),
+            ),
+            ai_billing.clone(),
+            ai_billing::outbound::HttpSettlementTrigger::new(auth_service_client),
+            config.enable_ai_usage_billing,
+        ));
+
+    // Per-attempt observations use a separate journal and never feed the
+    // legacy settlement trigger, which remains counted-usage-only and gated by
+    // ENABLE_AI_USAGE_BILLING.
+    let recorder = ai_usage::with_tracking(recorder, ai_usage::pg_tracking(db.clone()));
 
     // The import pipeline: staged/imported external items, gather jobs over
     // the user's connectors, and the Haiku import job. Built before the tool
@@ -455,11 +544,100 @@ async fn main() -> anyhow::Result<()> {
     let mcp_server_repo =
         mcp_client::outbound::pg_server_repo::PgServerRepo::new(db.clone(), mcp_encryption_key);
 
+    // The Pipedream MCP stack, fully separate from the native one above
+    // (own endpoints, own table, own toolset). Without credentials its
+    // endpoints answer 501 and its toolsets come up empty. Connect-flow
+    // webhooks need both URI and secret; a half-set pair is ignored so we
+    // never mint a callback we cannot serve.
+    let pipedream_client: ai_tools::ToolPipedreamConnection = match (
+        config.pipedream_client_id.value(),
+        config.pipedream_client_secret.value(),
+        config.pipedream_project_id.value(),
+    ) {
+        (Some(client_id), Some(client_secret), Some(project_id)) => {
+            let webhook_uri = match (
+                config.pipedream_webhook_uri.value(),
+                config.pipedream_webhook_secret.value(),
+            ) {
+                (Some(uri), Some(_)) => Some(uri.to_owned()),
+                (None, None) => None,
+                _ => {
+                    tracing::warn!(
+                        "ignoring incomplete Pipedream webhook config; set both PIPEDREAM_WEBHOOK_URI and PIPEDREAM_WEBHOOK_SECRET"
+                    );
+                    None
+                }
+            };
+            let client = pipedream_mcp::outbound::api::PipedreamClient::new(
+                pipedream_mcp::outbound::api::PipedreamConfig {
+                    client_id: client_id.to_owned(),
+                    client_secret: client_secret.to_owned(),
+                    project_id: project_id.to_owned(),
+                    environment: config
+                        .pipedream_environment
+                        .value()
+                        .unwrap_or(match config.environment {
+                            Environment::Production => "production",
+                            _ => "development",
+                        })
+                        .to_owned(),
+                    api_url: config
+                        .pipedream_api_url
+                        .value()
+                        .unwrap_or(pipedream_mcp::outbound::api::DEFAULT_API_URL)
+                        .to_owned(),
+                    mcp_url: config
+                        .pipedream_mcp_url
+                        .value()
+                        .unwrap_or(pipedream_mcp::outbound::api::DEFAULT_MCP_URL)
+                        .to_owned(),
+                    allowed_origins: match config.pipedream_allowed_origins.value() {
+                        Some(origins) => origins
+                            .split(',')
+                            .map(|origin| origin.trim().to_owned())
+                            .filter(|origin| !origin.is_empty())
+                            .collect(),
+                        None => match config.environment {
+                            Environment::Production => vec!["https://macro.com".to_owned()],
+                            Environment::Develop => vec![
+                                "https://dev.macro.com".to_owned(),
+                                "http://localhost:3000".to_owned(),
+                            ],
+                            Environment::Local => vec!["http://localhost:3000".to_owned()],
+                        },
+                    },
+                },
+            )
+            .context("failed to build Pipedream client")?;
+            Some(Arc::new(match webhook_uri {
+                Some(uri) => client.with_webhook_uri(uri),
+                None => client,
+            }))
+        }
+        _ => {
+            tracing::info!("Pipedream credentials not set; Pipedream MCP connectors disabled");
+            None
+        }
+    };
+    let pipedream_repo =
+        pipedream_mcp::outbound::pg_connection_repo::PgConnectionRepo::new(db.clone());
+
+    // The one sanctioned meeting point of the two MCP stacks: agents load
+    // tools through this selector, which prefers a user's Pipedream
+    // connectors and falls back to the native ones (see `mcp_select`).
+    // The import service's live Slack source shares this selector.
+    let mcp_selector: Arc<ai_tools::ToolMcpSelector> = Arc::new(mcp_select::McpToolSelector::new(
+        Arc::new(mcp_server_repo.clone()),
+        Arc::new(pipedream_repo.clone()),
+        Arc::new(pipedream_client.clone()),
+    ));
+
     // Nudges the user's connected clients when import rows flip, so setup
     // sections and chat surfaces update immediately instead of on the next
     // poll (see import::outbound::gateway_notifier).
-    let import_notify =
-        import::outbound::gateway_notifier::gateway_import_notify(channels_connection_gateway);
+    let import_notify = import::outbound::gateway_notifier::gateway_import_notify(
+        channels_connection_gateway.clone(),
+    );
 
     let entity_creator = ai_tools::ToolEntityCreator {
         document_creator: document_tool_context.creator.clone(),
@@ -472,10 +650,14 @@ async fn main() -> anyhow::Result<()> {
     let import_service = Arc::new(
         import::domain::service::ImportServiceImpl::new(
             import::outbound::pg_import_repo::PgImportRepo::new(db.clone()),
-            Arc::new(mcp_server_repo.clone()),
+            mcp_selector.clone(),
             Arc::new(entity_creator),
             recorder.clone(),
         )
+        .with_slack_source(Arc::new(
+            import::outbound::mcp_slack_source::McpSlackSource::new(mcp_selector.clone()),
+        ))
+        .with_admission(admission.clone())
         .with_notifier(import_notify),
     );
 
@@ -490,7 +672,31 @@ async fn main() -> anyhow::Result<()> {
         entity_access_service.clone(),
         document_tool_context.service.clone(),
         chat_tool_context.service.clone(),
-        user_email_service,
+        user_email_service.clone(),
+    );
+
+    let initiative_tool_context = ai_tools::build_initiative_tool_context(
+        db.clone(),
+        &document_tool_context,
+        properties_service.clone(),
+        entity_access_service.clone(),
+        macro_event_broker.clone(),
+    );
+
+    let databases_tool_context = ai_tools::build_databases_tool_context(
+        db.clone(),
+        entity_access_service.clone(),
+        ai_tools::ToolTableEventPublisher::Gateway(
+            databases::outbound::gateway_event_publisher::GatewayTableEventPublisher::new(
+                channels_connection_gateway.as_ref().clone(),
+            ),
+        ),
+        ai_tools::MaybeToolEventBroker::Real(macro_event_broker.clone()),
+    );
+    let databases_sql_tool_context = ai_tools::build_databases_sql_tool_context(
+        &databases_tool_context,
+        soup_service.clone(),
+        db.clone(),
     );
 
     let tool_service_context = ai_tools::ToolServiceContext {
@@ -498,29 +704,60 @@ async fn main() -> anyhow::Result<()> {
         email_service_client: email_service_client_external.clone(),
         soup_service: soup_service.clone(),
         email_service: email_service_for_tools.clone(),
+        activity_tool_context: ai_tools::build_activity_tool_context(
+            db.clone(),
+            properties_service,
+            entity_access_service.clone(),
+        ),
+        image_generation_tool_context: ai_tools::build_image_generation_tool_context(
+            &document_tool_context,
+            ai_tools::build_image_generator_from_env(),
+            recorder.clone(),
+        )?,
         document_tool_context: document_tool_context.clone(),
         properties_tool_context: properties_tool_context.clone(),
         email_tool_context: email_tool_context.clone(),
         call_tool_context: call_tool_context.clone(),
+        calendar_tool_context: ai_tools::build_calendar_tool_context(
+            db.clone(),
+            CalendarServiceUrl::new()?,
+            internal_api_key.clone(),
+        ),
         notification_tool_context: notification_tool_context.clone(),
+        databases_tool_context,
+        databases_sql_tool_context,
         import_tool_context: import::inbound::toolset::ImportToolContext::wired(
             import_service.clone(),
         ),
         chat_tool_context,
         channel_tool_context,
+        bot_tool_context: ai_tools::build_bot_tool_context(
+            db.clone(),
+            ai_tools::MaybeToolEventBroker::Real(macro_event_broker.clone()),
+            entity_access_service.clone(),
+            DocumentStorageServiceUrl::new()?.to_string(),
+            pipedream_client.clone(),
+        ),
+        coding_agent_tool_context: ai_tools::build_coding_agent_tool_context(
+            macro_service_urls::AgentHarnessServiceUrl::new()?,
+            internal_api_key.clone(),
+        )?,
         project_tool_context,
+        initiative_tool_context,
         team_tool_context: ai_tools::build_team_tool_context(db.clone()),
         crm_tool_context: ai_tools::build_crm_tool_context(db.clone()),
         skill_tool_context: ai_tools::build_skill_tool_context(
             search_service_client.clone(),
             soup_service.clone(),
+            &document_tool_context,
         ),
-        schedule_tool_context: ai_tools::NoOpScheduleContext,
+        schedule_tool_context: ai_tools::build_routine_tool_context()?,
         anthropic_tool_context: ai_tools::build_anthropic_tool_context(),
+        admission,
         recorder,
         usage_context: ai_usage::UsageContext::system(ai_usage::AiFeature::Chat),
     };
-    let all_tools = ai_tools::all_tools();
+    let all_tools = ai_tools::tools_for(ai_tools::AiHost::Chat);
     let all_tools_toolset = all_tools.toolset.clone();
     let all_tools_prompt: Arc<dyn std::fmt::Display + Send + Sync> =
         Arc::new(all_tools.prompt.to_string());
@@ -528,7 +765,6 @@ async fn main() -> anyhow::Result<()> {
     // Build memory service
     let memory_repo = memory::outbound::pg_memory_repo::PgMemoryRepo::new(db.clone());
     let memory_service = Arc::new(memory::domain::service::MemoryServiceImpl::new(
-        db.clone(),
         memory_repo,
         tool_service_context.clone(),
         all_tools,
@@ -538,9 +774,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Build the AI cost service. It backs both the admin query/pricing router
     // and the usage recorder threaded through the tool service context.
-    let usage_service = Arc::new(ai_usage::domain::service::UsageServiceImpl::new(
-        ai_usage::outbound::PgUsageRepo::new(db.clone()),
-    ));
+    let usage_service = Arc::new(
+        ai_usage::domain::service::UsageServiceImpl::new(ai_usage::outbound::PgUsageRepo::new(
+            db.clone(),
+        ))
+        .with_enforcement(config.enable_ai_usage_enforcement),
+    );
 
     tracing::info!("initialized ai cost service");
 
@@ -549,7 +788,7 @@ async fn main() -> anyhow::Result<()> {
     let projection_generator =
         ai_projections::outbound::agent_generator::AgentProjectionGenerator::new(
             tool_service_context.clone(),
-            ai_tools::all_tools(),
+            ai_tools::tools_for(ai_tools::AiHost::Chat),
         );
     // Notifier that pushes finished materializations to the target's connected
     // clients through the connection gateway.
@@ -596,11 +835,12 @@ async fn main() -> anyhow::Result<()> {
         onboarding::outbound::pg_onboarding_repo::PgOnboardingRepo::new(db.clone()),
         Arc::new(mcp_server_repo.clone()),
         import_service.clone(),
+        mcp_selector.clone(),
     ));
 
     tracing::info!("initialized onboarding service");
 
-    let mcp_public_url = DocumentCognitionServiceUrl::new()?;
+    let mcp_public_url = &config.mcp_public_url;
     let mcp_client_metadata = mcp_client::domain::models::OAuthClientMetadata::new(
         format!("{mcp_public_url}/mcp/servers/auth/client-metadata"),
         format!("{mcp_public_url}/mcp/servers/auth/callback"),
@@ -639,12 +879,29 @@ async fn main() -> anyhow::Result<()> {
     )
     .with_auth_completed_hook(mcp_auth_hook);
 
-    let user_permissions_service = Arc::new(
-        roles_and_permissions::domain::service::UserRolesAndPermissionsServiceImpl::new(
-            roles_and_permissions::outbound::pgpool::MacroDB::new(db.clone()),
-            roles_and_permissions::outbound::pgpool::MacroDB::new(db.clone()),
-        ),
-    );
+    // The Pipedream stack gets the same post-connect reconcile hook as the
+    // native one: a finished Connect flow starts gather jobs immediately.
+    let onboarding_for_pipedream_hook = onboarding_service.clone();
+    let pipedream_auth_hook: pipedream_mcp::inbound::axum_router::PipedreamAuthCompletedHook =
+        Arc::new(
+            move |connection: pipedream_mcp::domain::models::PipedreamConnection| {
+                let service = onboarding_for_pipedream_hook.clone();
+                Box::pin(async move {
+                    tokio::spawn(async move {
+                        use onboarding::domain::service::OnboardingService;
+                        if let Err(e) = service.reconcile(connection.user_id).await {
+                            tracing::warn!(error = ?e, "post-connect onboarding reconcile failed");
+                        }
+                    });
+                })
+            },
+        );
+    let pipedream_state = pipedream_mcp::inbound::PipedreamRouterState::new(
+        pipedream_repo,
+        pipedream_client,
+        authorization_state.clone(),
+    )
+    .with_auth_completed_hook(pipedream_auth_hook);
 
     let api_result = api::setup_and_serve(ApiContext {
         db: db.clone(),
@@ -654,6 +911,9 @@ async fn main() -> anyhow::Result<()> {
         search_service_client,
         authorization_state,
         user_permissions_service,
+        non_user_owners,
+        ai_admission: tool_service_context.admission.clone(),
+        ai_billing,
         internal_api_key: config.internal_api_key.clone(),
         config: Arc::new(config),
         notification_ingress_service,
@@ -678,6 +938,8 @@ async fn main() -> anyhow::Result<()> {
             redis_client.clone(),
         ),
         mcp_state,
+        pipedream_state,
+        mcp_selector,
         import_service,
         onboarding_service,
         macro_event_broker: macro_event_broker.clone(),

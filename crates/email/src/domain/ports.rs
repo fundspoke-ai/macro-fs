@@ -1,11 +1,12 @@
 use crate::domain::models::{
     Attachment, AttachmentDraft, AttachmentForwarded, Contact, ContactInfo, CreateDraftInput,
-    CreatedDraft, EmailErr, EmailFilter, EmailInboxDetails, EmailThreadMetadata,
-    EmailThreadPreview, EnrichedEmailThreadPreview, GetEmailsRequest, Label, Link, LinkLabel,
-    Message, MessageAttachment, MessageLabel, MessageRow, ParsedAddresses, ParsedMessage,
-    ParsedThread, PreviewCursorQuery, RecipientType, ResolvedDraftInput, SimpleMessage,
-    SimpleMessageInfo, Thread, ThreadRow, UpdateThreadLabelsResult, UpsertEmailFilterInput,
-    UpsertedContacts, UserEmailLink, UserProvider,
+    CreatedDraft, DeletedUserDraft, DraftDeletion, EmailErr, EmailFilter, EmailInboxDetails,
+    EmailThreadMailProjection, EmailThreadMetadata, EmailThreadPreview, EnrichedEmailThreadPreview,
+    GetEmailsRequest, Label, Link, LinkLabel, Message, MessageAttachment, MessageLabel, MessageRow,
+    MessageTimestamps, ParsedAddresses, ParsedMessage, ParsedThread, PreviewCursorQuery,
+    RecipientType, ResolvedDraftInput, SavedUserDraft, SenderPolicy, SettledDraftIds,
+    SimpleMessage, SimpleMessageInfo, Thread, ThreadRow, UpdateThreadLabelsResult,
+    UpsertEmailFilterInput, UpsertedContacts, UserEmailLink, UserProvider,
 };
 use chrono::{DateTime, Utc};
 use entity_access::domain::models::{EditAccessLevel, EntityAccessReceipt, ViewAccessLevel};
@@ -38,6 +39,20 @@ pub trait EmailMessageEnqueuer: Send + Sync + 'static {
         labels_to_add: Vec<String>,
         labels_to_remove: Vec<String>,
     ) -> impl Future<Output = Result<(), Self::Err>> + Send;
+
+    /// Enqueue a Gmail-ops BlockSender operation for the link.
+    fn enqueue_gmail_ops_block_sender(
+        &self,
+        link_id: Uuid,
+        email_address: String,
+    ) -> impl Future<Output = Result<(), Self::Err>> + Send;
+
+    /// Enqueue a Gmail-ops UnblockSender operation for the link.
+    fn enqueue_gmail_ops_unblock_sender(
+        &self,
+        link_id: Uuid,
+        email_address: String,
+    ) -> impl Future<Output = Result<(), Self::Err>> + Send;
 }
 
 /// The sending inbox's signature preferences, used by the send pipeline to
@@ -55,6 +70,11 @@ pub struct LinkEmailSettings {
 /// The port returns persisted facts only. Accessible-inbox aggregation and
 /// synchronization-status policy remain in the email domain service.
 pub trait EmailUserRepo: Send + Sync + 'static {
+    /// Sender rules for an inbox already authorized by the user service.
+    fn user_sender_filters(
+        &self,
+        link_id: Uuid,
+    ) -> impl Future<Output = Result<Vec<EmailFilter>, EmailErr>> + Send;
     /// Resolve every owned or delegated inbox accessible to `macro_id`.
     fn user_accessible_inboxes(
         &self,
@@ -136,6 +156,13 @@ pub trait EmailRepo: Send + Sync + 'static {
         thread_ids: &[Uuid],
     ) -> impl Future<Output = Result<Vec<EmailThreadMetadata>, Self::Err>> + Send;
 
+    /// Fetch Mail-specific cache facts and previews for a batch of thread IDs.
+    fn thread_mail_projections_by_ids(
+        &self,
+        viewer: MacroUserIdStr<'_>,
+        thread_ids: &[Uuid],
+    ) -> impl Future<Output = Result<Vec<EmailThreadMailProjection>, Self::Err>> + Send;
+
     /// Fetch paginated messages for a thread, ordered by internal_date_ts descending.
     fn messages_by_thread_id_paginated(
         &self,
@@ -178,6 +205,24 @@ pub trait EmailRepo: Send + Sync + 'static {
         message_ids: &[Uuid],
     ) -> impl Future<Output = Result<HashMap<Uuid, Vec<MessageLabel>>, Self::Err>> + Send;
 
+    /// Fetch saved calendar invitation components, keyed by message ID.
+    fn calendar_invitations_by_message_ids(
+        &self,
+        message_ids: &[Uuid],
+    ) -> impl Future<
+        Output = Result<
+            HashMap<Uuid, Vec<crate::domain::models::calendar_invitation::CalendarInvitation>>,
+            Self::Err,
+        >,
+    > + Send;
+
+    /// Fetch persisted message timestamps, scoped to the sending inbox.
+    fn message_timestamps(
+        &self,
+        message_id: Uuid,
+        link_id: Uuid,
+    ) -> impl Future<Output = Result<Option<MessageTimestamps>, Self::Err>> + Send;
+
     /// Fetch provider attachments for a set of message IDs, keyed by message ID.
     fn attachments_by_message_ids(
         &self,
@@ -211,6 +256,23 @@ pub trait EmailRepo: Send + Sync + 'static {
         link_ids: &[Uuid],
     ) -> impl Future<Output = Result<Option<SimpleMessageInfo>, Self::Err>> + Send;
 
+    /// Resolve a client draft handle to its server-minted message ID through
+    /// the mapping table, scoped to the caller's inboxes — identical handles
+    /// from different users never interact.
+    fn message_id_for_client_draft_id(
+        &self,
+        client_id: Uuid,
+        link_ids: &[Uuid],
+    ) -> impl Future<Output = Result<Option<Uuid>, Self::Err>> + Send;
+
+    /// Resolve a client thread handle to its server-minted thread ID through
+    /// the mapping table, scoped to the caller's inboxes.
+    fn thread_id_for_client_thread_id(
+        &self,
+        client_id: Uuid,
+        link_ids: &[Uuid],
+    ) -> impl Future<Output = Result<Option<Uuid>, Self::Err>> + Send;
+
     /// Find an existing draft that replies to the given message ID.
     fn get_draft_replying_to(
         &self,
@@ -219,11 +281,21 @@ pub trait EmailRepo: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<SimpleMessageInfo>, Self::Err>> + Send;
 
     /// Delete a draft message and its thread if the thread is left empty.
+    /// A surviving thread gets its denormalized metadata (inbox visibility,
+    /// latest timestamps, is_signal) recomputed, since drafts count toward
+    /// those fields.
+    ///
+    /// Ownership is enforced in the DELETE's WHERE clause — the row must be
+    /// an unsent draft in `thread_db_id` belonging to one of `link_ids` —
+    /// so a raced validation read can never delete someone else's row.
+    /// Returns `None` when no row matched (already deleted, sent, or not
+    /// owned): deletes are idempotent, classification is the caller's job.
     fn delete_draft_message(
         &self,
         message_id: Uuid,
         thread_db_id: Uuid,
-    ) -> impl Future<Output = Result<(), Self::Err>> + Send;
+        link_ids: &[Uuid],
+    ) -> impl Future<Output = Result<Option<DraftDeletion>, Self::Err>> + Send;
 
     /// Upsert contacts from the parsed addresses. Must be called outside a transaction
     /// to avoid deadlocks (contacts are shared across messages).
@@ -234,7 +306,11 @@ pub trait EmailRepo: Send + Sync + 'static {
     ) -> impl Future<Output = Result<UpsertedContacts, Self::Err>> + Send;
 
     /// Insert a message within a transaction, including thread insert (if new),
-    /// recipients, scheduled message handling, thread metadata update, and user history.
+    /// recipients, thread metadata update, and user history. Ordinary drafts never
+    /// schedule delivery; non-drafts may create an immediate-send undo window.
+    /// Lock and re-read client-handle bindings, bind handles to the final rows,
+    /// and return their authoritative IDs. Return None when an owner/sent guard
+    /// rejects the write; reject scheduled/processing identities transactionally.
     /// If `new_thread` is Some, the thread is created inside the same transaction.
     fn insert_message(
         &self,
@@ -243,7 +319,7 @@ pub trait EmailRepo: Send + Sync + 'static {
         link_id: Uuid,
         new_thread: Option<ThreadRow>,
         is_draft: bool,
-    ) -> impl Future<Output = Result<(), Self::Err>> + Send;
+    ) -> impl Future<Output = Result<Option<SettledDraftIds>, EmailErr>> + Send;
 
     /// Fetch a label by its database ID and link ID.
     fn get_label_by_id(
@@ -273,6 +349,30 @@ pub trait EmailRepo: Send + Sync + 'static {
         message_ids: &[Uuid],
         provider_label_id: &str,
         link_id: Uuid,
+    ) -> impl Future<Output = Result<(), Self::Err>> + Send;
+
+    /// Atomically update the UNREAD label assignments and the message/thread read flags.
+    /// `message_ids` must be the messages of the already-authorized thread and inbox.
+    /// An error leaves all three representations unchanged.
+    fn set_thread_read_state(
+        &self,
+        thread_id: Uuid,
+        link_id: Uuid,
+        message_ids: &[Uuid],
+        is_read: bool,
+    ) -> impl Future<Output = Result<(), Self::Err>> + Send;
+
+    /// Atomically change INBOX assignments and the thread's visibility.
+    /// The message IDs belong to the authorized thread/inbox. Visibility is
+    /// separate from `add` so an enqueue failure can restore the prior flag
+    /// while reverting only the assignments changed by that operation.
+    fn set_thread_inbox_state(
+        &self,
+        thread_id: Uuid,
+        link_id: Uuid,
+        message_ids: &[Uuid],
+        add: bool,
+        inbox_visible: bool,
     ) -> impl Future<Output = Result<(), Self::Err>> + Send;
 
     /// Update the read status for a batch of messages, verified by link_id.
@@ -371,8 +471,9 @@ pub trait EmailRepo: Send + Sync + 'static {
     }
 }
 
-/// Read-only trait for fetching email thread previews.
-/// Used by soup to restrict access to only read email operations as it uses the read replica database.
+/// Read-only capability for fetching email thread previews. The composition
+/// root supplies the replica-backed service for ordinary REST/GraphQL Soup.
+/// Mutation replies reload through the primary-backed email writer instead.
 pub trait EmailPreviewServiceReadOnly: Send + Sync + 'static {
     fn get_email_thread_previews(
         &self,
@@ -392,6 +493,16 @@ pub trait EmailThreadMetadataService: Send + Sync + 'static {
         &self,
         receipts: Vec<EntityAccessReceipt<ViewAccessLevel>>,
     ) -> impl Future<Output = Result<HashMap<Uuid, EmailThreadMetadata>, EmailErr>> + Send;
+}
+
+/// Read-only domain service used to hydrate offline Mail projection data.
+pub trait EmailThreadMailProjectionService: Send + Sync + 'static {
+    /// Fetch cache facts and canonical previews for authorized threads in one batch.
+    fn get_email_thread_mail_projections(
+        &self,
+        viewer: MacroUserIdStr<'static>,
+        receipts: Vec<EntityAccessReceipt<ViewAccessLevel>>,
+    ) -> impl Future<Output = Result<HashMap<Uuid, EmailThreadMailProjection>, EmailErr>> + Send;
 }
 
 /// Read-only domain service used to hydrate lightweight email content edges.
@@ -426,8 +537,9 @@ pub trait EmailContentService: Send + Sync + 'static {
 }
 
 /// Newtype adapter that restricts a full `EmailService` to read-only preview access.
-/// Wrapping is explicit so readonly wiring is intentional — a bare `EmailServiceImpl`
-/// will *not* silently satisfy `EmailPreviewServiceReadOnly`.
+/// This narrows capabilities, not consistency: the wrapped service may use a
+/// primary or replica pool. A bare `EmailServiceImpl` will not silently satisfy
+/// `EmailPreviewServiceReadOnly`.
 pub struct ReadonlyEmailPreviewAdapter<T>(pub T);
 
 impl<T: EmailService> EmailPreviewServiceReadOnly for ReadonlyEmailPreviewAdapter<T> {
@@ -524,6 +636,33 @@ pub trait EmailService: Send + Sync + 'static {
         input: CreateDraftInput,
     ) -> impl Future<Output = Result<CreatedDraft, EmailErr>> + Send;
 
+    /// Create or update a draft for the authenticated user, resolving the
+    /// sending inbox from `link_id` (or the caller's primary inbox when
+    /// `None`). Lets transports without the `X-Email-Link-Id` header (the
+    /// GraphQL mutation, whose offline replay persists only variables) target
+    /// an inbox by value. The input's `db_id`/`thread_db_id` are client
+    /// handles here — resolved through the caller-scoped mapping tables and
+    /// bound to server-minted rows, never used as primary keys.
+    fn save_draft_for_user(
+        &self,
+        macro_id: MacroUserIdStr<'_>,
+        link_id: Option<Uuid>,
+        input: CreateDraftInput,
+    ) -> impl Future<Output = Result<SavedUserDraft, EmailErr>> + Send;
+
+    /// Delete a draft for the authenticated user, searching every inbox they
+    /// can reach. `draft_id` is a handle resolved like a save's: through the
+    /// caller-scoped mapping, else as a server ID. Idempotent: a handle that
+    /// resolves to nothing (or to a row that is not theirs — reported
+    /// identically to avoid an existence oracle) is a successful no-op, so a
+    /// delete queued offline lands cleanly however late it replays. Deleting
+    /// a draft that has since been sent fails with `MessageAlreadySent`.
+    fn delete_draft_for_user(
+        &self,
+        macro_id: MacroUserIdStr<'_>,
+        draft_id: Uuid,
+    ) -> impl Future<Output = Result<DeletedUserDraft, EmailErr>> + Send;
+
     /// Send a message: persist it and enqueue for scheduled delivery.
     /// `accessible_inboxes` is every inbox the caller can reach (own +
     /// delegated); a reply target may live in any of them, not just `link`.
@@ -559,6 +698,23 @@ pub trait EmailService: Send + Sync + 'static {
         async { Err(no_op_email_err()) }
     }
 
+    /// Mark a caller-accessible thread unread using its own inbox's UNREAD label.
+    /// Provider synchronization and read-state updates use the thread-label flow.
+    fn mark_thread_unread(
+        &self,
+        macro_id: MacroUserIdStr<'static>,
+        thread_id: Uuid,
+    ) -> impl Future<Output = Result<(), EmailErr>> + Send;
+
+    /// Archive or unarchive a caller-owned/delegated thread. The service
+    /// resolves the thread's inbox and system label, then queues provider sync.
+    fn set_thread_archived(
+        &self,
+        macro_id: MacroUserIdStr<'static>,
+        thread_id: Uuid,
+        archived: bool,
+    ) -> impl Future<Output = Result<(), EmailErr>> + Send;
+
     /// Add or remove a label from a caller-accessible thread.
     fn update_thread_labels_for_user(
         &self,
@@ -587,6 +743,17 @@ pub trait EmailService: Send + Sync + 'static {
         link: &Link,
         input: UpsertEmailFilterInput,
     ) -> impl Future<Output = Result<EmailFilter, EmailErr>> + Send;
+
+    /// Set where future mail from a sender lands for the given inbox.
+    ///
+    /// Signal and Noise also enqueue an UnblockSender so a prior Block does
+    /// not keep trashing new mail.
+    fn set_sender_policy(
+        &self,
+        link: &Link,
+        sender_email: &str,
+        policy: SenderPolicy,
+    ) -> impl Future<Output = Result<(), EmailErr>> + Send;
 
     /// Delete an email filter by its ID for the given link.
     fn delete_email_filter(
@@ -664,6 +831,22 @@ impl EmailMessageEnqueuer for NoOpEnqueuer {
     ) -> Result<(), Self::Err> {
         Ok(())
     }
+
+    async fn enqueue_gmail_ops_block_sender(
+        &self,
+        _link_id: Uuid,
+        _email_address: String,
+    ) -> Result<(), Self::Err> {
+        Ok(())
+    }
+
+    async fn enqueue_gmail_ops_unblock_sender(
+        &self,
+        _link_id: Uuid,
+        _email_address: String,
+    ) -> Result<(), Self::Err> {
+        Ok(())
+    }
 }
 
 /// No-op [`EmailService`] for binaries that need to satisfy the bound but
@@ -693,6 +876,15 @@ impl EmailUserService for NoOpEmailService {
 }
 
 impl EmailService for NoOpEmailService {
+    async fn set_thread_archived(
+        &self,
+        _macro_id: MacroUserIdStr<'static>,
+        _thread_id: Uuid,
+        _archived: bool,
+    ) -> Result<(), EmailErr> {
+        Err(no_op_email_err())
+    }
+
     async fn get_email_thread_previews(
         &self,
         _req: GetEmailsRequest,
@@ -758,6 +950,23 @@ impl EmailService for NoOpEmailService {
         Err(no_op_email_err())
     }
 
+    async fn save_draft_for_user(
+        &self,
+        _macro_id: MacroUserIdStr<'_>,
+        _link_id: Option<Uuid>,
+        _input: CreateDraftInput,
+    ) -> Result<SavedUserDraft, EmailErr> {
+        Err(no_op_email_err())
+    }
+
+    async fn delete_draft_for_user(
+        &self,
+        _macro_id: MacroUserIdStr<'_>,
+        _draft_id: Uuid,
+    ) -> Result<DeletedUserDraft, EmailErr> {
+        Err(no_op_email_err())
+    }
+
     async fn send_message(
         &self,
         _link: &Link,
@@ -781,6 +990,14 @@ impl EmailService for NoOpEmailService {
         Err(no_op_email_err())
     }
 
+    async fn mark_thread_unread(
+        &self,
+        _macro_id: MacroUserIdStr<'static>,
+        _thread_id: Uuid,
+    ) -> Result<(), EmailErr> {
+        Err(no_op_email_err())
+    }
+
     async fn update_thread_project(
         &self,
         _thread_receipt: EntityAccessReceipt<EditAccessLevel>,
@@ -794,6 +1011,15 @@ impl EmailService for NoOpEmailService {
         _link: &Link,
         _input: UpsertEmailFilterInput,
     ) -> Result<EmailFilter, EmailErr> {
+        Err(no_op_email_err())
+    }
+
+    async fn set_sender_policy(
+        &self,
+        _link: &Link,
+        _sender_email: &str,
+        _policy: SenderPolicy,
+    ) -> Result<(), EmailErr> {
         Err(no_op_email_err())
     }
 
@@ -811,6 +1037,16 @@ impl EmailThreadMetadataService for NoOpEmailService {
         &self,
         _receipts: Vec<EntityAccessReceipt<ViewAccessLevel>>,
     ) -> Result<HashMap<Uuid, EmailThreadMetadata>, EmailErr> {
+        Err(no_op_email_err())
+    }
+}
+
+impl EmailThreadMailProjectionService for NoOpEmailService {
+    async fn get_email_thread_mail_projections(
+        &self,
+        _viewer: MacroUserIdStr<'static>,
+        _receipts: Vec<EntityAccessReceipt<ViewAccessLevel>>,
+    ) -> Result<HashMap<Uuid, EmailThreadMailProjection>, EmailErr> {
         Err(no_op_email_err())
     }
 }

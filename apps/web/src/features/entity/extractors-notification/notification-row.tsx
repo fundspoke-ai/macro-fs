@@ -2,15 +2,9 @@ import { globalSplitManager } from '@app/signal/splitLayout';
 import { useGlobalNotificationSource } from '@components/app/GlobalAppState';
 import { useSplitPanel } from '@components/app/split-layout/layoutUtils';
 import { ContextMenuContent, MenuItem } from '@core/component/ContextMenu';
-import { toast } from '@core/component/Toast/Toast';
 import type { NotificationType } from '@core/types';
-import { buildSimpleEntityUrl } from '@core/util/url';
 import { ContextMenu } from '@kobalte/core/context-menu';
-import {
-  getChannelNotificationParams,
-  openNotification,
-  type UnifiedNotification,
-} from '@notifications';
+import { openNotification, type UnifiedNotification } from '@notifications';
 import CheckIcon from '@phosphor/check.svg';
 import { Button, cn } from '@ui';
 import { type JSX, Match, Show, Switch } from 'solid-js';
@@ -22,18 +16,11 @@ import {
   DocumentMentionPill,
   NotificationContent,
 } from './notification-content';
+import { copyNotificationLink } from './notification-copy-link';
 import { NotificationDescription } from './notification-description';
 import { NotificationIcon } from './notification-icon';
 import { NotificationSenderIcon } from './notification-sender-icon';
 import { NotificationTimestamp } from './notification-timestamp';
-
-function getNotificationUrl(notification: UnifiedNotification): string {
-  const { params } = getChannelNotificationParams(notification);
-  return buildSimpleEntityUrl(
-    { type: notification.entity_type, id: notification.entity_id },
-    params
-  );
-}
 
 /**
  * Per-type content renderer for a single, unstacked notification.
@@ -207,7 +194,7 @@ function HeaderTrailing(props: {
             props.onMarkAsDone();
           }}
           tooltip="Mark done"
-          class="rounded text-ink-muted hover:text-accent hover:bg-accent/10 hidden group-hover/notif:grid p-0 place-items-center size-5"
+          class="text-ink-muted hover:text-accent hover:bg-accent/10 hidden group-hover/notif:grid p-0 place-items-center size-5"
         >
           <CheckIcon class="size-3" />
         </Button>
@@ -225,7 +212,7 @@ function CompactBody(props: BodyProps) {
   return (
     <Layout
       class={cn(
-        'group/notif @container/notif-row flex items-center gap-2.5 px-3 py-2 hover:bg-ink-muted/6 min-w-0 overflow-hidden cursor-pointer',
+        'group/notif @container/notif-row flex items-center gap-2.5 px-3 py-2 hover:bg-ink-muted/6 min-w-0 overflow-hidden',
         props.class
       )}
     >
@@ -257,7 +244,7 @@ function ExpandedBody(props: BodyProps) {
   return (
     <Layout
       class={cn(
-        'group/notif flex flex-col px-4 py-3 hover:bg-ink-muted/6 min-w-0 overflow-hidden cursor-pointer',
+        'group/notif flex flex-col px-4 py-3 hover:bg-ink-muted/6 min-w-0 overflow-hidden',
         props.class
       )}
     >
@@ -275,7 +262,7 @@ function ExpandedBody(props: BodyProps) {
       </div>
       <div
         class={cn(
-          'ph-no-capture min-w-0 text-xs text-ink-muted/80 pt-2 wrap-break-words',
+          'ph-no-capture min-w-0 text-xs text-ink-muted/80 pt-2 wrap-break-word',
           CONTENT_INDENT
         )}
       >
@@ -302,8 +289,7 @@ function ExpandedBody(props: BodyProps) {
  */
 export function NotificationRow(props: NotificationRowProps) {
   const notificationSource = useGlobalNotificationSource();
-  // The containing split (when any) is the navigation source, so opens from
-  // an engaged preview controller route into its viewer split.
+  // Keep navigation associated with the originating split.
   const panel = useSplitPanel();
   const unread = () => isNotificationUnread(props.notification);
   const canMarkDone = () =>
@@ -344,11 +330,7 @@ export function NotificationRow(props: NotificationRowProps) {
     await markAsRead();
   };
 
-  const handleCopyLink = async () => {
-    const url = getNotificationUrl(props.notification);
-    await navigator.clipboard.writeText(url);
-    toast.success('Link copied to clipboard');
-  };
+  const handleCopyLink = () => copyNotificationLink(props.notification);
 
   const bodyProps = (): BodyProps => ({
     notification: props.notification,

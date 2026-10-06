@@ -1,18 +1,22 @@
 /// The main entry point: [`AgentLoop`] and [`Session`].
 use crate::error::AgentError;
-use crate::hook::{RegisterFn, ToolRouter};
-use crate::model::PredefinedModel;
+use crate::hook::{BridgeInputs, RegisterFn, ToolRouter, UserToolFinisher};
+use crate::model::metering::MeteringContext;
 use crate::model::router::{ModelRouter, ProviderAgent};
+use crate::model::{PredefinedModel, ReasoningEffort};
 use crate::stream::ChatCompletionStream;
+use crate::telemetry::GenAiContext;
 use crate::tool_adapter::DynToolSetAdapter;
 use ai_toolset::{RequestContext, SearchableTool, ToolLoader, ToolSet as AiToolSet};
 use ai_usage::{UsageContext, UsageRecorder};
+use genai_telemetry::ContentPolicy;
 use rig_agent::tool::server::{ToolServer, ToolServerHandle};
-use rig_core::message::Message;
+use rig_core::message::{AssistantContent, Message};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 const DEFAULT_MAX_TURNS: usize = 16;
 const DEFAULT_MAX_TOKENS: u64 = 16_000;
@@ -27,26 +31,55 @@ const DEFAULT_MAX_TOKENS: u64 = 16_000;
 /// (MCP tools are per-user, system prompt depends on toolset selection).
 pub struct AgentLoop {
     model: String,
+    reasoning_effort: Option<ReasoningEffort>,
     max_turns: usize,
     max_tokens: u64,
     recorder: Arc<dyn UsageRecorder>,
+    user_tool_finisher: Option<UserToolFinisher>,
+    /// The conversation (session) sessions belong to, for telemetry.
+    conversation_id: Option<String>,
+    /// The agent name spans carry; defaults to the usage context's feature.
+    agent_name: Option<String>,
+    /// Whether this loop enriches the runtime's GenAI spans (see
+    /// [`Self::with_genai_telemetry`]).
+    genai_telemetry: bool,
 }
 
 impl AgentLoop {
     /// Create an `AgentLoop` with provider clients from `APP_SECRETS_JSON` or the environment and
     /// the default model (Opus 4.7).
     ///
-    /// `recorder` is the [`UsageRecorder`] every session created from this loop
-    /// logs token usage to — it is required so that no AI call goes unrecorded.
+    /// Sessions log legacy aggregates through `recorder`. When its separate
+    /// tracking capability is present, they also bind observational per-attempt
+    /// scopes; analytics injection alone is not proof of attempt coverage.
     ///
     /// `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are required.
     pub fn new(recorder: Arc<dyn UsageRecorder>) -> Self {
         Self {
             model: PredefinedModel::default().to_string(),
+            reasoning_effort: None,
             max_turns: DEFAULT_MAX_TURNS,
             max_tokens: DEFAULT_MAX_TOKENS,
             recorder,
+            user_tool_finisher: None,
+            conversation_id: None,
+            agent_name: None,
+            genai_telemetry: true,
         }
+    }
+
+    /// Finish user tools inside the turn.
+    ///
+    /// A user tool (`ai_toolset::UserTool`) answers `"PendingUserExecution"`
+    /// and leaves the call for the host to finish. Without a finisher that
+    /// answer reaches the model as-is and the host finishes the call later,
+    /// as chat does over HTTP. With one, the bridge hands each pending call
+    /// to `finisher` before the model reads it, and the model sees what the
+    /// user decided instead - the shape a host that can reach its user
+    /// mid-turn wants.
+    pub fn with_user_tool_finisher(mut self, finisher: UserToolFinisher) -> Self {
+        self.user_tool_finisher = Some(finisher);
+        self
     }
 
     /// Override the model.
@@ -55,6 +88,12 @@ impl AgentLoop {
     /// api-id string (frontend).
     pub fn with_model<M: ToString>(mut self, model: M) -> Self {
         self.model = model.to_string();
+        self
+    }
+
+    /// Override the model provider's default reasoning effort.
+    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
         self
     }
 
@@ -67,6 +106,39 @@ impl AgentLoop {
     /// Override the default max output tokens.
     pub fn with_max_tokens(mut self, n: u64) -> Self {
         self.max_tokens = n;
+        self
+    }
+
+    /// Tag every span of the sessions created from this loop with the
+    /// conversation they belong to (`gen_ai.conversation.id`, e.g. the chat
+    /// id). Observability backends group the turns of one conversation into a
+    /// session by it, which is what session-level evaluations run over.
+    pub fn with_conversation_id<S: Into<String>>(mut self, conversation_id: S) -> Self {
+        self.conversation_id = Some(conversation_id.into());
+        self
+    }
+
+    /// Override the agent name spans carry (`gen_ai.agent.name`). Defaults to
+    /// the usage context's feature (`chat`, `automation`, …).
+    pub fn with_agent_name<S: Into<String>>(mut self, agent_name: S) -> Self {
+        self.agent_name = Some(agent_name.into());
+        self
+    }
+
+    /// Whether this loop records GenAI telemetry on the runtime's spans: the
+    /// `invoke_agent` span with the run's input, output and usage, the
+    /// content, tool definitions and conversation id on each `chat` span, and
+    /// the arguments and result on each `execute_tool` span. On by default.
+    ///
+    /// Off for a loop whose turns are already traced from outside - Macro's
+    /// in-process agent session runtime, whose ACP frames the session actor
+    /// projects onto GenAI spans for every harness alike. With it off the run
+    /// is still wrapped in a span (so the runtime adopts it rather than
+    /// opening an `invoke_agent` of its own), but that span carries no GenAI
+    /// fields, nothing is recorded onto the runtime's spans, and the tool
+    /// calls run with `RequestContext::genai_telemetry` off.
+    pub fn with_genai_telemetry(mut self, enabled: bool) -> Self {
+        self.genai_telemetry = enabled;
         self
     }
 
@@ -95,10 +167,19 @@ impl AgentLoop {
             context,
             system_prompt,
             usage_ctx,
-            |handle, prompt, max_turns, max_tokens| {
-                ModelRouter::shared()
+            |handle, prompt, max_turns, max_tokens, telemetry| {
+                let routed = ModelRouter::shared()
                     .expect("failed to initialize model router")
-                    .agent(&self.model, handle, prompt, max_turns, max_tokens)
+                    .route_or_default(&self.model);
+                telemetry.set_model(routed.provider(), routed.model_name());
+                routed.into_agent(
+                    self.reasoning_effort,
+                    handle,
+                    prompt,
+                    max_turns,
+                    max_tokens,
+                    &telemetry,
+                )
             },
         )
         .await
@@ -115,7 +196,7 @@ impl AgentLoop {
         context: Arc<Context>,
         system_prompt: &str,
         usage_ctx: UsageContext,
-        build: impl FnOnce(ToolServerHandle, &str, usize, u64) -> ProviderAgent,
+        build: impl FnOnce(ToolServerHandle, &str, usize, u64, GenAiContext) -> ProviderAgent,
     ) -> Session
     where
         Context: Clone + Send + Sync + 'static,
@@ -137,8 +218,9 @@ impl AgentLoop {
                 buffer.lock().expect("loaded_buffer poisoned").extend(tools)
             })
         };
-        let request_context =
-            RequestContext::new(usage_ctx.user.clone()).with_tool_search(Arc::new(catalog), loader);
+        let request_context = RequestContext::new(usage_ctx.user.clone())
+            .with_tool_search(Arc::new(catalog), loader)
+            .with_genai_telemetry(self.genai_telemetry);
         // TODO this is cringe, make request context a RW lock newtype
         let request_context_rw = Arc::new(RwLock::new(request_context.clone()));
 
@@ -192,6 +274,7 @@ impl AgentLoop {
                         }
                         let adapter = DynToolSetAdapter::loaded(
                             tool.name,
+                            tool.description,
                             tool.schema,
                             toolset.clone(),
                             context.clone(),
@@ -222,19 +305,42 @@ impl AgentLoop {
             system_prompt.push_str(&section);
         }
 
-        let agent = build(handle, &system_prompt, self.max_turns, self.max_tokens);
+        // Session-scoped GenAI telemetry: the conversation id ties the spans of
+        // every turn of this session together, the agent name labels them and
+        // the content policy governs what is recorded (see `crate::telemetry`).
+        let telemetry = GenAiContext::new(
+            self.conversation_id.clone(),
+            self.agent_name
+                .clone()
+                .unwrap_or_else(|| usage_ctx.feature.to_string()),
+            ContentPolicy::from_env(),
+            self.genai_telemetry,
+        );
+        let agent = build(
+            handle,
+            &system_prompt,
+            self.max_turns,
+            self.max_tokens,
+            telemetry.clone(),
+        );
 
+        let financial_context = MeteringContext::for_operation(self.recorder.as_ref(), &usage_ctx);
         Session {
             agent,
             history: Vec::new(),
             max_turns: self.max_turns,
-            routing,
-            loaded_buffer,
-            register_loaded,
+            bridge_inputs: BridgeInputs {
+                routing,
+                loaded_buffer,
+                register_loaded,
+                user_tool_finisher: self.user_tool_finisher.clone(),
+            },
             recorder: self.recorder.clone(),
             usage_ctx,
             model: self.model.clone(),
             request_context,
+            telemetry,
+            financial_context,
         }
     }
 
@@ -260,8 +366,8 @@ impl AgentLoop {
             context,
             system_prompt,
             usage_ctx,
-            move |handle, prompt, max_turns, max_tokens| {
-                ProviderAgent::test(model, prompt, max_turns, max_tokens, handle)
+            move |handle, prompt, max_turns, max_tokens, telemetry| {
+                ProviderAgent::test(model, prompt, max_turns, max_tokens, handle, telemetry)
             },
         )
         .await
@@ -273,15 +379,15 @@ pub struct Session {
     agent: ProviderAgent,
     history: Vec<Message>,
     max_turns: usize,
-    routing: ToolRouter,
-    /// Tools `SearchTools` asked to load, shared with the stream bridge.
-    loaded_buffer: Arc<Mutex<Vec<SearchableTool>>>,
-    /// Registers loaded tools with the live tool server (see [`RegisterFn`]).
-    register_loaded: RegisterFn,
+    /// What every turn's stream bridge is built from: tool routing, the
+    /// on-demand tool loading pair, and the user-tool finisher if any.
+    bridge_inputs: BridgeInputs,
     recorder: Arc<dyn UsageRecorder>,
     usage_ctx: UsageContext,
     model: String,
     request_context: RequestContext,
+    telemetry: GenAiContext,
+    financial_context: Option<MeteringContext>,
 }
 
 impl Session {
@@ -294,11 +400,80 @@ impl Session {
     ///
     /// The returned stream yields [`StreamPart`] items compatible with the
     /// existing DCS consumer code.
-    #[tracing::instrument(name = "invoke_agent", skip_all)]
+    ///
+    /// The run is wrapped in a span the runtime adopts instead of opening an
+    /// `invoke_agent` of its own. With GenAI telemetry on (the default) that
+    /// span *is* the run's `invoke_agent` span: the semconv fields are declared
+    /// on it and the run's usage and output are recorded onto it by the stream
+    /// driver (see `crate::telemetry`). With it off the span is a plain
+    /// `agent.turn`, traced from outside instead. Either way it stays open
+    /// until the returned stream ends.
     pub async fn send_message(
         &mut self,
         messages: Vec<Message>,
     ) -> Result<ChatCompletionStream<'_>, AgentError> {
+        // `agent.stream.*` are recorded by the stream driver as the run ends;
+        // see `StreamLiveness` in `crate::model::router`. Declared on both
+        // shapes of the span because either one can be the run's.
+        let span = if self.telemetry.enabled() {
+            tracing::info_span!(
+                "invoke_agent",
+                gen_ai.operation.name = "invoke_agent",
+                gen_ai.agent.name = %self.telemetry.agent_name(),
+                gen_ai.conversation.id = self.telemetry.conversation_id(),
+                gen_ai.provider.name = self.telemetry.provider_name(),
+                gen_ai.request.model = self.telemetry.model_name(),
+                agent.stream.items = tracing::field::Empty,
+                agent.stream.first_item_ms = tracing::field::Empty,
+                agent.stream.trailing_silence_ms = tracing::field::Empty,
+            )
+        } else {
+            tracing::info_span!(
+                "agent.turn",
+                agent.name = %self.telemetry.agent_name(),
+                agent.stream.items = tracing::field::Empty,
+                agent.stream.first_item_ms = tracing::field::Empty,
+                agent.stream.trailing_silence_ms = tracing::field::Empty,
+            )
+        };
+        let telemetry = self.telemetry.clone();
+        // A newly activated turn may replace the construction-time scope, but
+        // observational/legacy callers must never downgrade an activated session.
+        let current = MeteringContext::current();
+        let financial_context = if current.as_ref().is_some_and(MeteringContext::activated) {
+            current
+        } else if self
+            .financial_context
+            .as_ref()
+            .is_some_and(MeteringContext::activated)
+        {
+            self.financial_context.clone()
+        } else if current.is_some() {
+            MeteringContext::for_operation(self.recorder.as_ref(), &self.usage_ctx)
+        } else {
+            self.financial_context.clone()
+        };
+        let result = MeteringContext::carry(financial_context, self.send_message_in(messages))
+            .instrument(span.clone())
+            .await;
+        if let Err(error) = &result {
+            // The run never started; the span still says why.
+            telemetry.record_agent_failure(
+                &span,
+                "agent_error",
+                genai_telemetry::attr::finish_reason::ERROR,
+                &error.to_string(),
+            );
+        }
+        result
+    }
+
+    async fn send_message_in(
+        &mut self,
+        messages: Vec<Message>,
+    ) -> Result<ChatCompletionStream<'_>, AgentError> {
+        MeteringContext::require_usage(&self.usage_ctx)
+            .map_err(|error| AgentError::Other(error.into()))?;
         self.history = messages;
 
         let Some((prompt, history)) = self.history.split_last() else {
@@ -307,19 +482,26 @@ impl Session {
             )));
         };
 
+        // A session lives for one turn, so whatever the conversation loaded
+        // before is gone. Reload what it called, in the order it first did,
+        // rather than have the model reload each tool every turn.
+        let called = called_catalog_tools(history, &self.request_context.searchable_tools);
+        if !called.is_empty() {
+            (self.bridge_inputs.register_loaded)(called).await;
+        }
+
         let stream = self
             .agent
             .run_stream(
                 prompt.clone(),
                 history.to_vec(),
                 self.max_turns,
-                self.routing.clone(),
-                self.loaded_buffer.clone(),
-                self.register_loaded.clone(),
+                self.bridge_inputs.clone(),
                 self.recorder.clone(),
                 self.usage_ctx.clone(),
                 self.model.clone(),
                 self.request_context.clone(),
+                self.telemetry.clone(),
             )
             .await;
 
@@ -330,4 +512,27 @@ impl Session {
     pub fn get_history(&self) -> &[Message] {
         &self.history
     }
+}
+
+/// The catalog tools `history` called, in the order of their first call.
+fn called_catalog_tools(history: &[Message], catalog: &[SearchableTool]) -> Vec<SearchableTool> {
+    let mut called: Vec<SearchableTool> = Vec::new();
+    for message in history {
+        let Message::Assistant { content, .. } = message else {
+            continue;
+        };
+        for content in content.iter() {
+            let AssistantContent::ToolCall(call) = content else {
+                continue;
+            };
+            let name = &call.function.name;
+            if called.iter().any(|tool| &tool.name == name) {
+                continue;
+            }
+            if let Some(tool) = catalog.iter().find(|tool| &tool.name == name) {
+                called.push(tool.clone());
+            }
+        }
+    }
+    called
 }

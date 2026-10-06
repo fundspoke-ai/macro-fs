@@ -9,8 +9,11 @@ import {
   type JSX,
   onCleanup,
   type Ref,
+  Show,
   useContext,
 } from 'solid-js';
+import { MultiSelectCheckbox } from '../../components/MultiSelectCheckbox';
+import { UnreadIndicator } from '../../components/UnreadIndicator';
 import type { EntityRowConfig } from '../../extractors-notification';
 import type { EntityData, ProjectEntity } from '../../types/entity';
 import type { WithNotification } from '../../types/notification';
@@ -25,11 +28,22 @@ export interface BaseListEntityProps<E extends EntityData = EntityData> {
   checked?: boolean;
   highlighted?: boolean;
   hovered?: boolean;
+  /** Caller-owned quick actions, revealed on pointer hover or keyboard focus. */
+  actions?: JSX.Element;
+  /** Persistent status/action immediately before the timestamp. */
+  leadingAction?: JSX.Element;
   hideContentHits?: boolean;
+  /** Resolved app display name for a linked GitHub PR author, when available. */
+  authorDisplayName?: string;
+  /** Opt-in by the data-owning view; keep nonessential setup off initial render. */
+  deferInteractions?: boolean;
   /** Hide the multi-select checkbox (e.g. read-only embeds outside soup). */
   hideCheckbox?: boolean;
   onChecked?: (checked: boolean, shiftKey: boolean) => void;
   onMouseMove?: () => void;
+  showCalendarAttendance?: boolean;
+  /** Lets standalone collections own their tag-filter navigation. */
+  onFilterByTag?: (optionId: string) => void;
   onProjectClick?: (
     entity: ProjectEntity,
     e: PointerEvent | MouseEvent
@@ -39,13 +53,21 @@ export interface BaseListEntityProps<E extends EntityData = EntityData> {
     location?: SearchLocation
   ) => void;
   entityRowConfig?: EntityRowConfig;
+  /** The row visually closes its group (or the list) — the next row is a
+   * group header or absent. Layouts use it to drop a trailing divider. */
+  isLastInGroup?: boolean;
 }
 
 const WIDE_BREAKPOINT = 512; // @lg container query = 32rem
 
 export interface LayoutProps {
   entity: WithNotification<EntityData>;
+  /** Persistent schedule metadata, including on touch and notification rows. */
+  scheduleStatus?: JSX.Element;
+  actions?: JSX.Element;
+  leadingAction?: JSX.Element;
   checked?: boolean;
+  authorDisplayName?: string;
   hideCheckbox?: boolean;
   onChecked?: (checked: boolean, shiftKey: boolean) => void;
   unread: boolean;
@@ -55,13 +77,17 @@ export interface LayoutProps {
   streamState?: StreamEvent;
   setSnippetContainerRef: (el: HTMLElement) => void;
   chars: number;
+  showCalendarAttendance?: boolean;
+  onFilterByTag?: (optionId: string) => void;
   onProjectClick?: (
     entity: ProjectEntity,
     e: PointerEvent | MouseEvent
   ) => void;
+  /** Show a task's Project with its other properties (Projects enabled). */
+  showProject?: boolean;
 }
 
-export type NarrowLayoutVariant = 'standard' | 'condensed';
+export type NarrowLayoutVariant = 'standard' | 'condensed' | 'single-line';
 
 interface ListLayoutContextValue {
   isWide: Accessor<boolean>;
@@ -125,8 +151,38 @@ export function useCharacterCount(ref: Accessor<HTMLElement | undefined>) {
   return chars;
 }
 
+/**
+ * The single-line rows' indicator cell: the multi-select checkbox while the
+ * row is checked, otherwise the unread dot in an always-reserved slot so
+ * toggling selection doesn't shift the row.
+ */
+export function RowIndicator(props: {
+  checked?: boolean;
+  hideCheckbox?: boolean;
+  onChecked?: (checked: boolean, shiftKey: boolean) => void;
+  unread: boolean;
+}) {
+  return (
+    <Show
+      when={!props.hideCheckbox && props.checked}
+      fallback={
+        <div class="size-4 p-0.5 flex items-center justify-center">
+          <UnreadIndicator active={props.unread} />
+        </div>
+      }
+    >
+      <div class="w-4 overflow-hidden">
+        <MultiSelectCheckbox
+          checked={props.checked}
+          onChecked={props.onChecked}
+        />
+      </div>
+    </Show>
+  );
+}
+
 export function InboxDivider() {
   return (
-    <div class="col-span-3 ml-(--soup-inbox-left-of-content) min-w-full min-h-px max-h-px bg-edge-muted" />
+    <div class="col-span-3 ml-(--soup-inbox-left-of-content) min-w-full min-h-px max-h-px bg-edge-divider" />
   );
 }

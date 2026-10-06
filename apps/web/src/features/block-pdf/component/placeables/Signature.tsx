@@ -1,8 +1,4 @@
-import {
-  activePlaceableIdSignal,
-  newPlaceableSignal,
-} from '@block-pdf/signal/placeables';
-import { blockElementSignal } from '@core/signal/blockElement';
+import { ScopedPortal } from '@core/component/ScopedPortal';
 import Dialog from '@corvu/dialog';
 import Check from '@phosphor/check.svg';
 import Trash from '@phosphor/trash-simple.svg';
@@ -17,8 +13,9 @@ import {
   onMount,
   Show,
 } from 'solid-js';
-import { Portal } from 'solid-js/web';
-import { themeReactive } from '../../../theme/signals/themeReactive';
+import { resolvedThemeColors } from '../../../theme/signals/themeSignals';
+import { usePdfDocument } from '../../context/pdf-document-context';
+import { usePdfViewer } from '../../context/pdf-viewer-context';
 import { useDeletePlaceable, useModifyPayload } from '../../store/placeables';
 import { type AllowableEdits, PayloadMode } from '../../type/placeables';
 
@@ -35,6 +32,8 @@ interface SignatureEditorProps {
 }
 
 function SignatureEditor(props: SignatureEditorProps) {
+  const pdf = usePdfDocument();
+  const rootElement = usePdfViewer().rootElement;
   let canvasRef!: HTMLCanvasElement;
   let signaturePad: SignaturePad | undefined;
 
@@ -42,19 +41,15 @@ function SignatureEditor(props: SignatureEditorProps) {
     signaturePad = new SignaturePad(canvasRef);
   });
 
-  const setActivePlaceable = activePlaceableIdSignal.set;
   const modifyPayload = useModifyPayload();
   const deletePlaceable = useDeletePlaceable();
 
-  const setNewPlaceable = newPlaceableSignal.set;
   const updatePlaceable = createCallback((e: MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
 
-    setNewPlaceable((prev) =>
-      prev?.internalId === props.id ? undefined : prev
-    );
-    setActivePlaceable(undefined);
+    pdf.markup.commands.clearDraftIf(props.id);
+    pdf.markup.commands.clearActive();
 
     if (!signaturePad?.isEmpty()) {
       modifyPayload(props.id, PayloadMode.Signature, {
@@ -77,7 +72,7 @@ function SignatureEditor(props: SignatureEditorProps) {
   );
 
   onMount(() => {
-    const el = blockElementSignal.get();
+    const el = rootElement();
     if (!el) {
       setBlockRect(undefined);
       return;
@@ -122,9 +117,9 @@ function SignatureEditor(props: SignatureEditorProps) {
       // this is because we often prevent default onMouseDown
       noOutsidePointerEvents={false}
     >
-      <Portal mount={document.getElementById('modal') ?? undefined}>
+      <ScopedPortal scope={pdf.portalScope()}>
         <Dialog.Overlay
-          class="flex sm:max-h-full items-center justify-content z-modal-overlay fixed inset-0 bg-modal-overlay"
+          class="dialog-overlay-open-animation flex sm:max-h-full items-center justify-center z-modal-overlay fixed inset-0 bg-modal-overlay"
           style={{
             'max-height': `calc(100dvh - env(safe-area-inset-top, 0px))`,
           }}
@@ -136,11 +131,7 @@ function SignatureEditor(props: SignatureEditorProps) {
             'bg-surface shadow',
             'rounded-lg border border-edge',
             'flex-col justify-start inline-flex gap-3',
-            'duration-100',
-            'data-open:animate-in',
-            'data-open:fade-in-0 data-open:zoom-in-95',
-            'data-closed:animate-out',
-            'data-closed:fade-out-0 data-closed:zoom-out-95'
+            'dialog-content-open-animation'
           )}
           style={positionStyle()}
         >
@@ -150,7 +141,10 @@ function SignatureEditor(props: SignatureEditorProps) {
             ref={canvasRef}
             // SCUFFED THEMING TODO: this filter is janky af, checks if it's a "darkish" or "lightish" theme, we should handle this better
             style={{
-              filter: themeReactive.b0.l[0]() < 0.5 ? 'invert(1)' : 'none',
+              filter:
+                resolvedThemeColors()['surface-0'].l < 0.5
+                  ? 'invert(1)'
+                  : 'none',
             }}
           />
           <div class="flex flex-row w-full justify-center items-center border-t border-edge">
@@ -174,7 +168,7 @@ function SignatureEditor(props: SignatureEditorProps) {
             </Button>
           </div>
         </Dialog.Content>
-      </Portal>
+      </ScopedPortal>
     </Dialog>
   );
 }

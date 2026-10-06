@@ -1,5 +1,8 @@
 //! Outbound calendar adapters.
 
+/// Calendar-service HTTP adapter for the mutation port.
+#[cfg(feature = "mutation-client")]
+pub mod calendar_service_mutations;
 /// Google Calendar API adapter.
 #[cfg(feature = "google")]
 pub mod google;

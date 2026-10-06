@@ -98,16 +98,14 @@ export const InviteModal = () => {
           </div>
 
           <div class="flex justify-end gap-1 pt-2">
-            <Button variant="ghost" class="rounded-xs" onClick={handleClose}>
+            <Button variant="ghost" onClick={handleClose}>
               Cancel
             </Button>
             <Button
               onClick={handleSend}
-              variant={
-                sending() || !parseEmails(value()).length ? 'ghost' : 'active'
-              }
+              variant="strong"
               disabled={sending() || !parseEmails(value()).length}
-              class="rounded-xs font-semibold"
+              class="font-semibold"
             >
               {sending() ? 'Sending…' : 'Send Invites'}
             </Button>
@@ -131,8 +129,8 @@ export const InviteModal = () => {
                     type="button"
                     onClick={handleCopy}
                     size="md"
-                    variant="base"
-                    class="font-medium rounded-xs border px-2"
+                    variant="outline"
+                    class="font-medium border px-2"
                   >
                     <ClipboardIcon class="size-3" />
                     {copied() ? 'Copied!' : 'Copy'}

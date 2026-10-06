@@ -1,5 +1,5 @@
 import { useCanvasFileDrop } from '@block-canvas/signal/fileDrop';
-import { type BlockName, useBlockId, useIsNestedBlock } from '@core/block';
+import type { BlockName } from '@core/block';
 import { FileDropOverlay } from '@core/component/FileDropOverlay';
 import { OldMenu, OldMenuItem } from '@core/component/OldMenu';
 import {
@@ -16,11 +16,8 @@ import { observedSize } from '@core/directive/observedSize';
 import { HEIC_EXTENSIONS, HEIC_MIME_TYPES } from '@core/heic/constants';
 import { registerHotkey } from '@core/hotkey/hotkeys';
 import { TOKENS } from '@core/hotkey/tokens';
-import { createMethodRegistration } from '@core/orchestrator';
-import { blockHotkeyScopeSignal } from '@core/signal/blockElement';
-import { blockHandleSignal } from '@core/signal/load';
+import { HOTKEY_PRIORITY_HIGH } from '@core/hotkey/types';
 import { trackMention } from '@core/signal/mention';
-import { useCanEdit } from '@core/signal/permissions';
 import type { EntityDragEvent } from '@entity';
 import TrashSimple from '@phosphor/trash-simple.svg';
 import Clipboard from '@phosphor-icons/core/regular/clipboard.svg?component-solid';
@@ -55,6 +52,7 @@ import {
   type Tool,
   Tools,
 } from '../constants';
+import { useCanvasDocument } from '../context/canvas-document-context';
 import { useConnect } from '../operation/connect';
 import { fileHeight, fileWidth, useFile } from '../operation/file';
 import { useImage } from '../operation/image';
@@ -70,24 +68,16 @@ import { useClipboard } from '../signal/clipboard';
 import { useNudge } from '../signal/nudge';
 import { useReorder } from '../signal/reorder';
 import { useSelection } from '../signal/selection';
+import { useToolManager } from '../signal/toolManager';
 import {
-  handlersByToolSignal,
-  middleMousePressedSignal,
-  mouseDownPositionSignal,
-  useToolManager,
-} from '../signal/toolManager';
-import {
-  highestOrderSignal,
   useCanvasEdges,
   useCanvasNodes,
   useCreateGroup,
   useDeleteGroup,
-  useExportCanvasData,
 } from '../store/canvasData';
 import { useRenderState } from '../store/RenderState';
 import { type Vector2, vec2 } from '../util/vector2';
 import { createContextMenu } from './ContextMenu';
-import { connectorTypeMenuTriggerSignal } from './TopBar';
 
 false && observedSize;
 false && fileDrop;
@@ -159,10 +149,10 @@ export function handleDelete() {
 }
 
 export function CanvasController(props: ParentProps) {
-  const scopeId = blockHotkeyScopeSignal.get;
-  const canEdit = useCanEdit();
-  const isNestedBlock = useIsNestedBlock();
-  const isDisabled = createMemo(() => isNestedBlock || !canEdit());
+  const canvas = useCanvasDocument();
+  const scopeId = canvas.hotkeyScope;
+  const canEdit = canvas.canEdit;
+  const isDisabled = createMemo(() => canvas.isNested() || !canEdit());
   const renderState = useRenderState();
   const toolManager = useToolManager();
   const nodes = useCanvasNodes();
@@ -184,11 +174,10 @@ export function CanvasController(props: ParentProps) {
   const createGroup = useCreateGroup();
   const deleteGroup = useDeleteGroup();
   const deleteSelection = handleDelete();
-  const blockId = useBlockId();
-  const [middleMousePressed] = middleMousePressedSignal;
-  const [handlersByTool] = handlersByToolSignal;
-  const [_, setConnectorTypeMenuTrigger] = connectorTypeMenuTriggerSignal;
-  const exportCanvasData = useExportCanvasData();
+  const [middleMousePressed] = canvas.state.signals.middleMousePressed;
+  const [handlersByTool] = canvas.state.signals.handlersByTool;
+  const [, setConnectorTypeMenuTrigger] =
+    canvas.state.signals.connectorTypeMenuTrigger;
 
   const imageExtensions = blockNameToFileExtensions.image;
   const imageMimeTypes = blockNameToMimeTypes.image;
@@ -208,15 +197,6 @@ export function CanvasController(props: ParentProps) {
   const acceptedFileExtensions = ENABLE_CANVAS_VIDEO
     ? [...canvasImageExtensions, ...videoExtensions]
     : canvasImageExtensions;
-
-  const blockHandle = blockHandleSignal.get;
-
-  createMethodRegistration(blockHandle, {
-    exportCanvas: async () => {
-      const canvas = exportCanvasData();
-      return canvas;
-    },
-  });
 
   const [domRect, setDomRect] = createSignal<DOMRect | undefined>();
 
@@ -341,6 +321,10 @@ export function CanvasController(props: ParentProps) {
       hotkeyToken: TOKENS.canvas.bringToFront,
     });
 
+    // opt+] / opt+[ / shift+arrows are also bound on the split scope (history
+    // forward/back, focus split). Register as 'add' so the split's commands
+    // survive this block, with high priority so the canvas wins while
+    // mounted; a false return (no selection) falls through to the split's.
     registerHotkey({
       hotkey: 'opt+]',
       scopeId: scopeId(),
@@ -351,6 +335,8 @@ export function CanvasController(props: ParentProps) {
         return true;
       },
       hotkeyToken: TOKENS.canvas.bringForward,
+      registrationType: 'add',
+      handlerPriority: HOTKEY_PRIORITY_HIGH,
     });
 
     registerHotkey({
@@ -375,6 +361,8 @@ export function CanvasController(props: ParentProps) {
         return true;
       },
       hotkeyToken: TOKENS.canvas.sendBackward,
+      registrationType: 'add',
+      handlerPriority: HOTKEY_PRIORITY_HIGH,
     });
 
     registerHotkey({
@@ -613,10 +601,13 @@ export function CanvasController(props: ParentProps) {
       scopeId: scopeId(),
       description: 'Nudge right more',
       keyDownHandler: () => {
+        if (!selection.active()) return false;
         nudge('right', true, true);
         return true;
       },
       hotkeyToken: TOKENS.canvas.nudgeRightMore,
+      registrationType: 'add',
+      handlerPriority: HOTKEY_PRIORITY_HIGH,
     });
 
     registerHotkey({
@@ -657,10 +648,13 @@ export function CanvasController(props: ParentProps) {
       scopeId: scopeId(),
       description: 'Nudge left more',
       keyDownHandler: () => {
+        if (!selection.active()) return false;
         nudge('left', true, true);
         return true;
       },
       hotkeyToken: TOKENS.canvas.nudgeLeftMore,
+      registrationType: 'add',
+      handlerPriority: HOTKEY_PRIORITY_HIGH,
     });
 
     registerHotkey({
@@ -780,7 +774,7 @@ export function CanvasController(props: ParentProps) {
   const centerVec = createMemo(() => {
     return vec2(viewBox().x + viewBox().w / 2, viewBox().y + viewBox().h / 2);
   });
-  const highestOrder = highestOrderSignal.get;
+  const [highestOrder] = canvas.state.signals.highestOrder;
 
   const droppable = createDroppable('canvas-input-' + _id);
   const [dragDropState, { onDragEnd, onDragMove }] = useDragDropContext() ?? [
@@ -865,20 +859,26 @@ export function CanvasController(props: ParentProps) {
     if (entityType === 'channel_message' || entityType === 'channel_thread') {
       return;
     }
-    // Automation and foreign entities aren't yet renderable as canvas mentions.
-    if (entityType === 'automation' || entityType === 'foreign') return;
+    // Routine and foreign entities aren't yet renderable as canvas mentions.
+    if (
+      entityType === 'routine' ||
+      entityType === 'foreign' ||
+      entityType === 'initiative'
+    )
+      return;
     // CRM companies/contacts aren't renderable as canvas mentions.
     if (entityType === 'crm_company') return;
     if (entityType === 'crm_contact') return;
+    if (entityType === 'database') return;
     // Nor are reminders — they have no canvas representation.
-    if (entityType === 'reminder') return;
     // Nor are calendar events.
-    if (entityType === 'calendar_event') return;
+    if (entityType === 'calendar_event' || entityType === 'agent_session')
+      return;
 
     // Track document mention and get UUID
     let mentionUuid: string | undefined;
-    if (blockId && entityType === 'document') {
-      mentionUuid = await trackMention(blockId, 'document', id);
+    if (entityType === 'document') {
+      mentionUuid = await trackMention(canvas.documentId(), 'document', id);
     }
 
     nodes.createNode(
@@ -945,7 +945,7 @@ export function CanvasController(props: ParentProps) {
     dndDragMove(event as EntityDragEvent);
   });
 
-  const [_mouseDownPos, setMouseDownPos] = mouseDownPositionSignal;
+  const [, setMouseDownPos] = canvas.state.signals.mouseDownPosition;
 
   // TODO (seamus) : Make a beter interface with the gesute library.
   const pinch = usePinch(
@@ -1189,9 +1189,7 @@ export function CanvasController(props: ParentProps) {
       </ContextMenu>
       <Show when={isDragging() || droppable.isActiveDroppable}>
         <FileDropOverlay valid={true}>
-          <div class="font-mono">
-            Drop any file here to add it to your canvas
-          </div>
+          Drop any file here to add it to your canvas
         </FileDropOverlay>
       </Show>
       {props.children}

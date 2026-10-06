@@ -1,6 +1,5 @@
-import { senderFromStorageId } from '@queries/channel/message-sender';
-import type { ApiChannelMessage } from '@service-storage/generated/schemas/apiChannelMessage';
-import type { ApiMessageSender } from '@service-storage/generated/schemas/apiMessageSender';
+import { senderFromStorageId } from '@queries/messages/message-sender';
+import type { MessageListItem, MessageSender } from '@service-storage/messages';
 import { describe, expect, it } from 'vitest';
 import { buildChannelMessageListMeta } from '../message-list-meta';
 
@@ -8,11 +7,19 @@ function createMessage(
   id: string,
   createdAt: string,
   senderId = 'user-1',
-  sender: ApiMessageSender = senderFromStorageId(senderId)
-): ApiChannelMessage {
+  sender: MessageSender = senderFromStorageId(senderId)
+): MessageListItem {
   return {
     id,
-    channel_id: 'channel-1',
+    mentions: [],
+    state: {
+      root_id: id,
+      user_id: 'user-1',
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      resolved: false,
+    },
+    parent: { type: 'channel', id: 'channel-1' },
     content: '',
     created_at: createdAt,
     updated_at: createdAt,
@@ -84,9 +91,35 @@ describe('buildChannelMessageListMeta', () => {
     expect(meta.m3.isGroupedWithPrevious).toBe(true);
   });
 
+  it('marks rows above a grouped thread fork with threadRailBelow', () => {
+    const messages = [
+      createMessage('m1', '2026-02-20T09:00:00.000Z'),
+      createMessage('m2', '2026-02-20T09:01:00.000Z'),
+      {
+        ...createMessage('m3', '2026-02-20T09:02:00.000Z'),
+        thread: {
+          preview: [],
+          reply_count: 2,
+          latest_reply_at: '2026-02-20T09:03:00.000Z',
+        },
+      },
+      createMessage('m4', '2026-02-20T10:30:00.000Z'),
+    ];
+
+    const meta = buildChannelMessageListMeta(messages, () => false, true);
+
+    // m3 is grouped into the run but owns a thread: the rail passes down
+    // through m1 (run header) and m2 to reach it.
+    expect(meta.m3.isGroupedWithPrevious).toBe(true);
+    expect(meta.m1.threadRailBelow).toBe(true);
+    expect(meta.m2.threadRailBelow).toBe(true);
+    expect(meta.m3.threadRailBelow).toBeFalsy();
+    expect(meta.m4.threadRailBelow).toBeFalsy();
+  });
+
   it('does not group agent messages triggered by different users, despite a shared bot sender_id', () => {
     const botId = 'bot|00000000-0000-0000-0000-000000000000';
-    const agentSender = (triggeredBy: string): ApiMessageSender => ({
+    const agentSender = (triggeredBy: string): MessageSender => ({
       type: 'bot',
       id: '00000000-0000-0000-0000-000000000000',
       name: 'Macro',

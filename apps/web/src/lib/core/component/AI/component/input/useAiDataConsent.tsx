@@ -56,10 +56,10 @@ export function useAiDataConsentGate() {
                 data is not retained or used for training.
               </p>
               <div class="flex justify-end mt-4 gap-2">
-                <Button variant="base" onClick={denyConsent}>
+                <Button variant="ghost" onClick={denyConsent}>
                   Cancel
                 </Button>
-                <Button variant="base" onClick={grantConsent}>
+                <Button variant="strong" onClick={grantConsent}>
                   Accept
                 </Button>
               </div>

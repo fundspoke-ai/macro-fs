@@ -1,4 +1,9 @@
 import { DEV_MODE_ENV } from '@core/constant/featureFlags';
+import {
+  isSlackPipedreamSlug,
+  SLACK_CONNECT_SLUG,
+  SLACK_PIPEDREAM_SLUGS,
+} from '@core/pipedream/slugs';
 import IconDatadog from '@icon/mcp-datadog.svg';
 import IconGithub from '@icon/mcp-github.svg';
 import IconGrafana from '@icon/mcp-grafana.svg';
@@ -13,11 +18,13 @@ export type SvgIcon = Component<JSX.SvgSVGAttributes<SVGSVGElement>>;
 export const QUICK_CONNECT_SERVERS = [
   {
     server_name: 'GitHub',
+    app_slug: 'github',
     url: 'https://api.githubcopilot.com/mcp',
     icon: IconGithub as SvgIcon,
   },
   {
     server_name: 'Linear',
+    app_slug: 'linear',
     url: 'https://mcp.linear.app/mcp',
     icon: IconLinear as SvgIcon,
   },
@@ -26,6 +33,7 @@ export const QUICK_CONNECT_SERVERS = [
     ? ([
         {
           server_name: 'Slack',
+          app_slug: SLACK_CONNECT_SLUG,
           url: 'https://mcp.slack.com/mcp',
           icon: IconSlack as SvgIcon,
         },
@@ -33,21 +41,25 @@ export const QUICK_CONNECT_SERVERS = [
     : []),
   {
     server_name: 'Notion',
+    app_slug: 'notion',
     url: 'https://mcp.notion.com/mcp',
     icon: IconNotion as SvgIcon,
   },
   {
     server_name: 'PostHog',
+    app_slug: 'posthog',
     url: 'https://mcp.posthog.com/mcp',
     icon: IconPostHog as SvgIcon,
   },
   {
     server_name: 'Datadog',
+    app_slug: 'datadog',
     url: 'https://mcp.datadoghq.com/mcp',
     icon: IconDatadog as SvgIcon,
   },
   {
     server_name: 'Grafana',
+    app_slug: 'grafana',
     url: 'https://mcp.grafana.com/mcp',
     icon: IconGrafana as SvgIcon,
   },
@@ -83,6 +95,24 @@ export const FEATURED_MCP_SERVERS: FeaturedMcpServer[] =
 export const QUICK_CONNECT_ICON_MAP: Map<string, SvgIcon> = new Map(
   QUICK_CONNECT_SERVERS.map((s) => [s.url, s.icon])
 );
+
+/** Bundled connector icons keyed by Pipedream app slug (Pipedream flow). */
+export const PIPEDREAM_ICON_MAP: Map<string, SvgIcon> = new Map([
+  ...QUICK_CONNECT_SERVERS.map((s): [string, SvgIcon] => [s.app_slug, s.icon]),
+  ...SLACK_PIPEDREAM_SLUGS.map((slug): [string, SvgIcon] => [
+    slug,
+    IconSlack as SvgIcon,
+  ]),
+]);
+
+/**
+ * Whether a Pipedream catalog app should be offered in this environment.
+ * Mirrors the gating in {@link QUICK_CONNECT_SERVERS} (Slack is dev-only).
+ */
+export function pipedreamAppAvailableInEnv(appSlug: string): boolean {
+  if (DEV_MODE_ENV) return true;
+  return !isSlackPipedreamSlug(appSlug);
+}
 
 const SERVER_NAME_ICON_MAP: Map<string, SvgIcon> = new Map(
   QUICK_CONNECT_SERVERS.map((s) => [s.server_name.toLowerCase(), s.icon])

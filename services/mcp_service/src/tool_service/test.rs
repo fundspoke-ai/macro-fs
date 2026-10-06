@@ -7,6 +7,7 @@ fn empty_service() -> AuthenticatedToolService<()> {
         Arc::new(AsyncToolCollection::new()),
         (),
         "https://macro.com".to_owned(),
+        url::Url::parse("https://static-file-service.macro.com").unwrap(),
     )
 }
 
@@ -27,6 +28,24 @@ async fn server_info_advertises_macro_tools() {
 }
 
 #[tokio::test]
+async fn server_info_advertises_the_web_app_favicon() {
+    let info = empty_service().get_info();
+
+    let icons = info
+        .server_info
+        .icons
+        .expect("server should advertise an icon");
+    let [icon] = icons.as_slice() else {
+        panic!("server should advertise exactly one icon");
+    };
+
+    // The same file the web app's <link rel="icon"> points at.
+    assert_eq!(icon.src, "https://macro.com/app/macro-favicon.svg");
+    assert_eq!(icon.mime_type.as_deref(), Some("image/svg+xml"));
+    assert_eq!(icon.sizes.as_deref(), Some(["any".to_owned()].as_slice()));
+}
+
+#[tokio::test]
 async fn server_instructions_describe_available_workflows() {
     let instructions = empty_service()
         .get_info()
@@ -40,8 +59,14 @@ async fn server_instructions_describe_available_workflows() {
         "ReadContent",
         "ReadMetadata",
         "ReadThread",
+        "ReadChannelMessages",
+        "ReadChannelThread",
+        "ReadChannelMessageContext",
+        "downloadable URLs",
         "CreateDocument",
         "ListEntities",
+        "ListSkills",
+        "ReadSkill",
     ] {
         assert!(
             instructions.contains(expected_text),
@@ -83,6 +108,78 @@ async fn server_instructions_link_items_as_urls_not_mention_tags() {
 #[tokio::test]
 async fn empty_toolset_lists_no_tools() {
     assert!(empty_service().tool_definitions().is_empty());
+}
+
+/// Anthropic's connector directory rejects any tool missing a display title or
+/// the applicable `readOnlyHint`/`destructiveHint`, and any tool name over 64
+/// characters. Assert it against the toolset the server actually exposes, so a
+/// newly added tool can't quietly regress the submission.
+#[test]
+fn every_exposed_tool_meets_directory_requirements() {
+    let tools = ai_tools::tools_for(ai_tools::AiHost::Mcp);
+    assert!(
+        !tools.toolset.tools.is_empty(),
+        "the MCP toolset should not be empty"
+    );
+
+    for (name, tool) in tools.toolset.tools.iter() {
+        let annotations = mcp_annotations(&tool.annotations);
+
+        assert!(
+            name.len() <= 64,
+            "{name} exceeds the 64-character tool name limit"
+        );
+        assert!(
+            annotations
+                .title
+                .as_deref()
+                .is_some_and(|title| !title.trim().is_empty()),
+            "{name} has no display title"
+        );
+        assert!(
+            annotations.read_only_hint.is_some(),
+            "{name} has no readOnlyHint"
+        );
+        assert!(
+            annotations.destructive_hint.is_some(),
+            "{name} has no destructiveHint"
+        );
+        assert!(
+            !(annotations.read_only_hint == Some(true)
+                && annotations.destructive_hint == Some(true)),
+            "{name} claims to be both read-only and destructive"
+        );
+    }
+}
+
+#[test]
+fn read_only_tools_map_to_read_only_hint() {
+    let annotations = mcp_annotations(&ai_toolset::ToolAnnotations::read_only("Read document"));
+
+    assert_eq!(annotations.title.as_deref(), Some("Read document"));
+    assert_eq!(annotations.read_only_hint, Some(true));
+    assert_eq!(annotations.destructive_hint, Some(false));
+    assert_eq!(annotations.idempotent_hint, Some(true));
+    assert_eq!(annotations.open_world_hint, Some(false));
+}
+
+#[test]
+fn destructive_tools_map_to_destructive_hint() {
+    let annotations =
+        mcp_annotations(&ai_toolset::ToolAnnotations::destructive("Send email").with_open_world());
+
+    assert_eq!(annotations.title.as_deref(), Some("Send email"));
+    assert_eq!(annotations.read_only_hint, Some(false));
+    assert_eq!(annotations.destructive_hint, Some(true));
+    assert_eq!(annotations.open_world_hint, Some(true));
+}
+
+#[test]
+fn additive_tools_set_neither_hint() {
+    let annotations = mcp_annotations(&ai_toolset::ToolAnnotations::additive("Create document"));
+
+    assert_eq!(annotations.read_only_hint, Some(false));
+    assert_eq!(annotations.destructive_hint, Some(false));
 }
 
 #[test]

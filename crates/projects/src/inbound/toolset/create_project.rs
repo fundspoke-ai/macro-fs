@@ -1,6 +1,7 @@
 //! CreateProject tool for creating projects (folders).
 
 use ai_toolset::{AsyncTool, RequestContext, ServiceContext, ToolCallError, ToolResult};
+use ai_toolset::{ToolAnnotated, ToolAnnotations};
 use anyhow::Context;
 use async_trait::async_trait;
 use entity_access::domain::models::EditAccessLevel;
@@ -8,6 +9,7 @@ use entity_access::domain::ports::EntityAccessService;
 use entity_mutation::MoveEntity;
 use model::project::request::CreateProjectRequest;
 use model_entity::EntityType;
+use model_owner::CreationPrincipal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +62,10 @@ pub struct CreateProject {
     pub parent_project_id: Option<uuid::Uuid>,
 }
 
+impl ToolAnnotated for CreateProject {
+    const ANNOTATIONS: ToolAnnotations = ToolAnnotations::additive("Create project");
+}
+
 #[async_trait]
 impl<PSvc, ESvc, DSvc, CSvc, EmSvc> AsyncTool<ProjectToolContext<PSvc, ESvc, DSvc, CSvc, EmSvc>>
     for CreateProject
@@ -104,7 +110,10 @@ where
         let project = service_context
             .service
             .create_project(
-                user_id,
+                &CreationPrincipal::BotForUser {
+                    bot: service_context.actor,
+                    user: user_id,
+                },
                 CreateProjectRequest {
                     name: self.project_name.clone(),
                     project_parent_id: self.parent_project_id,

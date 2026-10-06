@@ -4,21 +4,24 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use either::Either;
 use entity_access::domain::models::{EntityAccessReceipt, MemberTeamRole};
-use item_filters::ast::{
-    call::CallLiteral,
-    channel::{ChannelLiteral, ChannelThreadLiteral},
-    chat::ChatLiteral,
-    crm_company::CrmCompanyLiteral,
-    document::DocumentLiteral,
-    email::EmailLiteral,
-    foreign_entity::ForeignEntityLiteral,
-    project::ProjectLiteral,
+use item_filters::{
+    SharedEmailFilter,
+    ast::{
+        call::CallLiteral,
+        channel::{ChannelLiteral, ChannelThreadLiteral},
+        chat::ChatLiteral,
+        crm_company::CrmCompanyLiteral,
+        document::DocumentLiteral,
+        email::EmailLiteral,
+        foreign_entity::ForeignEntityLiteral,
+        project::ProjectLiteral,
+    },
 };
+use model_owner::Owner;
 use models_pagination::{Paginated, PaginatedCursor};
 use models_properties::service::property_definition_with_options::PropertyDefinitionWithOptions;
-use models_soup::document::SoupDocument;
+use models_soup::{document::SoupDocument, item::SoupItem};
 use soup::domain::{
     models::{
         EnrichedSoupItem, GroupedSortRequest, IntoSoupReqAst, SoupErr, SoupPropertiesField,
@@ -88,7 +91,7 @@ impl SoupService for RecordingSoupService {
             });
         let page: PaginatedCursor<SoupItem<()>, String, SimpleSortMethod, T> =
             Paginated::from_parts(items, None);
-        Ok(Either::Left(page))
+        Ok(SoupOutput::Simple(page))
     }
 
     async fn get_user_soup_with_properties<T>(
@@ -181,7 +184,7 @@ fn document_named(id: Uuid, name: impl Into<String>) -> SoupItem<()> {
     SoupItem::Document(SoupDocument {
         id,
         document_version_id: 1,
-        owner_id: user("macro|owner@example.com"),
+        owner_id: Owner::from_principal_str("macro|owner@example.com").expect("valid owner"),
         name: name.into(),
         file_type: None,
         sha: None,
@@ -208,6 +211,40 @@ fn collect_ids<T>(expr: &Expr<T>, literal_id: impl Copy + Fn(&T) -> Option<Uuid>
         }
         Expr::Not(inner) => collect_ids(inner, literal_id),
         Expr::Literal(literal) => literal_id(literal).into_iter().collect(),
+    }
+}
+
+/// Collect thread IDs from an expression that contains only positive thread-ID literals.
+fn positive_email_thread_ids(expr: &Expr<EmailLiteral>) -> Option<HashSet<Uuid>> {
+    match expr {
+        Expr::And(left, right) | Expr::Or(left, right) => {
+            let mut ids = positive_email_thread_ids(left)?;
+            ids.extend(positive_email_thread_ids(right)?);
+            Some(ids)
+        }
+        Expr::Not(_) => None,
+        Expr::Literal(EmailLiteral::ThreadId(id)) => Some(HashSet::from([*id])),
+        Expr::Literal(_) => None,
+    }
+}
+
+/// Return whether positive thread IDs are combined with shared-thread inclusion via `And`.
+fn includes_shared_threads(expr: &Expr<EmailLiteral>, expected_ids: &HashSet<Uuid>) -> bool {
+    let is_shared_include = |expr: &Expr<EmailLiteral>| {
+        matches!(
+            expr,
+            Expr::Literal(EmailLiteral::Shared(SharedEmailFilter::Include))
+        )
+    };
+    let has_expected_ids =
+        |expr: &Expr<EmailLiteral>| positive_email_thread_ids(expr).as_ref() == Some(expected_ids);
+
+    match expr {
+        Expr::And(left, right) => {
+            (has_expected_ids(left) && is_shared_include(right))
+                || (is_shared_include(left) && has_expected_ids(right))
+        }
+        Expr::Or(_, _) | Expr::Not(_) | Expr::Literal(_) => false,
     }
 }
 
@@ -345,8 +382,8 @@ async fn context_loader_does_not_cache_across_realtime_updates() {
         .expect("second load succeeds")
         .expect("second item exists");
 
-    assert!(matches!(first, SoupItem::Document(document) if document.name == "First"));
-    assert!(matches!(second, SoupItem::Document(document) if document.name == "Second"));
+    assert!(matches!(first.item, SoupItem::Document(document) if document.name == "First"));
+    assert!(matches!(second.item, SoupItem::Document(document) if document.name == "Second"));
     assert_eq!(calls.lock().expect("calls lock").len(), 2);
 }
 
@@ -365,6 +402,20 @@ async fn context_loader_returns_none_for_a_missing_item() {
         .expect("missing item is not a loader failure");
 
     assert!(item.is_none());
+}
+
+#[test]
+fn email_entity_filter_includes_shared_threads() {
+    let thread_id = Uuid::from_u128(20);
+    let entities = vec![EntityType::EmailThread.with_entity_string(thread_id.to_string())];
+
+    let ast = entity_filter_ast(&entities).expect("valid AST");
+    let email_filter = ast.email_filter.tree.as_deref().expect("email filter");
+
+    assert!(includes_shared_threads(
+        email_filter,
+        &HashSet::from([thread_id])
+    ));
 }
 
 #[test]
@@ -425,16 +476,10 @@ fn encodes_requested_ids_and_disables_unrequested_entity_branches() {
         ),
         HashSet::from([nil])
     );
-    assert_eq!(
-        collect_ids(
-            ast.email_filter.tree.as_deref().expect("email filter"),
-            |literal| match literal {
-                EmailLiteral::ThreadId(id) => Some(*id),
-                _ => None,
-            }
-        ),
-        HashSet::from([nil])
-    );
+    assert!(includes_shared_threads(
+        ast.email_filter.tree.as_deref().expect("email filter"),
+        &HashSet::from([nil])
+    ));
     assert_eq!(
         collect_ids(
             ast.channel_thread_filter
@@ -480,5 +525,40 @@ fn encodes_requested_ids_and_disables_unrequested_entity_branches() {
             }
         ),
         HashSet::from([nil])
+    );
+}
+
+#[test]
+fn initiative_hydration_targets_exact_ids_and_disables_unrequested_initiatives() {
+    let id = Uuid::from_u128(42);
+    let entities = vec![EntityType::Initiative.with_entity_string(id.to_string())];
+    let ast = entity_filter_ast(&entities).unwrap();
+    assert!(
+        matches!(ast.initiative_filter.as_deref(), Some(Expr::Literal(InitiativeLiteral::Id(actual))) if *actual == id)
+    );
+    let ast =
+        entity_filter_ast(&[EntityType::Document.with_entity_string(id.to_string())]).unwrap();
+    assert!(
+        matches!(ast.initiative_filter.as_deref(), Some(Expr::Literal(InitiativeLiteral::Id(actual))) if actual.is_nil())
+    );
+}
+
+#[test]
+fn database_row_hydration_targets_exact_ids_and_rules_rows_out_otherwise() {
+    use item_filters::ast::database_row::DatabaseRowLiteral;
+    let row = Uuid::from_u128(0x70000000_0000_0000_0000_000000000001);
+
+    let ast =
+        entity_filter_ast(&[EntityType::DatabaseRow.with_entity_string(row.to_string())]).unwrap();
+    assert_eq!(
+        ast.database_row_filter.as_deref(),
+        Some(&Expr::val(DatabaseRowLiteral::Id(row)))
+    );
+
+    let ast =
+        entity_filter_ast(&[EntityType::Document.with_entity_string(row.to_string())]).unwrap();
+    assert_eq!(
+        ast.database_row_filter.as_deref(),
+        Some(&Expr::val(DatabaseRowLiteral::Id(Uuid::nil())))
     );
 }

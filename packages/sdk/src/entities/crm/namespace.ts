@@ -1,6 +1,8 @@
 import type {
   CreateCrmCompanyRequest,
+  CrmStagesResponse,
   CrmTeamSettingsResponse,
+  ReplaceCrmStagesRequest,
   UpdateCrmTeamSettingsRequest,
 } from '../../../generated/storage/types.gen';
 import { unwrap } from '../../utils';
@@ -21,11 +23,40 @@ export class CrmNamespace {
     return Contact.byId(this.client, id);
   }
 
+  /** Resolve a CRM contact by email in the caller's current team, if present. */
+  async contactByEmail(email: string): Promise<Contact | undefined> {
+    const { contact } = unwrap(
+      await this.client.storage.getContactByEmail({
+        query: { email },
+      })
+    );
+    return contact ? Contact.from(this.client, contact) : undefined;
+  }
+
+  /**
+   * Search the caller's current team's CRM contacts whose email or name
+   * contains `query` (case-insensitive), most recently interacted first.
+   * An empty query lists the most recent contacts.
+   *
+   * @param opts.limit Maximum contacts to return (1-500, default 20).
+   */
+  async searchContacts(
+    query: string,
+    opts: { limit?: number } = {}
+  ): Promise<Contact[]> {
+    const { contacts } = unwrap(
+      await this.client.storage.searchContacts({
+        query: { query, limit: opts.limit },
+      })
+    );
+    return contacts.map((contact) => Contact.from(this.client, contact));
+  }
+
   /** Create a CRM company for the caller's current team. */
   async createCompany(opts: CreateCrmCompanyRequest): Promise<Company> {
     return Company.from(
       this.client,
-      unwrap(await this.client.storage.createCrmCompany({ body: opts })),
+      unwrap(await this.client.storage.createCrmCompany({ body: opts }))
     );
   }
 
@@ -36,11 +67,21 @@ export class CrmNamespace {
 
   /** Partially update the caller's current team's CRM settings. */
   async updateSettings(
-    settings: UpdateCrmTeamSettingsRequest,
+    settings: UpdateCrmTeamSettingsRequest
   ): Promise<CrmTeamSettingsResponse> {
     return unwrap(
-      await this.client.storage.putCrmTeamSettings({ body: settings }),
+      await this.client.storage.putCrmTeamSettings({ body: settings })
     );
+  }
+
+  /** Replace the caller's current team's deal stages, in pipeline order. */
+  async setStages(stages: ReplaceCrmStagesRequest): Promise<CrmStagesResponse> {
+    return unwrap(await this.client.storage.putCrmTeamStages({ body: stages }));
+  }
+
+  /** Reset the caller's current team's deal stages to the defaults. */
+  async resetStages(): Promise<void> {
+    unwrap(await this.client.storage.resetCrmTeamStages());
   }
 
   /** Search CRM companies by name/domain, most relevant first, auto-paginated. */

@@ -9,6 +9,9 @@ use std::str::FromStr;
 use strum::EnumIter;
 use thiserror::Error;
 
+#[cfg(test)]
+mod test;
+
 /// Indicates we eoncountered an unknown string value while attempting to construct type T
 #[derive(Debug, Error)]
 #[error("{0} is not a supported {t}", t = std::any::type_name::<T>())]
@@ -256,6 +259,12 @@ generate_file_types!(
     ),
     (Pdf, "pdf", "application/pdf", Pdf),
     (Md, "md", "text/markdown", Md),
+    (
+        Spreadsheet,
+        "spreadsheet",
+        "application/x-macro-spreadsheet",
+        Document
+    ),
     (Canvas, "canvas", "application/x-macro-canvas", Canvas),
     // Code block: generated from VS Code extensions {
     (Coffee, "coffee", "text/plain", Code),
@@ -713,6 +722,12 @@ generate_file_types!(
     (Ps, "ps", "application/postscript", Vector),
     (Dxf, "dxf", "image/vnd.dxf", Vector),
     (Dwg, "dwg", "image/vnd.dwg", Vector),
+    (Fig, "fig", "application/x-figma", Vector),
+    // Photoshop documents (`.psb` is the large document format) are layered
+    // design files, not pictures: they belong with the design files, so
+    // nothing routes them to image viewers or decodes them as rasters.
+    (Psd, "psd", "image/vnd.adobe.photoshop", Vector),
+    (Psb, "psb", "image/vnd.adobe.photoshop", Vector),
     // 3D files
     (Stl, "stl", "model/stl", ThreeD),
     (Obj, "obj", "model/obj", ThreeD),

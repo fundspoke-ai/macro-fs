@@ -1,14 +1,14 @@
 import { GithubPullRequestStatusIcon } from '@components/app/side-panel';
-import { useBlockAliasedName, useBlockId } from '@core/block';
 import { TOKENS } from '@core/hotkey/tokens';
 import { copyBranchNameToClipboard } from '@core/util/branchName';
 import GithubIcon from '@icon/mcp-github.svg';
 import GitBranch from '@phosphor/git-branch.svg';
 import { useDocumentGithubPullRequestsQuery } from '@queries/storage/github-pull-requests';
 import type { GithubPullRequest } from '@service-storage/generated/schemas';
-import { Button, Layer } from '@ui';
+import { badgeTriggerClasses, CopyButton, Layer } from '@ui';
 import { cn } from '@ui/utils/classname';
 import { createMemo, For, type JSX, Show, Suspense } from 'solid-js';
+import { useMarkdownDocument } from '../context/markdown-document-context';
 
 const PILL_CLASS = cn(
   'inline-flex items-center gap-1.5 min-w-0 border border-edge-muted',
@@ -53,7 +53,7 @@ function InlineTaskGithubPullRequestsSkeleton(): JSX.Element {
         class={cn(PILL_CLASS, 'pointer-events-none select-none')}
       >
         <GithubIcon class="size-3 shrink-0 text-ink-extra-muted" />
-        <span class="skeleton-shimmer h-3 w-24 rounded-full bg-ink/10" />
+        <span class="skeleton-shimmer h-3 w-24 rounded-full bg-skeleton" />
       </div>
     </Layer>
   );
@@ -135,25 +135,34 @@ function InlineTaskGithubPullRequestsContent(props: {
         }}
       </For>
       <Show when={!isWaitingForPullRequests() && pullRequests().length === 0}>
-        <Button
-          variant="ghost"
+        <CopyButton
+          variant="outline"
           size="sm"
+          noTouchResize
           depth={2}
           tooltip="Copy branch name"
+          aria-label="Copy branch name"
           hotkey={TOKENS.entity.action.copyBranchName}
-          class={cn(PILL_CLASS, 'bg-surface px-1.5')}
-          onClick={() => void copyBranchNameToClipboard(props.blockId)}
+          class={badgeTriggerClasses({
+            variant: 'outline',
+            size: 'sm',
+            class: 'gap-1.5 bg-surface-2 border border-edge',
+          })}
+          onClick={() =>
+            copyBranchNameToClipboard(props.blockId, { silent: true })
+          }
         >
           <GitBranch class="size-3 shrink-0" />
-        </Button>
+        </CopyButton>
       </Show>
     </>
   );
 }
 
 export function InlineTaskGithubPullRequests(): JSX.Element {
-  const blockId = useBlockId();
-  const isTask = useBlockAliasedName() === 'task';
+  const { documentId, kind } = useMarkdownDocument();
+  const blockId = documentId();
+  const isTask = kind() === 'task';
 
   return (
     <Show when={isTask}>

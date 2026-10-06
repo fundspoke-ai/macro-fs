@@ -1,3 +1,4 @@
+import { match } from 'ts-pattern';
 import {
   ArrayQueue,
   BebopSerializer,
@@ -9,6 +10,7 @@ import {
   WebsocketEvent,
   type WebsocketEventListener,
 } from '../websocket';
+import { intoFrames, Reassembler } from '../websocket/platform/framing';
 import {
   FromPeer,
   FromRemote,
@@ -50,7 +52,7 @@ export class GatewaySyncTransport {
    */
   public attach(
     documentId: string,
-    initialToken: string,
+    initialToken: string | undefined,
     refreshToken: () => Promise<string>
   ): SyncSocket {
     const existing = this.docs.get(documentId);
@@ -79,9 +81,8 @@ export class GatewaySyncTransport {
       .withSerializer(new BebopSerializer(ToRouter, FromRouter))
       .withBackoff(new ExponentialBackoff(250, 5))
       .withMaxRetries(20)
-      // Frames sent while the gateway socket is down are flushed, in order,
-      // on reconnect — the re-subscribes are enqueued first (see onReconnect),
-      // so buffered document frames land after their Subscribe.
+      // Document frames are held by each virtual socket until the router
+      // acknowledges its fresh subscription.
       .withBuffer(new ArrayQueue())
       .withHeartbeat({
         interval: 10_000,
@@ -138,9 +139,7 @@ export class GatewaySyncTransport {
 }
 
 type ListenerSets = {
-  [K in WebsocketEvent]?: Set<
-    WebsocketEventListener<K, IFromPeer, FromRemote>
-  >;
+  [K in WebsocketEvent]?: Set<WebsocketEventListener<K, IFromPeer, FromRemote>>;
 };
 
 /** Backoff for per-document re-subscribes after an upstream drop. */
@@ -161,6 +160,8 @@ class VirtualSyncSocket implements SyncSocket {
   private readonly documentId: string;
   private readonly refreshToken: () => Promise<string>;
   private initialToken: string | undefined;
+  private reassembler = new Reassembler();
+  private subscriptionAttempt = 0;
 
   private readonly listeners: ListenerSets = {};
   private state: 'subscribing' | 'open' | 'dropped' | 'closed' = 'subscribing';
@@ -173,7 +174,7 @@ class VirtualSyncSocket implements SyncSocket {
   public constructor(
     transport: GatewaySyncTransport,
     documentId: string,
-    initialToken: string,
+    initialToken: string | undefined,
     refreshToken: () => Promise<string>
   ) {
     this.transport = transport;
@@ -185,23 +186,19 @@ class VirtualSyncSocket implements SyncSocket {
   public get connectionState(): WebsocketConnectionState {
     const gateway = this.transport.socket().connectionState;
     if (gateway !== WebsocketConnectionState.Open) return gateway;
-    switch (this.state) {
-      case 'open':
-        return WebsocketConnectionState.Open;
-      case 'subscribing':
-        return WebsocketConnectionState.Connecting;
-      case 'dropped':
-        return WebsocketConnectionState.Reconnecting;
-      case 'closed':
-        return WebsocketConnectionState.Closed;
-    }
+    return match(this.state)
+      .with('open', () => WebsocketConnectionState.Open)
+      .with('subscribing', () => WebsocketConnectionState.Connecting)
+      .with('dropped', () => WebsocketConnectionState.Reconnecting)
+      .with('closed', () => WebsocketConnectionState.Closed)
+      .exhaustive();
   }
 
   public send(message: IFromPeer): boolean {
     if (this.state === 'closed') return false;
-    if (this.state === 'dropped') {
-      // The router has no route for us right now; hold the frame until the
-      // re-subscribe goes out (the router buffers anything sent after it).
+    if (this.state !== 'open') {
+      // Hold edits until fresh authorization and the downstream handshake
+      // complete. This also prevents stale frames overtaking a resubscribe.
       this.pending.push(message);
       return true;
     }
@@ -229,6 +226,8 @@ class VirtualSyncSocket implements SyncSocket {
         .send(ToRouter.fromRouterUnsubscribe({ docId: this.documentId }));
     }
     this.state = 'closed';
+    this.subscriptionAttempt++;
+    this.pending = [];
     this.transport.detach(this.documentId);
   }
 
@@ -261,28 +260,28 @@ class VirtualSyncSocket implements SyncSocket {
 
   /** Send `RouterSubscribe`, minting a fresh token when the initial is spent. */
   public subscribe(): void {
-    const send = (token: string) => {
-      if (this.state === 'closed') return;
-      this.state = 'subscribing';
+    if (this.state === 'closed') return;
+    const attempt = ++this.subscriptionAttempt;
+    this.state = 'subscribing';
+    void this.authorizeSubscription(attempt);
+  }
+
+  private async authorizeSubscription(attempt: number): Promise<void> {
+    const initial = this.initialToken;
+    this.initialToken = undefined;
+    try {
+      const token = initial ?? (await this.refreshToken());
+      if (this.state === 'closed' || attempt !== this.subscriptionAttempt)
+        return;
       this.transport
         .socket()
         .send(ToRouter.fromRouterSubscribe({ docId: this.documentId, token }));
-      // The router buffers frames sent after Subscribe while it dials, so the
-      // held-back frames can flush immediately, in order.
-      const held = this.pending.splice(0);
-      for (const message of held) this.sendFrame(message);
-    };
-
-    const initial = this.initialToken;
-    this.initialToken = undefined;
-    if (initial) {
-      send(initial);
-      return;
-    }
-    void this.refreshToken().then(send, () => {
-      // Token refresh failed (offline, auth hiccup): retry as a re-subscribe.
+    } catch {
+      if (this.state === 'closed' || attempt !== this.subscriptionAttempt)
+        return;
+      this.state = 'dropped';
       this.scheduleResubscribe();
-    });
+    }
   }
 
   public resubscribe(): void {
@@ -293,6 +292,9 @@ class VirtualSyncSocket implements SyncSocket {
   public onSubscribed(): void {
     const reconnected = this.wasEverOpen;
     this.state = 'open';
+    this.reassembler = new Reassembler();
+    const pending = this.pending.splice(0);
+    for (const message of pending) this.sendFrame(message);
     this.wasEverOpen = true;
     this.resubscribeDelay = RESUBSCRIBE_BASE_MS;
     // Mirror the concrete Websocket's ordering: Reconnect (when applicable)
@@ -309,7 +311,9 @@ class VirtualSyncSocket implements SyncSocket {
   }
 
   public onDocFrame(payload: Uint8Array): void {
-    const message = FromRemote.decode(payload);
+    const complete = this.reassembler.push(payload);
+    if (!complete) return;
+    const message = FromRemote.decode(complete);
     this.dispatch(
       WebsocketEvent.Message,
       new MessageEvent(WebsocketEvent.Message, { data: message })
@@ -319,6 +323,8 @@ class VirtualSyncSocket implements SyncSocket {
   public onDocClosed(code: number, reason: string): void {
     if (this.state === 'closed') return;
     this.state = 'dropped';
+    this.subscriptionAttempt++;
+    this.reassembler = new Reassembler();
     this.dispatch(
       WebsocketEvent.Close,
       new CloseEvent(WebsocketEvent.Close, { code, reason, wasClean: false })
@@ -332,6 +338,8 @@ class VirtualSyncSocket implements SyncSocket {
     // for the transport's Reconnect handler to re-subscribe us.
     this.clearResubscribeTimer();
     this.state = 'dropped';
+    this.subscriptionAttempt++;
+    this.reassembler = new Reassembler();
     this.dispatch(WebsocketEvent.Close, event);
   }
 
@@ -351,12 +359,15 @@ class VirtualSyncSocket implements SyncSocket {
   }
 
   private sendFrame(message: IFromPeer): boolean {
-    return this.transport.socket().send(
-      ToRouter.fromRouterFrame({
-        docId: this.documentId,
-        payload: FromPeer.encode(message),
-      })
-    );
+    for (const payload of intoFrames(FromPeer.encode(message))) {
+      if (
+        !this.transport
+          .socket()
+          .send(ToRouter.fromRouterFrame({ docId: this.documentId, payload }))
+      )
+        return false;
+    }
+    return true;
   }
 
   private scheduleResubscribe(): void {

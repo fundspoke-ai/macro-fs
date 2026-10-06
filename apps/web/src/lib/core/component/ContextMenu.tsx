@@ -12,6 +12,7 @@ import {
 import { Hotkey } from '@ui/components/Hotkey';
 import {
   type Component,
+  type ComponentProps,
   createEffect,
   type JSX,
   Match,
@@ -19,6 +20,7 @@ import {
   type ParentProps,
   Show,
   Switch,
+  splitProps,
 } from 'solid-js';
 import { Dynamic } from 'solid-js/web';
 
@@ -26,7 +28,9 @@ import { Dynamic } from 'solid-js/web';
  * ContextMenu-only abstractions. The DropdownMenu equivalents that used to
  * live alongside these (in the old `Menu.tsx`) have been retired in favor of
  * `@ui` `Dropdown`. Right-click menus still use this file because they need
- * separate behavior + positioning from the click-triggered Dropdown.
+ * separate behavior + positioning from the click-triggered Dropdown. The
+ * content wrapper also accepts a click-menu content component when a surface
+ * (such as sidebar Search) should match the context menus.
  */
 
 type BaseMenuItemWrapperProps = {
@@ -272,19 +276,42 @@ export function MenuGroup(props: { children: JSX.Element; class?: string }) {
   );
 }
 
-export function GroupLabel(props: { children: JSX.Element }) {
+/**
+ * Solid delegates a portal's events to where it sits in the component tree,
+ * so an editor portaled out of a trigger would open the trigger's menu and
+ * lose its native one.
+ */
+const ignorePortaledEvents = (
+  event: Event & { currentTarget: HTMLElement }
+) => {
+  if (
+    !(event.target instanceof Node) ||
+    !event.currentTarget.contains(event.target)
+  )
+    event.stopPropagation();
+};
+
+/** Kobalte's context-menu trigger, ignoring events from portaled content. */
+export function ContextMenuTrigger(
+  props: ComponentProps<typeof ContextMenu.Trigger>
+) {
+  const [local, others] = splitProps(props, ['children']);
   return (
-    <ContextMenu.GroupLabel
-      class={cn(MENU_ITEM_CLASS, 'text-xs! text-ink-extra-muted')}
-    >
-      {props.children}
-    </ContextMenu.GroupLabel>
+    <ContextMenu.Trigger {...others}>
+      <div
+        class="contents"
+        onContextMenu={ignorePortaledEvents}
+        onPointerDown={ignorePortaledEvents}
+      >
+        {local.children}
+      </div>
+    </ContextMenu.Trigger>
   );
 }
 
 export function MenuSeparator() {
   return (
-    <ContextMenu.Separator class="my-1.5 -mx-1.5 w-[calc(100%+0.75rem)] border-t border-edge" />
+    <ContextMenu.Separator class="my-1.5 -mx-1.5 w-[calc(100%+0.75rem)] border-t border-edge-divider" />
   );
 }
 
@@ -300,20 +327,15 @@ function MobileConditionalOverlay(
   );
 }
 
-type MenuWidth = 'sm' | 'md' | 'lg' | `w-${string}` | 'screen';
-const menuWidths: Record<MenuWidth, string> = {
-  sm: 'w-28',
-  md: 'w-44',
-  lg: 'w-72',
-  screen: 'w-screen',
-};
+const MENU_SURFACE_SCOPE = '[--color-surface:var(--color-menu)]';
 
-export const MENU_CONTENT_CLASS = `flex flex-col justify-start items-start border border-edge bg-surface shadow-menu rounded-xl p-1.5 cursor-default select-none max-w-full max-h-[calc(100dvh-10rem)] overflow-y-auto z-modal menu-open-animation`;
+export const MENU_CONTENT_CLASS = `menu-surface flex flex-col justify-start items-start p-1.5 cursor-default select-none max-w-full max-h-[calc(100dvh-10rem)] overflow-y-auto z-modal menu-open-animation`;
 
 type MenuContentProps = ParentProps<{
   class?: string;
+  /** Reuse the surface with click-menu dismissal and focus behavior. */
+  contentComponent?: typeof ContextMenu.Content;
   submenu?: boolean;
-  width?: MenuWidth;
   onOpenAutoFocus?: (event: Event) => void;
   onCloseAutoFocus?: (event: Event) => void;
   overrideStyling?: boolean;
@@ -417,12 +439,13 @@ export function ContextMenuContent(props: ParentProps<MenuContentProps>) {
         when={props.submenu}
         fallback={
           <Layer depth={2}>
-            <ContextMenu.Content
+            <Dynamic
+              component={props.contentComponent ?? ContextMenu.Content}
               class={cn(
+                MENU_SURFACE_SCOPE,
                 !props.overrideStyling && MENU_CONTENT_CLASS,
                 'menu-open-animation',
                 props.class,
-                props.width && menuWidths[props.width],
                 props.mobileFullScreen &&
                   isMobile() &&
                   'flex flex-col justify-center px-4 max-h-[80vh] shrink w-[calc(100vw-1rem)]'
@@ -432,18 +455,14 @@ export function ContextMenuContent(props: ParentProps<MenuContentProps>) {
               onCloseAutoFocus={props.onCloseAutoFocus}
             >
               {props.children}
-            </ContextMenu.Content>
+            </Dynamic>
           </Layer>
         }
       >
         <ContextMenu.Portal>
           <Layer depth={2}>
             <ContextMenu.SubContent
-              class={cn(
-                MENU_CONTENT_CLASS,
-                props.class,
-                props.width && menuWidths[props.width]
-              )}
+              class={cn(MENU_CONTENT_CLASS, props.class)}
               ref={contentRef}
             >
               {props.children}

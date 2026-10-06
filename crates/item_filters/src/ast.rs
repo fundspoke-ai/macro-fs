@@ -2,20 +2,24 @@
 //! This is used to construct a strictly typed ast for the input filters, allowing consumers to have a logical represenation of the required operations
 
 use crate::{
-    CalendarEventFilters, CallFilters, ChannelFilters, ChannelThreadFilters, ChatFilters,
-    CrmCompanyFilters, DocumentFilters, EmailFilters, EntityFilters, ForeignEntityFilters,
-    ProjectFilters, PropertyFilter, ReminderFilters,
+    AgentSessionFilters, CalendarEventFilters, CallFilters, ChannelFilters, ChannelThreadFilters,
+    ChatFilters, CrmCompanyFilters, DocumentFilters, EmailFilters, EntityFilters,
+    ForeignEntityFilters, InitiativeFilters, ProjectFilters, PropertyFilter,
     ast::{
+        agent_session::AgentSessionLiteral,
         calendar_event::CalendarEventLiteral,
         call::CallLiteral,
         channel::{ChannelLiteral, ChannelThreadLiteral, ChannelTypeFilter},
         chat::{ChatLiteral, ChatRole},
         crm_company::CrmCompanyLiteral,
+        crm_contact::CrmContactLiteral,
+        database_row::DatabaseRowLiteral,
         email::EmailLiteral,
         foreign_entity::ForeignEntityLiteral,
+        github_pull_request::GithubPullRequestLiteral,
+        initiative::InitiativeLiteral,
         project::ProjectLiteral,
         properties::PropertiesLiteral,
-        reminder::ReminderLiteral,
     },
 };
 use document::DocumentLiteral;
@@ -25,6 +29,8 @@ use serde::{Deserialize, Serialize};
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
+/// contains the ast literal value for agent sessions
+pub mod agent_session;
 /// contains the ast literal value for calendar events
 pub mod calendar_event;
 /// contains the ast literal value for calls
@@ -35,6 +41,10 @@ pub mod channel;
 pub mod chat;
 /// contains the ast literal value for crm companies
 pub mod crm_company;
+/// CRM contact filter literals. Contacts are opt-in.
+pub mod crm_contact;
+/// Database row filter literals.
+pub mod database_row;
 /// contains the date comparison literal type
 pub mod date;
 /// contains the ast literal value for documents
@@ -43,12 +53,14 @@ pub mod document;
 pub mod email;
 /// contains the ast literal value for foreign entities
 pub mod foreign_entity;
+/// contains the ast literal value for GitHub pull requests
+pub mod github_pull_request;
+/// Initiative filter literals.
+pub mod initiative;
 /// contains the ast literal value for projects
 pub mod project;
 /// contains the ast literal value for property-based filtering
 pub mod properties;
-/// contains the ast literal value for reminders
-pub mod reminder;
 
 #[cfg(test)]
 mod tests;
@@ -80,6 +92,9 @@ pub enum ExpandErr {
     /// invalid macro user id
     #[error(transparent)]
     MacroIdErr(#[from] macro_user_id::error::ParseErr),
+    /// invalid owner principal
+    #[error(transparent)]
+    OwnerErr(#[from] model_owner::OwnerParseError),
     /// unknown document sub type
     #[error(transparent)]
     DocumentSubTypeErr(#[from] strum::ParseError),
@@ -182,6 +197,9 @@ impl IsEmpty for EmailFilterAst {
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct EntityFilterAst {
+    /// Restrict to the authenticated viewer's favorites before pagination when true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorites_only: Option<bool>,
     /// filters applied to canonical calendar events
     #[serde(default, rename = "calf")]
     #[cfg_attr(feature = "schema", schema(value_type = serde_json::Value))]
@@ -218,14 +236,31 @@ pub struct EntityFilterAst {
     #[serde(default, rename = "ccf")]
     #[cfg_attr(feature = "schema", schema(value_type = serde_json::Value))]
     pub crm_company_filter: LiteralTree<CrmCompanyLiteral>,
+    /// Contact predicates; absent means contacts are excluded.
+    #[serde(default, rename = "crmf")]
+    #[cfg_attr(feature = "schema", schema(value_type = serde_json::Value))]
+    pub crm_contact_filter: LiteralTree<CrmContactLiteral>,
     /// the filters that should be applied to foreign entity records
     #[serde(default, rename = "fef")]
     #[cfg_attr(feature = "schema", schema(value_type = serde_json::Value))]
     pub foreign_entity_filter: LiteralTree<ForeignEntityLiteral>,
-    /// the filters that should be applied to reminders
-    #[serde(default, rename = "remf")]
+    /// the filters that should be applied to GitHub pull request records, on top of the foreign
+    /// entity filter
+    #[serde(default, rename = "ghprf")]
     #[cfg_attr(feature = "schema", schema(value_type = serde_json::Value))]
-    pub reminder_filter: LiteralTree<ReminderLiteral>,
+    pub github_pull_request_filter: LiteralTree<GithubPullRequestLiteral>,
+    /// the filters that should be applied to agent sessions
+    #[serde(default, rename = "asf")]
+    #[cfg_attr(feature = "schema", schema(value_type = serde_json::Value))]
+    pub agent_session_filter: LiteralTree<AgentSessionLiteral>,
+    /// Initiative filter, absent for queries that do not request initiatives.
+    #[serde(default, rename = "if")]
+    #[cfg_attr(feature = "schema", schema(value_type = serde_json::Value))]
+    pub initiative_filter: LiteralTree<InitiativeLiteral>,
+    /// Database row filter, absent for queries that do not request rows.
+    #[serde(default, rename = "drf")]
+    #[cfg_attr(feature = "schema", schema(value_type = serde_json::Value))]
+    pub database_row_filter: LiteralTree<DatabaseRowLiteral>,
     /// the filters that should be applied based on entity properties
     #[serde(default, rename = "propf")]
     #[cfg_attr(feature = "schema", schema(value_type = serde_json::Value))]
@@ -249,6 +284,7 @@ impl EntityFilterAst {
         .map(|(_, scope)| scope);
         let email_tree = EmailFilters::expand_ast(entity_filter.email_filters)?.map(Arc::new);
         Ok(Some(EntityFilterAst {
+            favorites_only: entity_filter.favorites_only,
             calendar_event_filter: CalendarEventFilters::expand_ast(
                 entity_filter.calendar_event_filters,
             )?
@@ -271,12 +307,21 @@ impl EntityFilterAst {
             call_filter: CallFilters::expand_ast(entity_filter.call_filters)?.map(Arc::new),
             crm_company_filter: CrmCompanyFilters::expand_ast(entity_filter.crm_company_filters)?
                 .map(Arc::new),
+            crm_contact_filter: None,
             foreign_entity_filter: ForeignEntityFilters::expand_ast(
                 entity_filter.foreign_entity_filters,
             )?
             .map(Arc::new),
-            reminder_filter: ReminderFilters::expand_ast(entity_filter.reminder_filters)?
+            github_pull_request_filter: None,
+            agent_session_filter: AgentSessionFilters::expand_ast(
+                entity_filter.agent_session_filters,
+            )?
+            .map(Arc::new),
+            initiative_filter: InitiativeFilters::expand_ast(entity_filter.initiative_filters)?
                 .map(Arc::new),
+            // Rows are requested through GraphQL only; the REST filters
+            // cannot name a table.
+            database_row_filter: None,
             properties_filter: Vec::<PropertyFilter>::expand_ast(entity_filter.property_filters)?
                 .map(Arc::new),
         }))
@@ -304,6 +349,7 @@ impl EntityFilterAst {
     #[cfg(feature = "mock")]
     pub fn mock_empty() -> Self {
         Self {
+            favorites_only: None,
             calendar_event_filter: None,
             document_filter: None,
             project_filter: None,
@@ -313,8 +359,12 @@ impl EntityFilterAst {
             channel_thread_filter: None,
             call_filter: None,
             crm_company_filter: None,
+            crm_contact_filter: None,
             foreign_entity_filter: None,
-            reminder_filter: None,
+            github_pull_request_filter: None,
+            agent_session_filter: None,
+            initiative_filter: None,
+            database_row_filter: None,
             properties_filter: None,
         }
     }
@@ -338,6 +388,7 @@ fn crm_company_requests_admin(expr: &Expr<CrmCompanyLiteral>) -> bool {
 impl IsEmpty for EntityFilterAst {
     fn is_empty(&self) -> bool {
         let EntityFilterAst {
+            favorites_only,
             calendar_event_filter,
             document_filter,
             project_filter,
@@ -347,11 +398,16 @@ impl IsEmpty for EntityFilterAst {
             channel_thread_filter,
             call_filter,
             crm_company_filter,
+            crm_contact_filter,
             foreign_entity_filter,
-            reminder_filter,
+            github_pull_request_filter,
+            agent_session_filter,
+            initiative_filter,
+            database_row_filter,
             properties_filter,
         } = self;
-        calendar_event_filter.is_none()
+        favorites_only != &Some(true)
+            && calendar_event_filter.is_none()
             && document_filter.is_none()
             && project_filter.is_none()
             && chat_filter.is_none()
@@ -360,8 +416,12 @@ impl IsEmpty for EntityFilterAst {
             && channel_thread_filter.is_none()
             && call_filter.is_none()
             && crm_company_filter.is_none()
+            && crm_contact_filter.is_none()
             && foreign_entity_filter.is_none()
-            && reminder_filter.is_none()
+            && github_pull_request_filter.is_none()
+            && agent_session_filter.is_none()
+            && initiative_filter.is_none()
+            && database_row_filter.is_none()
             && properties_filter.is_none()
     }
 }

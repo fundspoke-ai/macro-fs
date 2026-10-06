@@ -1,54 +1,58 @@
-import { UserIcon } from '@core/component/UserIcon';
 import { cn } from '@ui';
 import { Show } from 'solid-js';
-import { MultiSelectCheckbox } from '../../components/MultiSelectCheckbox';
-import { UnreadIndicator } from '../../components/UnreadIndicator';
 import { Entity } from '../../entity';
-import { SearchContent } from '../../extractors-search/search-content';
-import { SearchSender } from '../../extractors-search/search-sender';
 import {
   isChannelEntity,
   isChannelMessageEntity,
   isEmailEntity,
+  isGithubPrEntity,
   isTaskEntity,
 } from '../../types/entity';
 import { isSearchEntity } from '../../types/search';
-import { ChannelJoinButton } from './channel';
+import {
+  ChannelActiveCallBadge,
+  ChannelJoinButton,
+  ChannelMessageSingleLine,
+} from './channel';
 import { EmailInboxChip } from './email';
-import type { LayoutProps } from './shared';
+import { GithubAuthorBadge } from './foreign';
+import { RowEnd } from './row-end';
+import { SOUP_ROW_CLASS } from './row-geometry';
+import { type LayoutProps, RowIndicator } from './shared';
 
 export function NarrowLayout(props: LayoutProps) {
+  const reviewWithAuthor = () => {
+    const entity = props.entity;
+    if (!isGithubPrEntity(entity)) return;
+    if (!entity.metadata.authorLogin && !entity.metadata.authorId) return;
+    return entity;
+  };
   return (
     <Entity.Layout
-      class="w-full gap-x-2 items-center text-sm px-2 grid"
+      class={cn(
+        SOUP_ROW_CLASS.narrow,
+        'w-full gap-x-(--soup-row-column-gap) items-center text-sm pr-2 pl-(--soup-row-padding-l) grid'
+      )}
       style={{
-        'grid-template-columns': 'auto 1fr max-content',
+        'grid-template-columns':
+          'var(--soup-row-indicator-width) 1fr max-content',
         'grid-template-rows': '44px',
         'grid-template-areas': '"indicator title timestamp"',
       }}
     >
-      <Entity.Slot placement="indicator" class="relative self-start pt-3">
-        <Show when={!props.hideCheckbox}>
-          <div
-            class={cn('w-0 opacity-0 overflow-hidden', {
-              'w-6 opacity-100': props.checked,
-            })}
-          >
-            <MultiSelectCheckbox
-              checked={props.checked}
-              onChecked={props.onChecked}
-            />
-          </div>
-        </Show>
+      <Entity.Slot placement="indicator" class="relative">
+        <RowIndicator
+          checked={props.checked}
+          hideCheckbox={props.hideCheckbox}
+          onChecked={props.onChecked}
+          unread={props.unread}
+        />
       </Entity.Slot>
 
       <Entity.Slot
         placement="title"
         class="ph-no-capture flex items-center gap-2 truncate font-semibold"
       >
-        <Show when={props.unread}>
-          <UnreadIndicator active />
-        </Show>
         <div class="size-4 shrink-0">
           <Entity.Icon entity={props.entity} streamState={props.streamState} />
         </div>
@@ -56,39 +60,27 @@ export function NarrowLayout(props: LayoutProps) {
           when={isChannelMessageEntity(props.entity) && props.entity}
           fallback={<Entity.Title entity={props.entity} />}
         >
-          {(entity) => {
-            const hit = () => {
-              const e = entity();
-              return isSearchEntity(e)
-                ? e.search.contentHitData?.[0]
-                : undefined;
-            };
-            return (
-              <span class="flex items-center gap-1 min-w-0 truncate">
-                <span class="shrink-0 text-ink-muted text-xs whitespace-nowrap">
-                  {entity().channelName}
-                </span>
-                <Show when={entity().senderId}>
-                  {(id) => <UserIcon id={id()} size="sm" />}
-                </Show>
-                <Show when={hit()}>
-                  {(h) => (
-                    <span class="shrink-0 text-ink-extra-muted text-xs whitespace-nowrap">
-                      <SearchSender hit={h()} />
-                    </span>
-                  )}
-                </Show>
-                <span class="text-ink/50 font-normal truncate min-w-0">
-                  <Show when={hit()} fallback={entity().content}>
-                    {(h) => <SearchContent hit={h()} singleLine />}
-                  </Show>
-                </span>
-              </span>
-            );
-          }}
+          {(entity) => <ChannelMessageSingleLine entity={entity()} />}
+        </Show>
+        <Show when={reviewWithAuthor()}>
+          {(review) => (
+            <span class="max-w-32 shrink-0 overflow-hidden text-xs font-normal text-ink-muted">
+              <GithubAuthorBadge
+                entity={review()}
+                displayName={props.authorDisplayName}
+              />
+            </span>
+          )}
         </Show>
         <Show when={isEmailEntity(props.entity) && props.entity}>
           {(entity) => <EmailInboxChip entity={entity()} class="ml-auto" />}
+        </Show>
+        <Show when={isChannelEntity(props.entity) && props.entity}>
+          {(entity) => (
+            <span class="ml-auto shrink-0 flex items-center">
+              <ChannelActiveCallBadge channelId={entity().id} />
+            </span>
+          )}
         </Show>
         <Show
           when={
@@ -105,25 +97,32 @@ export function NarrowLayout(props: LayoutProps) {
 
       <Show
         when={
-          !props.hasNotifications &&
-          !(isChannelEntity(props.entity) && isSearchEntity(props.entity))
+          props.scheduleStatus ||
+          (!props.hasNotifications &&
+            !(isChannelEntity(props.entity) && isSearchEntity(props.entity)))
         }
       >
         <Entity.Slot
           placement="timestamp"
-          class="text-xs text-right text-ink-extra-muted font-light"
+          class="flex items-center justify-end gap-1 text-xs text-right text-ink-extra-muted font-light"
         >
-          <Show
-            when={!isTaskEntity(props.entity)}
-            fallback={
-              <Entity.Properties
-                entity={props.entity}
-                maxUserStackUsers={0}
-                showCaret={false}
-              />
-            }
-          >
-            <Entity.Timestamp entity={props.entity} />
+          {props.scheduleStatus}
+          <Show when={!props.hasNotifications}>
+            <RowEnd actions={props.actions} leadingAction={props.leadingAction}>
+              <Show
+                when={!isTaskEntity(props.entity)}
+                fallback={
+                  <Entity.Properties
+                    entity={props.entity}
+                    maxUserStackUsers={0}
+                    showCaret={false}
+                    includeProject={props.showProject}
+                  />
+                }
+              >
+                <Entity.Timestamp entity={props.entity} />
+              </Show>
+            </RowEnd>
           </Show>
         </Entity.Slot>
       </Show>

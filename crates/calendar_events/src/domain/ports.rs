@@ -7,15 +7,17 @@ use rootcause::Report;
 use uuid::Uuid;
 
 use super::models::{
-    AppliedGoogleGrant, AttendeeResponseStatus, CalendarBackfillClaim,
-    CalendarBackfillFailureDisposition, CalendarBackfillFailureOutcome, CalendarBackfillJobKey,
-    CalendarCreationTarget, CalendarEvent, CalendarEventDraft, CalendarEventMutationTarget,
-    CalendarEventPatch, CalendarEventUpsert, CalendarLinkTokenIdentity, CalendarOccurrence,
-    CalendarOccurrenceCursor, CalendarReminderDeliveryOutcome, CalendarReminderDispatchMessage,
-    CalendarReminderFiring, CalendarReminderSweepSummary, CalendarSyncStatus, DueCalendarReminder,
+    ActorInboxes, AppliedGoogleGrant, AttendeeResponseStatus, CalendarAttendee,
+    CalendarBackfillClaim, CalendarBackfillFailureDisposition, CalendarBackfillFailureOutcome,
+    CalendarBackfillJobKey, CalendarCreationTarget, CalendarEvent, CalendarEventDraft,
+    CalendarEventMutationTarget, CalendarEventPatch, CalendarEventUpsert, CalendarGrantIntent,
+    CalendarLinkTokenIdentity, CalendarMentionPreview, CalendarMentionRequestItem,
+    CalendarOccurrence, CalendarOccurrenceCursor, CalendarReminderDeliveryOutcome,
+    CalendarReminderDispatchMessage, CalendarReminderFiring, CalendarReminderSweepSummary,
+    CalendarSyncStatus, DisconnectedGoogleCalendar, DueCalendarReminder,
     GoogleCalendarSyncSnapshot, GoogleCalendarTarget, GoogleEventSyncBatch, GoogleScopeSet,
     GoogleSyncPlan, GoogleWatchChannel, GoogleWatchConfig, OccurrenceRange, ProviderCalendar,
-    StoredGoogleCalendar, VisibleCalendar,
+    StoredGoogleCalendar, TeamOutOfOffice, VisibleCalendar,
 };
 
 /// Classification supplied by provider adapters to backfill policy.
@@ -29,6 +31,9 @@ pub enum GoogleProviderErrorKind {
     ReauthRequired,
     /// The provider continuation token expired and requires a full resync.
     SyncTokenExpired,
+    /// The provider will not open push channels for this resource; only
+    /// polling can keep it in sync.
+    PushUnsupported,
 }
 
 /// Typed Google Calendar failure returned across the provider port.
@@ -51,6 +56,11 @@ impl GoogleProviderError {
     /// Return the retry/reauthorization classification.
     pub fn kind(&self) -> GoogleProviderErrorKind {
         self.kind
+    }
+
+    /// Return the provider failure detail, without the Display prefix.
+    pub fn message(&self) -> &str {
+        &self.message
     }
 }
 
@@ -130,6 +140,21 @@ pub trait GoogleCalendarMutationProvider: Send + Sync + 'static {
         patch: &CalendarEventPatch,
     ) -> impl Future<Output = Result<Option<CalendarEventUpsert>, GoogleProviderError>> + Send;
 
+    /// Patch the supplied fields of one occurrence of a recurring series,
+    /// identified by its original start key, then refresh the series. An
+    /// occurrence the provider does not have writes nothing and surfaces as
+    /// [`GoogleInstanceUpdateOutcome::OccurrenceGone`] with the refreshed
+    /// series, so a stale projection converges instead of mutating the
+    /// master.
+    fn update_event_instance(
+        &self,
+        access_token: &str,
+        target: &GoogleCalendarTarget,
+        master_provider_event_id: &str,
+        original_start: &str,
+        patch: &CalendarEventPatch,
+    ) -> impl Future<Output = Result<GoogleInstanceUpdateOutcome, GoogleProviderError>> + Send;
+
     /// Delete an event. An event already gone at the provider is success.
     fn delete_event(
         &self,
@@ -159,10 +184,10 @@ pub trait GoogleCalendarMutationProvider: Send + Sync + 'static {
         original_start: &str,
     ) -> impl Future<Output = Result<GoogleSeriesMutationOutcome, GoogleProviderError>> + Send;
 
-    /// Set the connected account's own RSVP on an event. An event that no
-    /// longer exists at the provider surfaces as [`GoogleRsvpOutcome::Gone`];
-    /// absence of a self attendee surfaces as
-    /// [`GoogleRsvpOutcome::NotAttendee`].
+    /// Set the actor's own RSVP on an event. `actor` is the requester's
+    /// owned-inbox identity. An event that no longer exists at the
+    /// provider surfaces as [`GoogleRsvpOutcome::Gone`]; absence of a matching
+    /// attendee surfaces as [`GoogleRsvpOutcome::NotAttendee`].
     ///
     /// `scope` selects what the response covers: the master for
     /// [`CalendarRsvpScope::All`], one exception instance for
@@ -172,10 +197,20 @@ pub trait GoogleCalendarMutationProvider: Send + Sync + 'static {
         access_token: &str,
         target: &GoogleCalendarTarget,
         master_provider_event_id: &str,
-        self_email: &str,
+        actor: &ActorInboxes,
         response: AttendeeResponseStatus,
         scope: &CalendarRsvpScope,
     ) -> impl Future<Output = Result<GoogleRsvpOutcome, GoogleProviderError>> + Send;
+
+    /// Close a push notification channel. A channel Google no longer knows
+    /// about is success, since the goal is only that it stops delivering.
+    fn stop_watch_channel(
+        &self,
+        access_token: &str,
+        email_link_id: Uuid,
+        channel_id: &str,
+        resource_id: &str,
+    ) -> impl Future<Output = Result<(), GoogleProviderError>> + Send;
 }
 
 /// How much of a recurring series a deletion removes.
@@ -214,6 +249,28 @@ pub enum CalendarRsvpScope {
     },
 }
 
+/// How much of a recurring series an update applies to.
+///
+/// Like [`CalendarRsvpScope`] there is deliberately no this-and-following
+/// variant: the provider has no forward-scoped write, and emulating one the
+/// way Google's own UI does — truncate the series, then insert a clone
+/// carrying the edits — is two non-atomic provider writes whose first half
+/// alone destroys every future occurrence, and the clone is a new provider
+/// event that re-invites its attendees. Callers wanting that shape compose
+/// it explicitly from a this-and-following deletion and a create.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CalendarUpdateScope {
+    /// The entire event or series, written on the master. A time change
+    /// here re-anchors a recurring series: every occurrence moves.
+    All,
+    /// One occurrence, identified by its original start key, written as a
+    /// provider exception. The rest of the series stays untouched.
+    ThisEvent {
+        /// Stable original-start key of the occurrence.
+        recurrence_id: String,
+    },
+}
+
 /// Result of a provider mutation that reshapes a recurring series.
 pub enum GoogleSeriesMutationOutcome {
     /// The series survives; the echo carries its refreshed state.
@@ -222,6 +279,18 @@ pub enum GoogleSeriesMutationOutcome {
     SeriesDeleted,
     /// The series master vanished before the mutation could apply.
     Gone,
+}
+
+/// Result of patching one occurrence of a recurring series.
+pub enum GoogleInstanceUpdateOutcome {
+    /// The occurrence was patched; the echo carries the refreshed series.
+    Applied(Box<CalendarEventUpsert>),
+    /// The provider has no such occurrence — nothing was written. The echo
+    /// carries the series as the provider actually holds it, so the caller
+    /// can converge a projection stale enough to list phantom occurrences.
+    OccurrenceGone(Box<CalendarEventUpsert>),
+    /// The whole series no longer exists at the provider.
+    SeriesGone,
 }
 
 /// Result of attempting to set the connected account's RSVP.
@@ -250,23 +319,109 @@ pub trait CalendarOccurrenceService: Send + Sync + 'static {
         &self,
         requester_id: &str,
     ) -> impl Future<Output = Result<CalendarSyncStatus, Report>> + Send;
+
+    /// Resolve mentioned events to the requester's own projections, one
+    /// result per requested item in order.
+    fn mention_previews(
+        &self,
+        requester_id: &str,
+        items: Vec<CalendarMentionRequestItem>,
+    ) -> impl Future<Output = Result<Vec<CalendarMentionPreview>, Report>> + Send;
+
+    /// Return teammates' out-of-office occurrences overlapping the viewport,
+    /// soonest first, with title visibility policy already applied.
+    fn list_team_out_of_office(
+        &self,
+        requester_id: &str,
+        range: OccurrenceRange,
+        limit: u16,
+    ) -> impl Future<Output = Result<Vec<TeamOutOfOffice>, Report>> + Send;
+
+    /// The IANA time zone of the requester's primary calendar, resolved the
+    /// same way event creation picks its default target. `None` when no
+    /// calendar is connected or the provider reported no zone.
+    fn primary_time_zone(
+        &self,
+        requester_id: &str,
+    ) -> impl Future<Output = Result<Option<String>, Report>> + Send;
+}
+
+/// What a write did to one event's canonical `calendar_events` row.
+///
+/// Reports the row's fate, not the caller's intent: an idempotent re-create
+/// that lands on the upsert's conflict path is [`Updated`](Self::Updated), and
+/// a write the sequence guard rejected is [`Unchanged`](Self::Unchanged).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalendarEventChange {
+    /// The row was inserted.
+    Created,
+    /// The row was rewritten in place.
+    Updated,
+    /// Nothing was written: the incoming projection matched the stored one, or
+    /// the sequence guard rejected it as stale.
+    Unchanged,
+}
+
+/// One event's identity and what a write did to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalendarEventWriteOutcome {
+    /// The canonical entity id the write applied to.
+    pub event_id: Uuid,
+    /// Owner of this per-user event projection.
+    pub owner_id: String,
+    /// What happened to the row.
+    pub change: CalendarEventChange,
+}
+
+/// One event's fate after its sources were retired.
+///
+/// Retiring a source does not necessarily remove the event: the row survives,
+/// rewritten from its next-best remaining source. Retiring a recurring
+/// master's source also retires its expanded instances, so one call reports
+/// several events.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetiredCalendarEvent {
+    /// The event whose sources were retired.
+    pub event_id: Uuid,
+    /// Owner of this per-user event projection.
+    pub owner_id: String,
+    /// Whether the row is now gone. `false` means it was rewritten from a
+    /// remaining source.
+    pub deleted: bool,
 }
 
 /// Persistence operations used by calendar business logic.
 pub trait CalendarRepository: Send + Sync + 'static {
     /// Apply the actual scopes returned by Google and atomically schedule any
     /// newly unlocked historical work.
+    ///
+    /// `intent` decides how the grant meets a standing calendar opt-out: an
+    /// explicit calendar request clears it, anything else is filtered through
+    /// it so calendar scopes that merely rode along stay unrecorded.
     fn apply_google_grant(
         &self,
         email_link_id: Uuid,
         scopes: GoogleScopeSet,
+        intent: CalendarGrantIntent,
     ) -> impl Future<Output = Result<AppliedGoogleGrant, Report>> + Send;
 
-    /// Upsert an event through an explicit, source-matched ingestion authority.
+    /// Turn the calendar capability off for an inbox the requester owns:
+    /// remove its calendar data, drop the calendar scopes from the recorded
+    /// grant, and stamp the opt-out that keeps a later incidental re-grant
+    /// from resurrecting it. Returns `None` when the requester owns no such
+    /// inbox, and the still-open push channels otherwise.
+    fn disconnect_google_calendar(
+        &self,
+        requester_id: &str,
+        email_link_id: Uuid,
+    ) -> impl Future<Output = Result<Option<DisconnectedGoogleCalendar>, Report>> + Send;
+
+    /// Upsert an event through an explicit, source-matched ingestion
+    /// authority, reporting what the write did to the canonical row.
     fn upsert_event(
         &self,
         write: CalendarEventWrite,
-    ) -> impl Future<Output = Result<Uuid, Report>> + Send;
+    ) -> impl Future<Output = Result<CalendarEventWriteOutcome, Report>> + Send;
 
     /// Return occurrences visible to a requester across owned and delegated inboxes.
     fn list_occurrences(
@@ -282,6 +437,35 @@ pub trait CalendarRepository: Send + Sync + 'static {
         &self,
         requester_id: &str,
     ) -> impl Future<Output = Result<CalendarSyncStatus, Report>> + Send;
+
+    /// Resolve mentioned events to the requester's own projections, one
+    /// result per requested item in order. `now` anchors which occurrence a
+    /// series previews when the mention names no instance.
+    fn mention_previews(
+        &self,
+        requester_id: &str,
+        items: Vec<CalendarMentionRequestItem>,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = Result<Vec<CalendarMentionPreview>, Report>> + Send;
+
+    /// Out-of-office occurrences owned by the requester's teammates — the
+    /// other members of the requester's team — overlapping the viewport,
+    /// soonest first, sourced from a primary calendar on an account that is
+    /// not disabled. The same provider event synced through more than one of
+    /// a teammate's inboxes collapses to one row before the limit applies,
+    /// so callers can detect truncation by row count. Titles arrive
+    /// unmasked; the domain service owns the visibility policy.
+    ///
+    /// "Team" is singular by schema: `team_user` is unique per user, so the
+    /// membership lookup cannot span teams. Relaxing that constraint would
+    /// silently widen this query to every team the requester belongs to —
+    /// revisit it together with any multi-team migration.
+    fn list_team_out_of_office(
+        &self,
+        requester_id: &str,
+        range: OccurrenceRange,
+        limit: u16,
+    ) -> impl Future<Output = Result<Vec<TeamOutOfOffice>, Report>> + Send;
 
     /// Upsert one provider calendar while holding the current backfill fence.
     fn upsert_google_calendar(
@@ -303,6 +487,20 @@ pub trait CalendarRepository: Send + Sync + 'static {
         account_id: Uuid,
         sync: GoogleCalendarSyncSnapshot,
         events_upserted: usize,
+    ) -> impl Future<Output = Result<Vec<RetiredCalendarEvent>, Report>> + Send;
+
+    /// Record a provider failure isolated to one calendar under the backfill's
+    /// fencing token: store the message, stamp the time, and bump the
+    /// consecutive-failure counter that gates whether the failure surfaces to
+    /// the user. The calendar's sync state is left untouched so the next poll
+    /// retries it. A successful `commit_google_calendar_sync` clears all three.
+    fn record_google_calendar_sync_error(
+        &self,
+        key: CalendarBackfillJobKey,
+        lease_token: Uuid,
+        account_id: Uuid,
+        calendar_id: Uuid,
+        message: &str,
     ) -> impl Future<Output = Result<(), Report>> + Send;
 
     /// Record a freshly opened push channel for one calendar under the
@@ -314,6 +512,16 @@ pub trait CalendarRepository: Send + Sync + 'static {
         account_id: Uuid,
         calendar_id: Uuid,
         channel: GoogleWatchChannel,
+    ) -> impl Future<Output = Result<(), Report>> + Send;
+
+    /// Record that the provider refused a push channel for one calendar,
+    /// under the backfill's fencing token.
+    fn record_watch_unsupported(
+        &self,
+        key: CalendarBackfillJobKey,
+        lease_token: Uuid,
+        account_id: Uuid,
+        calendar_id: Uuid,
     ) -> impl Future<Output = Result<(), Report>> + Send;
 
     /// Resolve a push notification to the inbox whose calendar it watches.
@@ -338,16 +546,38 @@ pub trait CalendarRepository: Send + Sync + 'static {
         lease_token: Uuid,
         account_id: Uuid,
         calendar_ids: Vec<Uuid>,
-    ) -> impl Future<Output = Result<(), Report>> + Send;
+    ) -> impl Future<Output = Result<Vec<RetiredCalendarEvent>, Report>> + Send;
 
-    /// Resolve an event visible to the requester to its best Google source
-    /// and the connected inbox that can mutate it. `None` covers both an
-    /// unknown event and one the requester cannot see.
+    /// Resolve an event visible to the requester to the Google source a
+    /// mutation must address — the copy on `calendar_id` when one is named,
+    /// else the canonical source — and the connected inbox that can mutate
+    /// it. `None` covers an unknown event, one the requester cannot see, and
+    /// a calendar that holds no copy of it.
     fn get_event_mutation_target(
         &self,
         requester_id: &str,
         event_id: Uuid,
+        calendar_id: Option<Uuid>,
     ) -> impl Future<Output = Result<Option<CalendarEventMutationTarget>, Report>> + Send;
+
+    /// The stored attendees of a canonical event. Used to carry each retained
+    /// attendee's RSVP and optional state forward when a mutation replaces the
+    /// attendee list, so adding or dropping one guest does not reset the rest.
+    fn get_event_attendees(
+        &self,
+        event_id: Uuid,
+    ) -> impl Future<Output = Result<Vec<CalendarAttendee>, Report>> + Send;
+
+    /// The override attendees of one occurrence, when it carries its own list.
+    /// `None` means the occurrence inherits the series attendees; `Some` (even
+    /// empty) is the occurrence's authoritative list, whose per-instance RSVPs
+    /// must win over the series when an occurrence-scoped mutation replaces the
+    /// attendee list.
+    fn get_occurrence_override_attendees(
+        &self,
+        event_id: Uuid,
+        recurrence_id: &str,
+    ) -> impl Future<Output = Result<Option<Vec<CalendarAttendee>>, Report>> + Send;
 
     /// Resolve the calendar a requester-created event lands in: the exact
     /// calendar when one is supplied, otherwise the supplied inbox's primary
@@ -366,14 +596,60 @@ pub trait CalendarRepository: Send + Sync + 'static {
         requester_id: &str,
     ) -> impl Future<Output = Result<Vec<VisibleCalendar>, Report>> + Send;
 
+    /// The IANA time zone of the requester's primary calendar, resolved the
+    /// same way [`get_creation_target`](Self::get_creation_target) picks its
+    /// default target.
+    fn primary_time_zone(
+        &self,
+        requester_id: &str,
+    ) -> impl Future<Output = Result<Option<String>, Report>> + Send;
+
+    /// Addresses of every connected inbox the requester owns
+    /// (`email_links.macro_id = requester`). Raw and unnormalized;
+    /// [`ActorInboxes::from_owned`] is the single normalization point.
+    fn owned_inbox_emails(
+        &self,
+        requester_id: &str,
+    ) -> impl Future<Output = Result<Vec<String>, Report>> + Send;
+
     /// Retire a Google source the provider confirmed deleted (a recurring
     /// master also retires its expanded instances), restoring the best
     /// surviving source or removing the entity, mirroring feed tombstones.
+    /// Retire a provider source and reconcile every event it backed,
+    /// reporting which of them survived on another source and which are gone.
     fn remove_google_source(
         &self,
         account_id: Uuid,
         calendar_id: Uuid,
         provider_event_id: &str,
+    ) -> impl Future<Output = Result<Vec<RetiredCalendarEvent>, Report>> + Send;
+}
+
+/// Outbound port that nudges a connected inbox's calendar viewers — the link
+/// owner plus its delegates — to refetch their calendar projections after a
+/// Macro-originated mutation changed them. Best effort: implementations log
+/// and swallow delivery failures, since the mutation is already committed.
+pub trait CalendarRefreshNotifier: Send + Sync + 'static {
+    /// Signal that `email_link_id`'s calendar projection changed.
+    fn calendar_changed(
+        &self,
+        owner_id: &str,
+        email_link_id: Uuid,
+    ) -> impl Future<Output = ()> + Send;
+}
+
+/// Outbound port that announces one connected inbox's Google grant has gone
+/// dead and needs reconnection. The notification itself — reconnect-your-inbox
+/// email, `email.link_reauth_required` topic event, activity row — is owned by
+/// email_service's link-manager consumer; calendar_service backs this port by
+/// enqueuing onto the shared link-manager queue that consumer already drains.
+/// Best effort at the edge: the announcer logs and swallows a delivery failure,
+/// since the failure the notification describes is already durably recorded.
+pub trait CalendarReauthNotifier: Send + Sync + 'static {
+    /// Announce that `email_link_id`'s grant requires reauthorization.
+    fn notify_reauth_required(
+        &self,
+        email_link_id: Uuid,
     ) -> impl Future<Output = Result<(), Report>> + Send;
 }
 
@@ -395,12 +671,17 @@ pub trait CalendarMutationService: Send + Sync + 'static {
         requester_id: &str,
     ) -> impl Future<Output = Result<Vec<VisibleCalendar>, CalendarMutationError>> + Send;
 
-    /// Patch an event at its provider and persist the echo.
+    /// Patch an event at its provider — the whole event or series, or one
+    /// occurrence of a recurring series — and persist the echo. `calendar_id`
+    /// selects which copy of a multi-calendar event is patched. `None`
+    /// addresses the canonical source.
     fn update_event(
         &self,
         requester_id: &str,
         event_id: Uuid,
+        calendar_id: Option<Uuid>,
         patch: CalendarEventPatch,
+        scope: CalendarUpdateScope,
     ) -> impl Future<Output = Result<CalendarEvent, CalendarMutationError>> + Send;
 
     /// Delete an event at its provider — entirely, one occurrence, or from
@@ -409,6 +690,7 @@ pub trait CalendarMutationService: Send + Sync + 'static {
         &self,
         requester_id: &str,
         event_id: Uuid,
+        calendar_id: Option<Uuid>,
         scope: CalendarDeletionScope,
     ) -> impl Future<Output = Result<(), CalendarMutationError>> + Send;
 
@@ -418,9 +700,20 @@ pub trait CalendarMutationService: Send + Sync + 'static {
         &self,
         requester_id: &str,
         event_id: Uuid,
+        calendar_id: Option<Uuid>,
         response: AttendeeResponseStatus,
         scope: CalendarRsvpScope,
+        responding_email: Option<String>,
     ) -> impl Future<Output = Result<CalendarEvent, CalendarMutationError>> + Send;
+
+    /// Turn calendar off for one of the requester's own connected inboxes:
+    /// its calendar data is removed, the calendar scopes leave the recorded
+    /// grant, and its push channels are closed at Google.
+    fn disconnect_calendar(
+        &self,
+        requester_id: &str,
+        email_link_id: Uuid,
+    ) -> impl Future<Output = Result<(), CalendarMutationError>> + Send;
 }
 
 /// Use-case failures surfaced by calendar mutations.
@@ -429,6 +722,10 @@ pub enum CalendarMutationError {
     /// The event does not exist or is not visible to the requester.
     #[error("calendar event was not found")]
     NotFound,
+    /// The targeted occurrence does not exist on the recurring event at the
+    /// provider; the local projection was refreshed to match the provider.
+    #[error("the targeted occurrence was not found on the recurring event")]
+    OccurrenceNotFound,
     /// The containing calendar prohibits mutation.
     #[error("calendar event is read-only")]
     ReadOnly,
@@ -489,6 +786,16 @@ pub trait GoogleCalendarSyncRepository: Send + Sync + 'static {
     fn schedule_due_google_syncs(
         &self,
         due_before: DateTime<Utc>,
+    ) -> impl Future<Output = Result<usize, Report>> + Send;
+
+    /// Re-arm current-grant jobs stranded off the queue: `pending` jobs whose
+    /// outbox row is already published yet went untouched since `stalled_before`
+    /// (a deterministic delivery that dead-lettered), and `running` jobs whose
+    /// lease expired before `stalled_before` (a worker that died mid-run).
+    /// Republishing the outbox row lets the drain redeliver them.
+    fn reap_wedged_google_syncs(
+        &self,
+        stalled_before: DateTime<Utc>,
     ) -> impl Future<Output = Result<usize, Report>> + Send;
 }
 
@@ -593,6 +900,15 @@ pub trait CalendarReminderDispatchRepo: Send + Sync + 'static {
         &self,
         firing: &CalendarReminderFiring,
     ) -> impl Future<Output = Result<(), Report>> + Send;
+
+    /// Record when the event's latest reminder notification was delivered, so
+    /// recency-sorted listings surface the event at delivery time instead of
+    /// its last-modified time.
+    fn record_reminder_fired(
+        &self,
+        event_id: Uuid,
+        fired_at: DateTime<Utc>,
+    ) -> impl Future<Output = Result<(), Report>> + Send;
 }
 
 /// Notification egress for due calendar reminders.
@@ -628,4 +944,16 @@ pub trait CalendarReminderDispatchQueue: Send + Sync + 'static {
         &self,
         receipt_handle: &str,
     ) -> impl Future<Output = Result<(), Report>> + Send;
+}
+
+/// Recovery capability for callers that persist a creation key and its target calendar.
+pub trait CalendarCreationRecoveryService: CalendarMutationService {
+    /// Delete a keyed event even if a previous deletion already retired its local projection.
+    /// The current requester must still own a writable grant to the pinned calendar.
+    fn delete_created_event(
+        &self,
+        requester_id: &str,
+        calendar_id: Uuid,
+        creation_key: Uuid,
+    ) -> impl Future<Output = Result<(), CalendarMutationError>> + Send;
 }

@@ -6,9 +6,17 @@ export const entityResolverSchema = {
       targets: ['GraphqlSoupEmailThread'],
       argumentPaths: [['input', 'threadId']],
     },
+    markEmailThreadUnread: {
+      targets: ['GraphqlSoupEmailThread'],
+      argumentPaths: [['input', 'threadId']],
+    },
     recordChannelActivity: {
       targets: ['GraphqlChannelActivity'],
       argumentPaths: [['input', 'channelId']],
+    },
+    setEmailThreadArchived: {
+      targets: ['GraphqlSoupEmailThread'],
+      argumentPaths: [['input', 'threadId']],
     },
     setEntityProperty: {
       targets: ['GraphqlProperty'],
@@ -25,11 +33,23 @@ export const entityResolverSchema = {
         ['input', 'threadId'],
       ],
     },
+    updateInitiative: {
+      targets: ['GraphqlSoupInitiative'],
+      argumentPaths: [['initiativeId']],
+    },
   },
   GraphqlUser: {
+    agentSession: {
+      targets: ['GraphqlSoupAgentSession'],
+      argumentPaths: [['sessionId']],
+    },
     emailThread: {
       targets: ['GraphqlSoupEmailThread'],
       argumentPaths: [['input', 'threadId']],
+    },
+    initiative: {
+      targets: ['GraphqlSoupInitiative'],
+      argumentPaths: [['initiativeId']],
     },
   },
 } as const;
@@ -38,11 +58,15 @@ export type GeneratedEntityResolverSchema = typeof entityResolverSchema;
 export type GeneratedEntityResolverTarget =
   | 'GraphqlChannelActivity'
   | 'GraphqlProperty'
-  | 'GraphqlSoupEmailThread';
+  | 'GraphqlSoupAgentSession'
+  | 'GraphqlSoupEmailThread'
+  | 'GraphqlSoupInitiative';
 export type GeneratedEntityResolverArgumentPath =
+  | readonly ['initiativeId']
   | readonly ['input', 'channelId']
   | readonly ['input', 'labelId']
   | readonly ['input', 'propertyDefinitionId']
   | readonly ['input', 'threadId']
   | readonly ['input', 'value', 'entityReference', 'specificMessageId']
-  | readonly ['input', 'value', 'selectOption'];
+  | readonly ['input', 'value', 'selectOption']
+  | readonly ['sessionId'];

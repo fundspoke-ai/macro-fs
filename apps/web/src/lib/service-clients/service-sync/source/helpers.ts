@@ -4,6 +4,7 @@ import { SYNC_SERVICE_HOSTS } from '@core/constant/servers';
 import type {
   InitialSync,
   LiveSyncSource,
+  SyncError,
   TimeoutError,
 } from '@macro-inc/collaboration/collab/source';
 import { GatewaySyncTransport } from '@macro-inc/collaboration/sync-service/gateway';
@@ -21,29 +22,40 @@ import { createWebsocketStateSignal } from '@macro-inc/collaboration/websocket/s
 import { resolveWsUrl as resolveGatewayWsUrl } from '@service-connection/websocket';
 import { storageServiceClient } from '@service-storage/client';
 import type { ResultAsync } from 'neverthrow';
+import type { DocumentSyncAuthorization } from './authorization';
+import { guardDocumentSyncSource } from './guarded-source';
 
 const SYNC_SERVICE_WS_URL = `${SYNC_SERVICE_HOSTS['ws']}/document`;
 
+/** Fetches a fresh sync-service connection token, or undefined on failure. */
+type GetToken = () => Promise<string | undefined>;
+
 /**
- * Browser sync websocket: uses the already-fetched token for the initial
- * connect, then refetches a fresh permission token on every reconnect.
+ * Sync websocket over any token source: uses the already-fetched token for the
+ * initial connect, then calls `getToken` for a fresh token on every reconnect.
+ *
+ * `documentId` is the sync-service session key — a document id or a collab
+ * surface id; the transport is identical.
  */
-export function createSyncServiceSocket(
+export function createTokenRefreshingSocket(
   documentId: string,
-  initialToken: string
+  initialToken: string | undefined,
+  getToken: GetToken,
+  traceparent?: () => string | undefined
 ): SyncWebsocket {
   const connectUrl = (token: string) => {
     const url = `${SYNC_SERVICE_WS_URL}/${documentId}/connect?token=${token}`;
     // Browsers can't set websocket headers, so the trace context rides a
     // query param; the sync service joins its spans to the active
     // transaction's trace.
-    const traceparent = resumeDocumentSpan(documentId)?.traceparent();
-    return traceparent
-      ? `${url}&traceparent=${encodeURIComponent(traceparent)}`
-      : url;
+    const trace = traceparent?.();
+    return trace ? `${url}&traceparent=${encodeURIComponent(trace)}` : url;
   };
-  let initialUrl: string | undefined = connectUrl(initialToken);
+  let initialUrl = initialToken ? connectUrl(initialToken) : undefined;
   let fallbackUrl = initialUrl;
+  // A cached document has no initial credential. Require fresh authorization
+  // for every connection; never turn an offline open into stale-token replay.
+  const allowFallback = initialUrl !== undefined;
 
   const getUrl: UrlResolver = async () => {
     if (initialUrl) {
@@ -52,17 +64,13 @@ export function createSyncServiceSocket(
       return url;
     }
 
-    const response =
-      await storageServiceClient.permissionsTokens.createPermissionToken({
-        document_id: documentId,
-      });
-
-    if (response.isErr()) {
-      console.error('failed to fetch permission token', response);
-      return fallbackUrl;
+    const token = await getToken();
+    if (!token) {
+      if (allowFallback && fallbackUrl) return fallbackUrl;
+      throw new Error('Unable to authorize sync connection');
     }
 
-    const refreshedUrl = connectUrl(response.value.token);
+    const refreshedUrl = connectUrl(token);
     fallbackUrl = refreshedUrl;
     return refreshedUrl;
   };
@@ -71,10 +79,34 @@ export function createSyncServiceSocket(
 }
 
 /**
- * The one multiplexed sync connection: every document's sync traffic rides a
- * single websocket to the connection gateway, which fans it out to the
- * sync-router server-side. Lazy so nothing connects until a document opens.
+ * Browser sync websocket for a document: uses the already-fetched token for
+ * the initial connect, then refetches a fresh permission token on every
+ * reconnect.
  */
+export function createSyncServiceSocket(
+  documentId: string,
+  initialToken: string | undefined,
+  authorization?: DocumentSyncAuthorization
+): SyncWebsocket {
+  return createTokenRefreshingSocket(
+    documentId,
+    authorization ? undefined : initialToken,
+    authorization?.getToken ??
+      (async () => {
+        const response =
+          await storageServiceClient.permissionsTokens.createPermissionToken({
+            document_id: documentId,
+          });
+        if (response.isErr()) {
+          console.error('failed to fetch permission token', response);
+          return undefined;
+        }
+        return response.value.token;
+      }),
+    () => resumeDocumentSpan(documentId)?.traceparent()
+  );
+}
+
 let gatewayTransport: GatewaySyncTransport | undefined;
 function syncGatewayTransport(): GatewaySyncTransport {
   gatewayTransport ??= new GatewaySyncTransport(resolveGatewayWsUrl);
@@ -86,26 +118,49 @@ async function refreshPermissionToken(documentId: string): Promise<string> {
     await storageServiceClient.permissionsTokens.createPermissionToken({
       document_id: documentId,
     });
-  if (response.isErr()) {
-    throw new Error(`failed to fetch permission token: ${response.error}`);
-  }
+  if (response.isErr()) throw new Error('Unable to authorize sync connection');
   return response.value.token;
 }
 
 export const createSyncServiceSource = (
   documentId: string,
-  token: string
+  token: string | undefined,
+  authorization?: DocumentSyncAuthorization
+): {
+  source: LiveSyncSource;
+  doInitialSync: () => ResultAsync<InitialSync, SyncError>;
+} => {
+  const ws: SyncSocket = SYNC_VIA_GATEWAY
+    ? syncGatewayTransport().attach(
+        documentId,
+        authorization ? undefined : token,
+        authorization?.getToken ?? (() => refreshPermissionToken(documentId))
+      )
+    : createSyncServiceSocket(documentId, token, authorization);
+  const state = createWebsocketStateSignal(ws);
+  const source = new SyncServiceSource(ws, documentId, {
+    status: () => mapToSyncStatus(state()),
+  });
+  return authorization
+    ? guardDocumentSyncSource(source, source.doInitialSync, authorization)
+    : { source, doInitialSync: source.doInitialSync };
+};
+
+/**
+ * Live sync source for a collab surface. Same transport as documents; only
+ * the token endpoint differs (`/collab_surfaces/{id}/token`).
+ */
+export const createCollabSurfaceSource = (
+  surfaceId: string,
+  initialToken: string,
+  getToken: GetToken
 ): {
   source: LiveSyncSource;
   doInitialSync: () => ResultAsync<InitialSync, TimeoutError>;
 } => {
-  const ws: SyncSocket = SYNC_VIA_GATEWAY
-    ? syncGatewayTransport().attach(documentId, token, () =>
-        refreshPermissionToken(documentId)
-      )
-    : createSyncServiceSocket(documentId, token);
+  const ws = createTokenRefreshingSocket(surfaceId, initialToken, getToken);
   const state = createWebsocketStateSignal(ws);
-  const source = new SyncServiceSource(ws, documentId, {
+  const source = new SyncServiceSource(ws, surfaceId, {
     status: () => mapToSyncStatus(state()),
   });
   return { source, doInitialSync: source.doInitialSync };

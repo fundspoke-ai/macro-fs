@@ -4,34 +4,56 @@ import type {
 } from '../../../generated/storage/types.gen';
 import { unwrap } from '../../utils';
 import type { MacroClient } from '../../utils/client';
-import type { MacroEntityType } from '../entity';
+import type { FavoritableEntity, MacroEntityType } from '../entity';
 
 export type { Favorite, FavoriteEntityRef };
+
+/**
+ * Which favorites to list.
+ *
+ * The two dimensions are independent. Within one, the values are alternatives;
+ * between them they are both required, so `entityTypes: ['document']` with
+ * `entityIds: [a, b]` matches only documents `a` and `b`. An omitted or empty
+ * list constrains nothing, which is why the default lists the whole collection.
+ */
+export type FavoritesFilter = {
+  entityTypes?: MacroEntityType[];
+  entityIds?: string[];
+};
 
 /** The user's favorites: a manually ordered collection of entity references. */
 export class FavoritesNamespace {
   constructor(private readonly client: MacroClient) {}
 
   /** The user's favorites, in manual order. */
-  async list(): Promise<Favorite[]> {
-    const { favorites } = unwrap(await this.client.storage.listFavorites({}));
+  async list(filter: FavoritesFilter = {}): Promise<Favorite[]> {
+    const { favorites } = unwrap(
+      await this.client.storage.listFavorites({
+        query: {
+          entityType: filter.entityTypes,
+          entityId: filter.entityIds,
+        },
+      }),
+    );
     return favorites;
   }
 
-  /** Favorite an entity by type and id. Returns the favorite record. */
-  async add(entityType: MacroEntityType, entityId: string): Promise<Favorite> {
+  /**
+   * Favorite an entity. Returns the favorite record.
+   */
+  async add(entity: FavoritableEntity<unknown>): Promise<Favorite> {
     return unwrap(
       await this.client.storage.addFavorite({
-        body: { entityId, entityType },
+        body: { entityId: entity.id, entityType: entity.entityType },
       }),
     );
   }
 
-  /** Remove a favorite by entity type and id. */
-  async remove(entityType: MacroEntityType, entityId: string): Promise<void> {
+  /** Remove an entity from the user's favorites. */
+  async remove(entity: FavoritableEntity<unknown>): Promise<void> {
     unwrap(
       await this.client.storage.removeFavoriteByEntity({
-        path: { entity_type: entityType, entity_id: entityId },
+        path: { entity_type: entity.entityType, entity_id: entity.id },
       }),
     );
   }

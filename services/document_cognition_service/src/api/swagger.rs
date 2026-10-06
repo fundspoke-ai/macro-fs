@@ -29,6 +29,11 @@ use mcp_client::inbound::axum_router::{
 };
 use memory::inbound::axum_router::{self as memory_api, MemoryErrorBody, MemoryResponse};
 use onboarding::inbound::axum_router::{self as onboarding_api, CompleteOnboardingRequest};
+use pipedream_mcp::inbound::axum_router::{
+    self as pipedream_api, PipedreamCatalogEntryResponse, PipedreamCatalogResponse,
+    PipedreamCompleteRequest, PipedreamConnectionResponse, PipedreamTokenResponse,
+    PipedreamUpdateRequest,
+};
 
 use crate::api::preview::get_batch_preview::{GetBatchPreviewRequest, GetBatchPreviewResponse};
 
@@ -89,6 +94,7 @@ use utoipa::OpenApi;
             import_api::get_state_handler,
             import_api::run_import_handler,
             import_api::retry_gather_handler,
+            import_api::discover_handler,
             import_api::dismiss_run_handler,
             onboarding_api::get_state_handler,
             onboarding_api::complete_handler,
@@ -101,7 +107,13 @@ use utoipa::OpenApi;
             mcp_api::delete_server,
             mcp_api::start_auth,
             mcp_api::client_metadata,
-            mcp_api::auth_callback
+            mcp_api::auth_callback,
+            pipedream_api::list_connections,
+            pipedream_api::update_connection,
+            pipedream_api::delete_connection,
+            pipedream_api::create_connect_token,
+            pipedream_api::complete_connection,
+            pipedream_api::browse_catalog_handler
         ),
         components(
             schemas(
@@ -110,7 +122,7 @@ use utoipa::OpenApi;
                 StringIDResponse,
                 GenericErrorResponse,
                 // Permissions V2
-                models_permissions::share_permission::access_level::AccessLevel, models_permissions::share_permission::SharePermissionV2, models_permissions::share_permission::UpdateSharePermissionRequestV2, // Share permission
+                models_permissions::share_permission::LinkShare, models_permissions::share_permission::access_level::AccessLevel, models_permissions::share_permission::SharePermissionV2, models_permissions::share_permission::UpdateSharePermissionRequestV2, // Share permission
                 models_permissions::share_permission::channel_share_permission::ChannelSharePermission, models_permissions::share_permission::channel_share_permission::UpdateChannelSharePermission, // Channel share permissions
 
                 // Chat
@@ -208,11 +220,11 @@ use utoipa::OpenApi;
                 ai_usage_api::UsageRequest,
                 ai_usage_api::SetPricingRequest,
                 ai_usage_api::ErrorBody,
-                ai_usage::UsageSummary,
-                ai_usage::FeatureUsage,
-                ai_usage::CompletionUsage,
-                ai_usage::Usage,
-                ai_usage::Price,
+                ai_usage::inbound::models::UsageSummary,
+                ai_usage::inbound::models::FeatureUsage,
+                ai_usage::inbound::models::CompletionUsage,
+                ai_usage::inbound::models::Usage,
+                ai_usage::inbound::models::Price,
                 ai_usage::AiFeature,
 
                 // AI projections
@@ -229,6 +241,14 @@ use utoipa::OpenApi;
                 UpdateServerRequest,
                 StartAuthRequest,
                 StartAuthResponse,
+
+                // Pipedream MCP connectors
+                PipedreamConnectionResponse,
+                PipedreamUpdateRequest,
+                PipedreamTokenResponse,
+                PipedreamCompleteRequest,
+                PipedreamCatalogResponse,
+                PipedreamCatalogEntryResponse,
                 model_error_response::ErrorResponse,
             ),
         ),

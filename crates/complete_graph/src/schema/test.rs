@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use axum::http::{Request as HttpRequest, header};
 use email::domain::models::{
     AttachmentDraft, AttachmentForwarded, CreateDraftInput, CreatedDraft, EmailErr, EmailFilter,
-    EmailSyncStatus, EmailThreadMetadata, EnrichedEmailThreadPreview, GetEmailsRequest,
-    LabelListVisibility, LabelType, Link, LinkLabel, Message, MessageAttachment,
-    MessageListVisibility, ParsedMessage, ParsedThread, Thread, UpdateThreadLabelsResult,
-    UpsertEmailFilterInput, UserEmailLink, UserEmailLinkSettings, UserProvider,
+    EmailSyncStatus, EmailThreadMailCacheFacts, EmailThreadMailPreviews, EmailThreadMailProjection,
+    EmailThreadMetadata, EnrichedEmailThreadPreview, GetEmailsRequest, LabelListVisibility,
+    LabelType, Link, LinkLabel, Message, MessageAttachment, MessageListVisibility, ParsedMessage,
+    ParsedThread, SenderPolicy, Thread, UpdateThreadLabelsResult, UpsertEmailFilterInput,
+    UserEmailLink, UserEmailLinkSettings, UserProvider,
 };
 use entity_access::domain::models::{
     AccessError, AccessLevel, BotAccessScope, BotId, CallChannelInfo, EditAccessLevel,
@@ -26,18 +27,29 @@ use macro_user_id::{
     user_id::{MacroUserId, MacroUserIdStr},
 };
 use model_entity::EntityType as ModelEntityType;
+use model_owner::Owner;
 use model_user::UserContext;
 use models_pagination::{Paginated, PaginatedCursor, SimpleSortMethod};
 use models_soup::{
+    chat::SoupChat,
     document::SoupDocument,
     email_thread::{SoupContact, SoupEmailThreadPreview, SoupEnrichedEmailThreadPreview},
+    initiative::SoupInitiative,
     item::SoupItem,
+    project::SoupProject,
 };
 use rootcause::Report;
 use soup_realtime::domain::models::Patch;
 use uuid::Uuid;
 
 use super::*;
+
+mod database_activity;
+mod database_row;
+mod email_archive;
+mod initiative;
+mod scheduled_actions;
+mod soup_patches;
 
 const VALID_USER_ID: &str = "macro|user@example.com";
 const INTERNAL_USER_ID: &str = "macro|internal@example.com";
@@ -74,11 +86,81 @@ struct CountingSoupService {
     grouped_calls: Arc<AtomicUsize>,
 }
 
+fn soup_document(id: Uuid) -> SoupItem<()> {
+    grouped_document(id).map_extra(|_| ())
+}
+
+fn soup_agent_session(id: Uuid) -> SoupItem<()> {
+    SoupItem::AgentSession(models_soup::agent_session::SoupAgentSession {
+        id,
+        name: "A session".to_string(),
+        is_archived: false,
+        owner_id: Owner::from_principal_str(VALID_USER_ID).unwrap(),
+        bot_id: Uuid::from_u128(99),
+        harness: "claude".to_string(),
+        repo_url: None,
+        repo_branch: None,
+        pull_request_url: None,
+        working_branch: None,
+        pull_request_state: None,
+        pull_request_id: None,
+        turn_state: None,
+        thread_id: None,
+        status: "no_messages".to_string(),
+        created_at: Default::default(),
+        updated_at: Default::default(),
+        viewed_at: None,
+        extra: (),
+    })
+}
+
+fn soup_initiative(id: Uuid) -> SoupItem<()> {
+    SoupItem::Initiative(SoupInitiative {
+        id,
+        name: "Launch project".to_string(),
+        owner_id: Owner::from_principal_str(VALID_USER_ID).unwrap(),
+        created_at: Default::default(),
+        updated_at: Default::default(),
+        viewed_at: None,
+        extra: (),
+    })
+}
+
+fn soup_project(id: Uuid) -> SoupItem<()> {
+    SoupItem::Project(SoupProject {
+        id,
+        name: format!("Project {id}"),
+        owner_id: Owner::from_principal_str(VALID_USER_ID).unwrap(),
+        parent_id: None,
+        created_at: Default::default(),
+        updated_at: Default::default(),
+        viewed_at: None,
+        deleted_at: None,
+        extra: (),
+    })
+}
+
+fn soup_chat(id: Uuid) -> SoupItem<()> {
+    SoupItem::Chat(SoupChat {
+        id,
+        name: format!("Chat {id}"),
+        model: Some("openai/gpt-5.6".to_string()),
+        owner_id: Owner::from_principal_str(VALID_USER_ID).unwrap(),
+        project_id: None,
+        is_persistent: true,
+        created_at: Default::default(),
+        updated_at: Default::default(),
+        viewed_at: None,
+        deleted_at: None,
+        extra: (),
+    })
+}
+
 fn grouped_document(id: Uuid) -> SoupItem<soup::domain::models::SoupPropertiesField> {
     SoupItem::Document(SoupDocument {
         id,
         document_version_id: 1,
-        owner_id: MacroUserIdStr::parse_from_str(VALID_USER_ID).unwrap(),
+        owner_id: Owner::from_principal_str(VALID_USER_ID).unwrap(),
         name: format!("Document {id}"),
         file_type: None,
         sha: None,
@@ -123,9 +205,38 @@ impl SoupService for CountingSoupService {
         if self.return_empty_raw || raw_response.is_some() {
             let page: PaginatedCursor<SoupItem<()>, String, SimpleSortMethod, T> =
                 Paginated::from_parts(raw_response.unwrap_or_default(), None);
-            return Ok(soup::domain::ports::SoupOutput::Left(page));
+            return Ok(soup::domain::ports::SoupOutput::Simple(page));
         }
         Err(test_soup_err())
+    }
+
+    async fn get_user_soup_with_projection<T>(
+        &self,
+        req: soup::domain::models::SoupRequest<T>,
+        team_receipt: Option<EntityAccessReceipt<entity_access::domain::models::MemberTeamRole>>,
+    ) -> Result<
+        soup::domain::ports::SoupOutput<T, soup::domain::models::SoupProjectionHydration>,
+        soup::domain::models::SoupErr,
+    >
+    where
+        soup::domain::models::SoupRequest<T>: soup::domain::models::IntoSoupReqAst,
+        T: Clone + serde::Serialize + Send,
+    {
+        self.get_user_soup(req, team_receipt).await.map(|output| {
+            output.map(|item| {
+                let document_server_facts = matches!(&item, SoupItem::Document(_)).then_some(
+                    soup::domain::models::SoupDocumentServerFacts {
+                        is_email_attachment: false,
+                        is_important: true,
+                        status_option_ids: Vec::new(),
+                    },
+                );
+                soup::domain::models::SoupProjectionHydration {
+                    item,
+                    document_server_facts,
+                }
+            })
+        })
     }
 
     async fn get_user_soup_with_properties<T>(
@@ -221,12 +332,33 @@ impl SoupService for CountingSoupService {
 /// the lazy extraction actually runs.
 #[derive(Clone, Default)]
 struct CountingEmailService {
+    thread_is_read: Arc<Mutex<bool>>,
+    thread_archived: Arc<Mutex<bool>>,
+    archive_mutation_calls: Arc<Mutex<Vec<(MacroUserIdStr<'static>, Uuid, bool)>>>,
     inbox_calls: Arc<AtomicUsize>,
     user_label_calls: Arc<AtomicUsize>,
     user_link_calls: Arc<AtomicUsize>,
     user_catalog_identities: Arc<Mutex<Vec<MacroUserIdStr<'static>>>>,
     seen_mutation_calls: Arc<Mutex<Vec<(MacroUserIdStr<'static>, Uuid)>>>,
+    unread_mutation_calls: Arc<Mutex<Vec<(MacroUserIdStr<'static>, Uuid)>>>,
     label_mutation_calls: Arc<Mutex<Vec<(MacroUserIdStr<'static>, Uuid, Uuid, bool)>>>,
+}
+
+impl graphql_soup::EmailMutationThreadReader for CountingEmailService {
+    async fn read(
+        &self,
+        user_id: MacroUserIdStr<'static>,
+        thread_id: Uuid,
+    ) -> async_graphql::Result<Option<SoupEnrichedEmailThreadPreview<()>>> {
+        assert_eq!(user_id.as_ref(), VALID_USER_ID);
+        let SoupItem::EmailThread(mut thread) =
+            soup_email_thread_with_read_status(thread_id, *self.thread_is_read.lock().unwrap())
+        else {
+            unreachable!()
+        };
+        thread.thread.inbox_visible = !*self.thread_archived.lock().unwrap();
+        Ok(Some(thread))
+    }
 }
 
 fn test_email_err() -> EmailErr {
@@ -265,6 +397,7 @@ impl EmailUserService for CountingEmailService {
             .expect("user catalog identities lock")
             .push(macro_id);
         Ok(vec![UserEmailLink {
+            draft_is_signal: true,
             id: Uuid::from_u128(502),
             macro_id: MacroUserIdStr::try_from_email("owner@example.com").unwrap(),
             email_address: EmailStr::try_from("inbox@example.com".to_owned()).unwrap(),
@@ -285,6 +418,20 @@ impl EmailUserService for CountingEmailService {
 }
 
 impl EmailService for CountingEmailService {
+    async fn set_thread_archived(
+        &self,
+        user_id: MacroUserIdStr<'static>,
+        thread_id: Uuid,
+        archived: bool,
+    ) -> Result<(), EmailErr> {
+        *self.thread_archived.lock().unwrap() = archived;
+        self.archive_mutation_calls
+            .lock()
+            .unwrap()
+            .push((user_id, thread_id, archived));
+        Ok(())
+    }
+
     async fn get_email_thread_previews(
         &self,
         _req: GetEmailsRequest,
@@ -351,6 +498,23 @@ impl EmailService for CountingEmailService {
         Err(test_email_err())
     }
 
+    async fn save_draft_for_user(
+        &self,
+        _macro_id: MacroUserIdStr<'_>,
+        _link_id: Option<Uuid>,
+        _input: CreateDraftInput,
+    ) -> Result<email::domain::models::SavedUserDraft, EmailErr> {
+        Err(test_email_err())
+    }
+
+    async fn delete_draft_for_user(
+        &self,
+        _macro_id: MacroUserIdStr<'_>,
+        _draft_id: Uuid,
+    ) -> Result<email::domain::models::DeletedUserDraft, EmailErr> {
+        Err(test_email_err())
+    }
+
     async fn send_message(
         &self,
         _link: &Link,
@@ -379,9 +543,23 @@ impl EmailService for CountingEmailService {
         macro_id: MacroUserIdStr<'static>,
         thread_id: Uuid,
     ) -> Result<(), EmailErr> {
+        *self.thread_is_read.lock().unwrap() = true;
         self.seen_mutation_calls
             .lock()
             .expect("seen mutation calls lock")
+            .push((macro_id, thread_id));
+        Ok(())
+    }
+
+    async fn mark_thread_unread(
+        &self,
+        macro_id: MacroUserIdStr<'static>,
+        thread_id: Uuid,
+    ) -> Result<(), EmailErr> {
+        *self.thread_is_read.lock().unwrap() = false;
+        self.unread_mutation_calls
+            .lock()
+            .expect("unread mutation calls lock")
             .push((macro_id, thread_id));
         Ok(())
     }
@@ -419,6 +597,15 @@ impl EmailService for CountingEmailService {
         Err(test_email_err())
     }
 
+    async fn set_sender_policy(
+        &self,
+        _link: &Link,
+        _sender_email: &str,
+        _policy: SenderPolicy,
+    ) -> Result<(), EmailErr> {
+        Err(test_email_err())
+    }
+
     async fn delete_email_filter(&self, _link: &Link, _filter_id: Uuid) -> Result<bool, EmailErr> {
         Err(test_email_err())
     }
@@ -432,6 +619,7 @@ impl EmailService for CountingEmailService {
 struct RecordingEmailContentReader {
     calls: Arc<Mutex<Vec<Vec<graphql_email::EmailContentKey>>>>,
     metadata_calls: Arc<Mutex<Vec<Vec<Uuid>>>>,
+    mail_projection_calls: Arc<Mutex<Vec<Vec<Uuid>>>>,
 }
 
 impl graphql_email::SoupEmailThreadMetadataEdgeReader for RecordingEmailContentReader {
@@ -461,6 +649,44 @@ impl graphql_email::SoupEmailThreadMetadataEdgeReader for RecordingEmailContentR
     }
 }
 
+impl graphql_email::SoupEmailThreadMailProjectionEdgeReader for RecordingEmailContentReader {
+    async fn get_email_thread_mail_projections(
+        &self,
+        _user_id: &MacroUserIdStr<'static>,
+        thread_ids: Vec<Uuid>,
+    ) -> HashMap<Uuid, graphql_email::EmailThreadMailProjectionLoad> {
+        self.mail_projection_calls
+            .lock()
+            .unwrap()
+            .push(thread_ids.clone());
+        thread_ids
+            .into_iter()
+            .map(|thread_id| {
+                (
+                    thread_id,
+                    graphql_email::EmailThreadMailProjectionLoad::Found(Arc::new(
+                        EmailThreadMailProjection {
+                            thread_id,
+                            cache_facts: EmailThreadMailCacheFacts {
+                                latest_non_spam_message_ts: None,
+                                latest_outbound_message_ts: None,
+                                has_calendar_attachment: false,
+                                has_thread_share: false,
+                            },
+                            draft_state: None,
+                            previews: EmailThreadMailPreviews {
+                                all: None,
+                                draft: None,
+                                sent: None,
+                            },
+                        },
+                    )),
+                )
+            })
+            .collect()
+    }
+}
+
 impl graphql_email::SoupEmailContentEdgeReader for RecordingEmailContentReader {
     async fn get_email_content(
         &self,
@@ -482,6 +708,108 @@ impl graphql_email::SoupEmailContentEdgeReader for RecordingEmailContentReader {
                 (key, graphql_email::EmailContentLoad::Found(vec![message]))
             })
             .collect()
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingActivityReader {
+    edge_calls: Arc<Mutex<Vec<Vec<graphql_activity::ActivityEdgeKey>>>>,
+    feed_calls: Arc<Mutex<Vec<(String, Option<(chrono::DateTime<chrono::Utc>, Uuid)>, u32)>>>,
+    overview_calls: Arc<Mutex<Vec<(String, activity::ActivityWindow)>>>,
+    records: Arc<Mutex<Vec<activity::ActivityRecord>>>,
+}
+
+impl RecordingActivityReader {
+    fn set_records(&self, records: Vec<activity::ActivityRecord>) {
+        *self.records.lock().expect("activity records lock") = records;
+    }
+}
+
+impl graphql_activity::SoupActivityEdgeReader for RecordingActivityReader {
+    async fn entity_activity(
+        &self,
+        keys: Vec<graphql_activity::ActivityEdgeKey>,
+    ) -> HashMap<graphql_activity::ActivityEdgeKey, graphql_activity::ActivityEdgeLoad> {
+        self.edge_calls
+            .lock()
+            .expect("activity edge calls lock")
+            .push(keys.clone());
+        let records = self.records.lock().expect("activity records lock").clone();
+        keys.into_iter()
+            .map(|key| {
+                let matching = records
+                    .iter()
+                    .filter(|record| {
+                        record.entity_type == key.entity.entity_type
+                            && record.entity_id == key.entity.entity_id.as_ref()
+                    })
+                    .take(key.limit as usize)
+                    .cloned()
+                    .collect();
+                (key, graphql_activity::ActivityEdgeLoad::Found(matching))
+            })
+            .collect()
+    }
+}
+
+impl graphql_activity::ActivityFeedReader for RecordingActivityReader {
+    async fn subject_feed(
+        &self,
+        subject_id: &str,
+        cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)>,
+        limit: std::num::NonZeroU32,
+    ) -> Result<activity::ActivityFeedPage, graphql_activity::ActivityReadFailed> {
+        let limit = limit.get();
+        self.feed_calls
+            .lock()
+            .expect("activity feed calls lock")
+            .push((subject_id.to_owned(), cursor, limit));
+        // Emulate the repo: subject-scoped, newest-first keyset order,
+        // strictly after the cursor position, at most `limit` rows, with
+        // `next` set whenever more rows remain past the page.
+        let records = self.records.lock().expect("activity records lock").clone();
+        let mut page: Vec<activity::ActivityRecord> = records
+            .into_iter()
+            .filter(|record| record.subject_id == subject_id)
+            .filter(|record| {
+                cursor.is_none_or(|(occurred_at, id)| {
+                    (record.occurred_at, record.id) < (occurred_at, id)
+                })
+            })
+            .collect();
+        let has_more = page.len() > limit as usize;
+        page.truncate(limit as usize);
+        let next = has_more
+            .then(|| page.last().map(|record| (record.occurred_at, record.id)))
+            .flatten();
+        Ok(activity::ActivityFeedPage {
+            records: page,
+            next,
+        })
+    }
+
+    async fn subject_overview(
+        &self,
+        subject_id: &str,
+        window: activity::ActivityWindow,
+    ) -> Result<activity::ActivityOverview, graphql_activity::ActivityReadFailed> {
+        self.overview_calls
+            .lock()
+            .expect("activity overview calls lock")
+            .push((subject_id.to_owned(), window.clone()));
+        Ok(activity::ActivityOverview::new(
+            window.clone(),
+            vec![activity::DayCount {
+                day: window.start,
+                count: std::num::NonZeroU64::new(2).unwrap(),
+            }],
+            vec![activity::EntityRank {
+                entity_type: ModelEntityType::Document,
+                entity_id: "overview-doc".to_owned(),
+                count: std::num::NonZeroU64::new(2).unwrap(),
+            }],
+        )
+        .unwrap())
     }
 }
 
@@ -518,6 +846,7 @@ fn full_message(thread_id: Uuid) -> Message {
     let message_id = Uuid::from_u128(100);
     let draft_attachment_id = Uuid::from_u128(102);
     Message {
+        calendar_invitations: Default::default(),
         db_id: message_id,
         provider_id: Some("provider-message".to_owned()),
         thread_db_id: thread_id,
@@ -590,10 +919,26 @@ impl EntityAccessService for CountingEntityAccessService {
         &self,
         _user_id: &MacroUserId<Lowercase<'_>>,
         _user_org_id: Option<i64>,
-        _entity_id: &str,
-        _entity_type: EntityType,
+        entity_id: &str,
+        entity_type: EntityType,
     ) -> Result<EntityAccessReceipt<T>, AccessError> {
-        Err(AccessError::Internal)
+        // The viewer can see exactly one database and no other.
+        if entity_type == EntityType::Database {
+            if entity_id != database_activity::VIEWABLE_DATABASE_ID {
+                return Err(AccessError::Unauthorized);
+            }
+            return EntityAccessReceipt::try_new_authenticated_user(
+                MacroUserIdStr::parse_from_str(VALID_USER_ID).unwrap(),
+                entity_access::domain::models::Entity {
+                    entity_id: entity_id.to_owned(),
+                    entity_type,
+                },
+                EntityPermission::AccessLevel {
+                    access_level: AccessLevel::View,
+                },
+            );
+        }
+        Err(AccessError::internal("test access failure"))
     }
 
     async fn generate_bot_entity_access_receipt<T: RequiredPermission>(
@@ -603,7 +948,7 @@ impl EntityAccessService for CountingEntityAccessService {
         _entity_id: &str,
         _entity_type: EntityType,
     ) -> Result<EntityAccessReceipt<T>, AccessError> {
-        Err(AccessError::Internal)
+        Err(AccessError::internal("test access failure"))
     }
 
     async fn get_access_level(
@@ -612,7 +957,7 @@ impl EntityAccessService for CountingEntityAccessService {
         _entity_id: &str,
         _entity_type: EntityType,
     ) -> Result<Option<AccessLevel>, AccessError> {
-        Err(AccessError::Internal)
+        Err(AccessError::internal("test access failure"))
     }
 
     async fn check_access(
@@ -622,7 +967,7 @@ impl EntityAccessService for CountingEntityAccessService {
         _entity_type: EntityType,
         _required_level: AccessLevel,
     ) -> Result<AccessLevel, AccessError> {
-        Err(AccessError::Internal)
+        Err(AccessError::internal("test access failure"))
     }
 
     async fn check_public_access(
@@ -631,7 +976,7 @@ impl EntityAccessService for CountingEntityAccessService {
         _entity_type: EntityType,
         _required_level: AccessLevel,
     ) -> Result<AccessLevel, AccessError> {
-        Err(AccessError::Internal)
+        Err(AccessError::internal("test access failure"))
     }
 
     async fn get_entity_permission(
@@ -641,7 +986,7 @@ impl EntityAccessService for CountingEntityAccessService {
         _entity_type: EntityType,
         _user_org_id: Option<i64>,
     ) -> Result<EntityPermission, AccessError> {
-        Err(AccessError::Internal)
+        Err(AccessError::internal("test access failure"))
     }
 
     async fn get_crm_entity_permission_with_team(
@@ -650,7 +995,7 @@ impl EntityAccessService for CountingEntityAccessService {
         _entity_id: &str,
         _entity_type: EntityType,
     ) -> Result<(EntityPermission, Uuid, TeamRole), AccessError> {
-        Err(AccessError::Internal)
+        Err(AccessError::internal("test access failure"))
     }
 
     async fn get_users_by_entity(
@@ -658,21 +1003,21 @@ impl EntityAccessService for CountingEntityAccessService {
         _entity_id: &str,
         _entity_type: EntityType,
     ) -> Result<Vec<MacroUserIdStr<'static>>, AccessError> {
-        Err(AccessError::Internal)
+        Err(AccessError::internal("test access failure"))
     }
 
     async fn get_call_channel(
         &self,
         _call_id: &Uuid,
     ) -> Result<Option<CallChannelInfo>, AccessError> {
-        Err(AccessError::Internal)
+        Err(AccessError::internal("test access failure"))
     }
 
     async fn get_call_channel_by_channel_id(
         &self,
         _channel_id: &Uuid,
     ) -> Result<Option<CallChannelInfo>, AccessError> {
-        Err(AccessError::Internal)
+        Err(AccessError::internal("test access failure"))
     }
 
     async fn get_user_team(
@@ -757,12 +1102,14 @@ struct TestHarness {
         CountingSoupService,
         NoOpSoupRealtimeSubscriptionService,
         NoopWebSocketNotificationSubscriptionService,
+        graphql_activity::NoOpActivitySubscriptionService,
         CountingEmailService,
         CountingEntityAccessService,
         FakeAuthorizationService,
         TestState,
         NoOpEntityPropertyWriter,
         UnavailableEntityMutationService,
+        graphql_favorite::NoOpFavoriteMutationService,
         NoOpChannelActivityMutationService,
         NoOpNotificationMutationService,
         NoOpSoupNotificationEdgeReader,
@@ -770,11 +1117,13 @@ struct TestHarness {
         RecordingEmailContentReader,
         graphql_favorite::NoOpEntityFavoriteEdgeReader,
         graphql_permission::NoOpEntityPermissionEdgeReader,
+        RecordingActivityReader,
     >,
     state: TestState,
     soup_service: CountingSoupService,
     email_service: CountingEmailService,
     email_content_reader: RecordingEmailContentReader,
+    activity_reader: RecordingActivityReader,
     authorization_calls: Arc<AtomicUsize>,
     inbox_calls: Arc<AtomicUsize>,
     user_label_calls: Arc<AtomicUsize>,
@@ -794,6 +1143,7 @@ fn harness() -> TestHarness {
     let authorization = FakeAuthorizationService::default();
     let soup = CountingSoupService::default();
     let email_content_reader = RecordingEmailContentReader::default();
+    let activity_reader = RecordingActivityReader::default();
     let authorization_calls = Arc::clone(&authorization.authorization_calls);
     let inbox_calls = Arc::clone(&email.inbox_calls);
     let user_label_calls = Arc::clone(&email.user_label_calls);
@@ -815,6 +1165,7 @@ fn harness() -> TestHarness {
         soup_service: soup,
         email_service: email,
         email_content_reader,
+        activity_reader,
         authorization_calls,
         inbox_calls,
         user_label_calls,
@@ -876,17 +1227,33 @@ impl TestHarness {
             .data(GraphqlRequestParts::new(parts))
             .data(self.state.clone())
             .data(self.state.email.service())
+            .data(graphql_soup::EmailMutationThreadLoader::new(
+                self.email_service.clone(),
+            ))
             .data(graphql_soup::soup_item_loader(
                 self.soup_service.clone(),
                 Arc::new(self.email_service.clone()),
+            ))
+            .data(graphql_properties::entity_properties_loader(
+                user_id.clone(),
+                NoOpEntityPropertyReader,
             ))
             .data(graphql_email::email_content_loader(
                 user_id.clone(),
                 self.email_content_reader.clone(),
             ))
             .data(graphql_email::email_thread_metadata_loader(
+                user_id.clone(),
+                self.email_content_reader.clone(),
+            ))
+            .data(graphql_email::email_thread_mail_projection_loader(
                 user_id,
                 self.email_content_reader.clone(),
+            ))
+            .data(NoOpEntityFavoriteEdgeReader)
+            .data(self.activity_reader.clone())
+            .data(graphql_activity::entity_activity_loader(
+                self.activity_reader.clone(),
             ))
     }
 }
@@ -902,21 +1269,23 @@ async fn soup_updates_subscribes_as_the_authenticated_user() {
         receiver: Arc::new(Mutex::new(Some(receiver))),
         subscribed_user: Arc::clone(&subscribed_user),
     };
-    let soup_service = CountingSoupService {
-        return_empty_raw: true,
-        ..Default::default()
-    };
+    let soup_service = CountingSoupService::default();
+    let document_id = Uuid::from_u128(42);
+    let deleted_document_id = Uuid::from_u128(43);
+    soup_service.set_raw_response(vec![soup_document(document_id)]);
     let loader = graphql_soup::soup_item_loader(soup_service.clone(), Arc::new(NoOpEmailService));
     let schema: SoupSchema<
         CountingSoupService,
         TestRealtimeSubscriptionService,
         NoopWebSocketNotificationSubscriptionService,
+        graphql_activity::NoOpActivitySubscriptionService,
         NoOpEmailService,
         NoOpEntityAccessService,
         SchemaOnlyAuthorizationService,
         SchemaOnlyState,
         NoOpEntityPropertyWriter,
         UnavailableEntityMutationService,
+        NoOpFavoriteMutationService,
         NoOpChannelActivityMutationService,
         NoOpNotificationMutationService,
         NoOpSoupNotificationEdgeReader,
@@ -924,20 +1293,21 @@ async fn soup_updates_subscribes_as_the_authenticated_user() {
         NoOpSoupEmailContentEdgeReader,
         NoOpEntityFavoriteEdgeReader,
         NoOpEntityPermissionEdgeReader,
+        NoOpActivityReader,
     > = build_schema_with_services(
         soup_service,
         realtime,
         NoopWebSocketNotificationSubscriptionService,
+        graphql_activity::NoOpActivitySubscriptionService,
     );
     let request = async_graphql::Request::new(
-        "subscription { soupUpdates { __typename ... on SoupUpdated { item { id } } ... on GraphqlCacheDeletion { graphqlTypeName entityId } } }",
+        "subscription { soupUpdates { __typename ... on SoupUpdated { item { id cacheProjection } } ... on GraphqlCacheDeletion { graphqlTypeName entityId } } }",
     )
     .data(user_id.clone())
     .data(loader);
     let responses = schema.execute_stream(request);
     pin_mut!(responses);
 
-    let document_id = Uuid::from_u128(42);
     sender
         .send(Patch::Updated(
             ModelEntityType::Document.with_entity_string(document_id.to_string()),
@@ -946,7 +1316,7 @@ async fn soup_updates_subscribes_as_the_authenticated_user() {
         .expect("subscription remains open");
     sender
         .send(Patch::Deleted(
-            ModelEntityType::Document.with_entity_string(document_id.to_string()),
+            ModelEntityType::Document.with_entity_string(deleted_document_id.to_string()),
         ))
         .await
         .expect("subscription remains open");
@@ -966,10 +1336,248 @@ async fn soup_updates_subscribes_as_the_authenticated_user() {
 
     assert_eq!(updates.len(), 2);
     assert_eq!(updates[0]["__typename"], "SoupUpdated");
-    assert!(updates[0]["item"].is_null());
+    assert_eq!(updates[0]["item"]["id"], document_id.to_string());
+    assert!(updates[0]["item"]["cacheProjection"].is_string());
     assert_eq!(updates[1]["__typename"], "GraphqlCacheDeletion");
     assert_eq!(updates[1]["graphqlTypeName"], "GraphqlSoupDocument");
-    assert_eq!(updates[1]["entityId"], document_id.to_string());
+    assert_eq!(updates[1]["entityId"], deleted_document_id.to_string());
+    assert_eq!(
+        subscribed_user
+            .lock()
+            .expect("subscribed user lock")
+            .as_ref(),
+        Some(&user_id)
+    );
+}
+
+#[tokio::test]
+async fn agent_session_log_appended_streams_runs_for_an_accessible_session() {
+    use agent_runtime_protocol::domain::schema::v0::{SystemEvent, ToServerMessage};
+    use agent_session::domain::model::{
+        AgentSessionId, AgentSessionLog, Message, StoredAgentSessionLog,
+    };
+    use agent_session_realtime::domain::ports::AgentSessionLogSubscriptionService;
+    use async_graphql::futures_util::{StreamExt as _, pin_mut};
+
+    struct TestLogSubscriptions {
+        receiver: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<Vec<StoredAgentSessionLog>>>>>,
+        subscribed: Arc<Mutex<Option<AgentSessionId>>>,
+    }
+
+    impl AgentSessionLogSubscriptionService for TestLogSubscriptions {
+        fn subscribe(
+            &self,
+            session_id: AgentSessionId,
+        ) -> tokio::sync::mpsc::Receiver<Vec<StoredAgentSessionLog>> {
+            *self.subscribed.lock().expect("subscribed lock") = Some(session_id);
+            self.receiver
+                .lock()
+                .expect("receiver lock")
+                .take()
+                .expect("subscribed once")
+        }
+    }
+
+    let user_id = MacroUserIdStr::parse_from_str(VALID_USER_ID).unwrap();
+    let session_id = Uuid::from_u128(7);
+    let other_session_id = Uuid::from_u128(8);
+    let (sender, receiver) = tokio::sync::mpsc::channel(2);
+    let subscribed = Arc::new(Mutex::new(None));
+    let subscriptions = crate::agent_session_log_subscriptions(TestLogSubscriptions {
+        receiver: Arc::new(Mutex::new(Some(receiver))),
+        subscribed: Arc::clone(&subscribed),
+    });
+    let soup_service = CountingSoupService::default();
+    soup_service.set_raw_response(vec![soup_agent_session(session_id)]);
+    let loader = graphql_soup::soup_item_loader(soup_service.clone(), Arc::new(NoOpEmailService));
+    let schema = build_schema_with_service::<
+        CountingSoupService,
+        NoOpEmailService,
+        NoOpEntityAccessService,
+        SchemaOnlyAuthorizationService,
+        SchemaOnlyState,
+        NoOpEntityPropertyWriter,
+        UnavailableEntityMutationService,
+        NoOpFavoriteMutationService,
+        NoOpChannelActivityMutationService,
+        NoOpNotificationMutationService,
+        NoOpSoupNotificationEdgeReader,
+        NoOpEntityPropertyReader,
+        NoOpSoupEmailContentEdgeReader,
+        NoOpEntityFavoriteEdgeReader,
+        NoOpEntityPermissionEdgeReader,
+        NoOpActivityReader,
+    >(soup_service);
+    let query = format!(
+        "subscription {{ agentSessionLogAppended(sessionId: \"{session_id}\") {{ id userId direction content }} }}"
+    );
+
+    // A session the viewer cannot see cannot be followed.
+    let refused = schema
+        .execute_stream(
+            async_graphql::Request::new(format!(
+                "subscription {{ agentSessionLogAppended(sessionId: \"{other_session_id}\") {{ id }} }}"
+            ))
+            .data(user_id.clone())
+            .data(loader.clone())
+            .data(subscriptions.clone()),
+        )
+        .next()
+        .await
+        .expect("one response");
+    assert!(!refused.errors.is_empty());
+    assert!(subscribed.lock().expect("subscribed lock").is_none());
+
+    let responses = schema.execute_stream(
+        async_graphql::Request::new(query)
+            .data(user_id)
+            .data(loader)
+            .data(subscriptions),
+    );
+    pin_mut!(responses);
+    sender
+        .send(vec![StoredAgentSessionLog {
+            id: Uuid::from_u128(1),
+            created_at: Default::default(),
+            entry: AgentSessionLog {
+                agent_session_id: AgentSessionId::new_from_uuid(session_id),
+                user_id: None,
+                content: Message::ToServer(ToServerMessage::Event {
+                    event: SystemEvent::AcpReady,
+                }),
+            },
+        }])
+        .await
+        .expect("subscription remains open");
+    drop(sender);
+
+    let response = responses.next().await.expect("a run");
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().expect("response data is JSON");
+    let run = data["agentSessionLogAppended"]
+        .as_array()
+        .expect("a run is a list");
+    assert_eq!(run.len(), 1);
+    assert_eq!(run[0]["id"], Uuid::from_u128(1).to_string());
+    assert_eq!(run[0]["direction"], "to_server");
+    assert!(run[0]["content"].is_object());
+    assert_eq!(
+        *subscribed.lock().expect("subscribed lock"),
+        Some(AgentSessionId::new_from_uuid(session_id))
+    );
+    // The fan-out closing means rows were missed: the stream ends with an error.
+    let closed = responses.next().await.expect("a closing response");
+    assert!(!closed.errors.is_empty());
+    assert!(responses.next().await.is_none());
+}
+
+#[tokio::test]
+async fn activity_updates_subscribes_as_the_authenticated_user() {
+    use activity::{
+        ActivitySubscription, ActivitySubscriptionExit, ActivitySubscriptionService,
+        ActivitySubscriptionUpdate,
+    };
+    use async_graphql::futures_util::{StreamExt as _, pin_mut};
+
+    let user_id = MacroUserIdStr::parse_from_str(VALID_USER_ID).unwrap();
+    let subscribed_user: Arc<Mutex<Option<MacroUserIdStr<'static>>>> = Arc::default();
+
+    struct TestActivitySubscriptionService {
+        subscribed_user: Arc<Mutex<Option<MacroUserIdStr<'static>>>>,
+        subscription: Mutex<Option<ActivitySubscription>>,
+    }
+
+    impl ActivitySubscriptionService for TestActivitySubscriptionService {
+        fn subscribe(&self, user_id: MacroUserIdStr<'static>) -> ActivitySubscription {
+            *self.subscribed_user.lock().expect("subscribed user lock") = Some(user_id);
+            self.subscription
+                .lock()
+                .expect("subscription lock")
+                .take()
+                .expect("subscription opened once")
+        }
+    }
+
+    let (sender, receiver) = tokio::sync::mpsc::channel(2);
+    let (exit_sender, exit_receiver) = tokio::sync::oneshot::channel();
+    exit_sender
+        .send(ActivitySubscriptionExit::Closed)
+        .expect("exit receiver remains open");
+    let service = TestActivitySubscriptionService {
+        subscribed_user: Arc::clone(&subscribed_user),
+        subscription: Mutex::new(Some(ActivitySubscription::from_parts(
+            receiver,
+            exit_receiver,
+        ))),
+    };
+
+    let schema: SoupSchema<
+        CountingSoupService,
+        NoOpSoupRealtimeSubscriptionService,
+        NoopWebSocketNotificationSubscriptionService,
+        TestActivitySubscriptionService,
+        NoOpEmailService,
+        NoOpEntityAccessService,
+        SchemaOnlyAuthorizationService,
+        SchemaOnlyState,
+        NoOpEntityPropertyWriter,
+        UnavailableEntityMutationService,
+        NoOpFavoriteMutationService,
+        NoOpChannelActivityMutationService,
+        NoOpNotificationMutationService,
+        NoOpSoupNotificationEdgeReader,
+        NoOpEntityPropertyReader,
+        NoOpSoupEmailContentEdgeReader,
+        NoOpEntityFavoriteEdgeReader,
+        NoOpEntityPermissionEdgeReader,
+        NoOpActivityReader,
+    > = build_schema_with_services(
+        CountingSoupService::default(),
+        NoOpSoupRealtimeSubscriptionService,
+        NoopWebSocketNotificationSubscriptionService,
+        service,
+    );
+
+    let request = async_graphql::Request::new(
+        "subscription { activityUpdates { __typename ... on GraphqlActivityEvent { id entityType entityId } } }",
+    )
+    .data(user_id.clone());
+    let responses = schema.execute_stream(request);
+    pin_mut!(responses);
+
+    let record = {
+        let activity = activity::Activity::common(
+            Uuid::from_u128(7),
+            0,
+            activity::Actor::new_from_user(user_id.clone()),
+            None,
+            ModelEntityType::Document,
+            "doc-1",
+            activity::CommonAction::Edited,
+            chrono::Utc::now(),
+        );
+        activity::ActivityRecord {
+            id: activity.id,
+            actor: activity.actor.clone(),
+            subject_id: activity.subject_id.clone(),
+            entity_type: activity.entity_type,
+            entity_id: activity.entity_id.clone(),
+            action: activity::RecordedAction::Known(activity::Action::Edited),
+            occurred_at: activity.occurred_at,
+        }
+    };
+    let record_id = record.id;
+    sender
+        .send(ActivitySubscriptionUpdate::Updated(Arc::new(record)))
+        .await
+        .expect("subscription remains open");
+
+    let response = responses.next().await.expect("subscription response");
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().expect("response data is JSON");
+    assert_eq!(data["activityUpdates"]["id"], record_id.to_string());
+    assert_eq!(data["activityUpdates"]["entityType"], "DOCUMENT");
+    assert_eq!(data["activityUpdates"]["entityId"], "doc-1");
     assert_eq!(
         subscribed_user
             .lock()
@@ -1005,6 +1613,19 @@ async fn user_id_resolves_without_touching_services() {
     assert_eq!(harness.raw_soup_calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.frecency_soup_calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.grouped_soup_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn favorites_are_nested_under_the_authenticated_user() {
+    let harness = harness();
+
+    let response = harness
+        .execute("{ user { favorites { entityType entityId sortOrder } } }")
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(response.data.to_string(), "{user: {favorites: []}}");
+    assert_eq!(harness.authorization_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1088,6 +1709,63 @@ async fn soup_passes_team_receipt_to_raw_path() {
 }
 
 #[tokio::test]
+async fn flat_soup_emits_server_fact_supplements_for_documents_and_mail() {
+    let harness = harness();
+    let document_id = Uuid::from_u128(88);
+    let email_thread_id = Uuid::from_u128(89);
+    let project_id = Uuid::from_u128(90);
+    let chat_id = Uuid::from_u128(91);
+    harness.soup_service.set_raw_response(vec![
+        soup_document(document_id),
+        soup_email_thread(email_thread_id),
+        soup_project(project_id),
+        soup_chat(chat_id),
+    ]);
+
+    let response = harness
+        .execute(
+            "{ user { soup(input: {initial: {}}) { items { __typename id cacheProjection } } } }",
+        )
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    let items = data["user"]["soup"]["items"].as_array().unwrap();
+    let document = items
+        .iter()
+        .find(|item| item["__typename"] == "GraphqlSoupDocument")
+        .unwrap();
+    assert_eq!(document["id"], document_id.to_string());
+    assert!(document["cacheProjection"].is_string());
+    let email = items
+        .iter()
+        .find(|item| item["__typename"] == "GraphqlSoupEmailThread")
+        .unwrap();
+    assert_eq!(email["id"], email_thread_id.to_string());
+    let mail_supplement = soup_filter_projection::decode_cache_projection_supplement(
+        email["cacheProjection"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        mail_supplement.record_key(),
+        &predicate_index::RecordKey::new(format!("GraphqlSoupEmailThread:{email_thread_id}"))
+            .unwrap()
+    );
+    assert!(mail_supplement.mail_facts().is_some());
+    for (typename, id) in [
+        ("GraphqlSoupProject", project_id),
+        ("GraphqlSoupChat", chat_id),
+    ] {
+        let item = items
+            .iter()
+            .find(|item| item["__typename"] == typename)
+            .unwrap();
+        assert_eq!(item["id"], id.to_string());
+        assert!(item["cacheProjection"].is_null());
+    }
+}
+
+#[tokio::test]
 async fn soup_input_rejects_initial_and_continuation_together() {
     let harness = harness();
 
@@ -1102,6 +1780,20 @@ async fn soup_input_rejects_initial_and_continuation_together() {
     assert_eq!(harness.frecency_soup_calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.inbox_calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.team_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn soup_returns_the_saved_chat_model() {
+    let harness = harness();
+    harness
+        .soup_service
+        .set_raw_response(vec![soup_chat(Uuid::from_u128(91))]);
+    let response = harness.execute(
+        "{ user { soup(input: {initial: {}}) { items { ... on GraphqlSoupChat { model } } } } }"
+    ).await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    assert_eq!(data["user"]["soup"]["items"][0]["model"], "openai/gpt-5.6");
 }
 
 #[tokio::test]
@@ -1235,6 +1927,7 @@ fn soup_email_thread_with_read_status(thread_id: Uuid, is_read: bool) -> SoupIte
             is_read,
             is_draft: false,
             is_important: true,
+            is_signal: true,
             name: Some("Direct thread".to_owned()),
             snippet: Some("Direct thread snippet".to_owned()),
             sender_email: Some("sender@example.com".to_owned()),
@@ -1361,6 +2054,260 @@ async fn email_thread_metadata_is_lazy_and_batches_across_threads() {
 }
 
 #[tokio::test]
+async fn mail_previews_and_capsules_share_a_lazy_batched_reader() {
+    let harness = harness();
+    let first_id = Uuid::from_u128(51);
+    let second_id = Uuid::from_u128(52);
+    harness.soup_service.set_raw_response(vec![
+        soup_email_thread(first_id),
+        soup_email_thread(second_id),
+    ]);
+    let metadata = harness
+        .execute("{ user { soup(input: {initial: {}}) { items { ... on GraphqlSoupEmailThread { id linkId latestInboundMessageTs } } } } }")
+        .await;
+    assert!(metadata.errors.is_empty(), "{:?}", metadata.errors);
+    assert!(
+        harness
+            .email_content_reader
+            .mail_projection_calls
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+
+    let response = harness
+        .execute("{ user { soup(input: {initial: {}}) { items { id cacheProjection ... on GraphqlSoupEmailThread { mailAllPreview { id } mailDraftPreview { id } mailSentPreview { id } } } } } }")
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let mut calls = harness
+        .email_content_reader
+        .mail_projection_calls
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(calls.len(), 1);
+    calls[0].sort();
+    assert_eq!(calls[0], vec![first_id, second_id]);
+}
+
+fn activity_record(
+    id: u128,
+    entity_type: ModelEntityType,
+    entity_id: &str,
+    action: activity::RecordedAction,
+    occurred_at_secs: i64,
+) -> activity::ActivityRecord {
+    activity::ActivityRecord {
+        id: Uuid::from_u128(id),
+        actor: activity::Actor::new_from_user(
+            MacroUserIdStr::parse_from_str(VALID_USER_ID).unwrap(),
+        ),
+        subject_id: VALID_USER_ID.to_owned(),
+        entity_type,
+        entity_id: entity_id.to_owned(),
+        action,
+        occurred_at: chrono::DateTime::from_timestamp(occurred_at_secs, 0)
+            .expect("valid timestamp"),
+    }
+}
+
+#[tokio::test]
+async fn entity_activity_is_lazy_and_batches_across_entities() {
+    let harness = harness();
+    let first_id = Uuid::from_u128(61);
+    let second_id = Uuid::from_u128(62);
+    harness.soup_service.set_raw_response(vec![
+        soup_email_thread(first_id),
+        soup_email_thread(second_id),
+    ]);
+    harness.activity_reader.set_records(vec![activity_record(
+        1,
+        ModelEntityType::EmailThread,
+        &first_id.to_string(),
+        activity::RecordedAction::Known(activity::Action::Edited),
+        300,
+    )]);
+
+    let without_activity = harness
+        .execute(
+            r#"{ user { soup(input: {initial: {}}) { items { ... on GraphqlSoupEmailThread { id inboxVisible } } } } }"#,
+        )
+        .await;
+    assert!(
+        without_activity.errors.is_empty(),
+        "{:?}",
+        without_activity.errors
+    );
+    assert!(
+        harness
+            .activity_reader
+            .edge_calls
+            .lock()
+            .expect("activity edge calls lock")
+            .is_empty(),
+        "unselected activity edge must not touch the reader"
+    );
+
+    let with_activity = harness
+        .execute(
+            r#"{ user { soup(input: {initial: {}}) { items { ... on GraphqlSoupEmailThread { id activity { occurredAt action { __typename } } } } } } }"#,
+        )
+        .await;
+    assert!(
+        with_activity.errors.is_empty(),
+        "{:?}",
+        with_activity.errors
+    );
+
+    let calls = harness
+        .activity_reader
+        .edge_calls
+        .lock()
+        .expect("activity edge calls lock")
+        .clone();
+    assert_eq!(calls.len(), 1, "both entities load in one batched call");
+    let mut requested: Vec<(String, u32)> = calls[0]
+        .iter()
+        .map(|key| (key.entity.entity_id.to_string(), key.limit))
+        .collect();
+    requested.sort();
+    assert_eq!(
+        requested,
+        vec![(first_id.to_string(), 10), (second_id.to_string(), 10)]
+    );
+
+    let items = &with_activity.data.into_json().unwrap()["user"]["soup"]["items"];
+    assert_eq!(
+        items[0]["activity"][0]["action"]["__typename"],
+        "GraphqlActivityEdited"
+    );
+    assert!(items[0]["activity"][0]["occurredAt"].as_str().is_some());
+    assert_eq!(
+        items[1]["activity"].as_array().map(Vec::len),
+        Some(0),
+        "entity with no activity resolves an empty timeline"
+    );
+}
+
+#[tokio::test]
+async fn activity_feed_pages_by_cursor_and_carries_unknown_actions() {
+    let harness = harness();
+    let doc = Uuid::from_u128(71).to_string();
+    harness.activity_reader.set_records(vec![
+        activity_record(
+            3,
+            ModelEntityType::Document,
+            &doc,
+            activity::RecordedAction::Unknown {
+                tag: "transmogrified".to_owned(),
+                payload: None,
+            },
+            300,
+        ),
+        activity_record(
+            2,
+            ModelEntityType::Document,
+            &doc,
+            activity::RecordedAction::Known(activity::Action::Edited),
+            200,
+        ),
+        activity_record(
+            1,
+            ModelEntityType::Document,
+            &doc,
+            activity::RecordedAction::Known(activity::Action::Created),
+            100,
+        ),
+    ]);
+
+    let first_page = harness
+        .execute(
+            r#"{ user { activity(input: {limit: 2}) { items { entityId entityType action { __typename ... on GraphqlActivityUnknownAction { tag } } } nextCursor } } }"#,
+        )
+        .await;
+    assert!(first_page.errors.is_empty(), "{:?}", first_page.errors);
+    let data = first_page.data.into_json().unwrap();
+    let page = &data["user"]["activity"];
+    assert_eq!(page["items"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        page["items"][0]["action"]["__typename"],
+        "GraphqlActivityUnknownAction"
+    );
+    assert_eq!(page["items"][0]["action"]["tag"], "transmogrified");
+    assert_eq!(page["items"][0]["entityId"], doc);
+    assert_eq!(page["items"][0]["entityType"], "DOCUMENT");
+    assert_eq!(
+        page["items"][1]["action"]["__typename"],
+        "GraphqlActivityEdited"
+    );
+    let cursor = page["nextCursor"].as_str().expect("more rows exist");
+
+    let second_page = harness
+        .execute(&format!(
+            r#"{{ user {{ activity(input: {{limit: 2, cursor: "{cursor}"}}) {{ items {{ action {{ __typename }} }} nextCursor }} }} }}"#
+        ))
+        .await;
+    assert!(second_page.errors.is_empty(), "{:?}", second_page.errors);
+    let data = second_page.data.into_json().unwrap();
+    let page = &data["user"]["activity"];
+    assert_eq!(page["items"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        page["items"][0]["action"]["__typename"],
+        "GraphqlActivityCreated"
+    );
+    assert!(page["nextCursor"].is_null());
+
+    let feed_calls = harness
+        .activity_reader
+        .feed_calls
+        .lock()
+        .expect("activity feed calls lock")
+        .clone();
+    // The resolver binds the viewer's principal string as the subject and
+    // passes the client limit through; the has-more probe lives in storage.
+    assert_eq!(feed_calls.len(), 2);
+    assert_eq!(feed_calls[0].0, VALID_USER_ID);
+    assert_eq!(feed_calls[0].2, 2);
+    let (cursor_at, cursor_id) = feed_calls[1].1.expect("second page carries the cursor");
+    assert_eq!(cursor_at, chrono::DateTime::from_timestamp(200, 0).unwrap());
+    assert_eq!(cursor_id, Uuid::from_u128(2));
+}
+
+#[tokio::test]
+async fn activity_overview_uses_the_authenticated_subject_and_requested_zone() {
+    let harness = harness();
+
+    let response = harness
+        .execute(
+            r#"{ user { activityOverview(input: {timeZone: "America/Havana"}) { from to timeZone total days { date count } topEntities { entityType entityId count } } } }"#,
+        )
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let calls = harness
+        .activity_reader
+        .overview_calls
+        .lock()
+        .expect("activity overview calls lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, VALID_USER_ID);
+    assert_eq!(calls[0].1.zone.name(), "America/Havana");
+
+    let data = response.data.into_json().unwrap();
+    let overview = &data["user"]["activityOverview"];
+    assert_eq!(overview["from"], calls[0].1.start.to_string());
+    assert_eq!(overview["to"], calls[0].1.end.to_string());
+    assert_eq!(overview["timeZone"], "America/Havana");
+    assert_eq!(overview["total"], 2);
+    assert_eq!(overview["days"][0]["date"], calls[0].1.start.to_string());
+    assert_eq!(overview["days"][0]["count"], 2);
+    assert_eq!(overview["topEntities"][0]["entityType"], "DOCUMENT");
+    assert_eq!(overview["topEntities"][0]["entityId"], "overview-doc");
+    assert_eq!(overview["topEntities"][0]["count"], 2);
+}
+
+#[tokio::test]
 async fn email_message_full_fields_request_the_full_edge_payload() {
     let harness = harness();
     let thread_id = Uuid::from_u128(43);
@@ -1435,13 +2382,13 @@ async fn latest_email_message_full_fields_request_the_full_edge_payload() {
 }
 
 #[tokio::test]
-async fn email_mutations_return_the_canonical_thread_for_normalized_cache_updates() {
+async fn email_mutations_return_primary_state_even_when_the_soup_replica_is_stale() {
     let harness = harness();
     let thread_id = Uuid::from_u128(44);
     let label_id = Uuid::from_u128(45);
     harness
         .soup_service
-        .set_raw_response(vec![soup_email_thread_with_read_status(thread_id, true)]);
+        .set_raw_response(vec![soup_email_thread_with_read_status(thread_id, false)]);
 
     let seen_response = harness
         .execute_authenticated_mutation(&format!(
@@ -1473,7 +2420,30 @@ async fn email_mutations_return_the_canonical_thread_for_normalized_cache_update
     assert_eq!(label_thread["id"], thread_id.to_string());
     assert_eq!(label_thread["isRead"], true);
 
+    harness
+        .soup_service
+        .set_raw_response(vec![soup_email_thread_with_read_status(thread_id, true)]);
+    let unread_response = harness
+        .execute_authenticated_mutation(&format!(
+            r#"mutation {{ markEmailThreadUnread(input: {{threadId: "{thread_id}"}}) {{ __typename id isRead }} }}"#
+        ))
+        .await;
+    assert!(
+        unread_response.errors.is_empty(),
+        "{:?}",
+        unread_response.errors
+    );
+    let unread_thread = &unread_response.data.into_json().unwrap()["markEmailThreadUnread"];
+    assert_eq!(unread_thread["__typename"], "GraphqlSoupEmailThread");
+    assert_eq!(unread_thread["id"], thread_id.to_string());
+    assert_eq!(unread_thread["isRead"], false);
+    assert_eq!(harness.raw_soup_calls.load(Ordering::SeqCst), 0);
+
     let expected_user = MacroUserIdStr::parse_from_str(VALID_USER_ID).unwrap();
+    assert_eq!(
+        *harness.email_service.unread_mutation_calls.lock().unwrap(),
+        vec![(expected_user.clone(), thread_id)]
+    );
     assert_eq!(
         *harness
             .email_service
@@ -1535,4 +2505,36 @@ async fn email_thread_rejects_an_invalid_thread_id_before_loading_soup() {
     );
     assert_eq!(harness.raw_soup_calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.inbox_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn initiatives_are_returned_by_soup_with_shared_edges() {
+    let harness = harness();
+    let id = Uuid::from_u128(42);
+    harness
+        .soup_service
+        .set_raw_response(vec![soup_initiative(id)]);
+    let response = harness
+        .execute(
+            r#"{
+        user { soup(input: {initial: {filters: {initiativeFilter: {literal: {include: true}}}}}) {
+            items {
+                __typename id entityType displayName
+                metadata { ownerId ownerType createdAt updatedAt }
+                properties { id }
+            }
+        } }
+    }"#,
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    let item = &data["user"]["soup"]["items"][0];
+    assert_eq!(item["__typename"], "GraphqlSoupInitiative");
+    assert_eq!(item["id"], id.to_string());
+    assert_eq!(item["entityType"], "INITIATIVE");
+    assert_eq!(item["displayName"], "Launch project");
+    assert_eq!(item["metadata"]["ownerId"], VALID_USER_ID);
+    assert!(item["properties"].is_array());
+    assert_eq!(harness.raw_soup_calls.load(Ordering::SeqCst), 1);
 }

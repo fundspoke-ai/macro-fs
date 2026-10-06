@@ -4,6 +4,13 @@ export type History<T extends object> = {
   readonly items: ReadonlyArray<T>;
   readonly index: Readonly<number>;
   back: () => T | null;
+  /**
+   * Jump to the nearest earlier entry matching `predicate`, skipping the
+   * entries in between. Navigation also respects the configured `canVisit`
+   * rule. Skipped entries stay in the stack and can be reached when available.
+   * Returns null — leaving the index put — when no available entry matches.
+   */
+  backTo: (predicate: (item: T) => boolean) => T | null;
   forward: () => T | null;
   canGoBack: () => boolean;
   canGoForward: () => boolean;
@@ -19,9 +26,14 @@ export type History<T extends object> = {
 };
 
 const inc = (x: number) => x + 1;
-const dec = (x: number) => x - 1;
 
-export function createHistory<T extends object>(): History<T> {
+export function createHistory<T extends object>(
+  options: {
+    /** Evaluated on each navigation so entry availability can change over time. */
+    canVisit?: (item: T) => boolean;
+  } = {}
+): History<T> {
+  const canVisit = options.canVisit ?? (() => true);
   // `items` is a signal rather than a plain mutated array because SplitState.history
   // is held in the splits store. In-place array mutation is invisible to store
   // readers, which would leave `items` stale while the `index` signal stays live —
@@ -29,13 +41,20 @@ export function createHistory<T extends object>(): History<T> {
   const [items, setItems] = createSignal<T[]>([]);
   const [index, setIndex] = createSignal(-1);
 
-  const canGoBack = () => {
-    return index() > 0;
+  const findIndex = (direction: -1 | 1, predicate = (_item: T) => true) => {
+    const list = items();
+    for (
+      let i = index() + direction;
+      i >= 0 && i < list.length;
+      i += direction
+    ) {
+      if (canVisit(list[i]) && predicate(list[i])) return i;
+    }
+    return -1;
   };
 
-  const canGoForward = () => {
-    return index() < items().length - 1;
-  };
+  const canGoBack = () => findIndex(-1) !== -1;
+  const canGoForward = () => findIndex(1) !== -1;
 
   const isAtEnd = () => {
     const len = items().length;
@@ -82,17 +101,16 @@ export function createHistory<T extends object>(): History<T> {
     });
   };
 
-  const back = () => {
-    if (!canGoBack()) return null;
-    setIndex(dec);
-    return items()[index()];
+  const move = (direction: -1 | 1, predicate?: (item: T) => boolean) => {
+    const nextIndex = findIndex(direction, predicate);
+    if (nextIndex === -1) return null;
+    setIndex(nextIndex);
+    return items()[nextIndex];
   };
 
-  const forward = () => {
-    if (!canGoForward()) return null;
-    setIndex(inc);
-    return items()[index()];
-  };
+  const back = () => move(-1);
+  const backTo = (predicate: (item: T) => boolean) => move(-1, predicate);
+  const forward = () => move(1);
 
   const remove = (predicate: (item: T) => boolean) => {
     const prevItems = items();
@@ -124,6 +142,8 @@ export function createHistory<T extends object>(): History<T> {
       newIndex = nextItems.length - 1;
     }
 
+    const next = nextItems[newIndex];
+    if (next && !canVisit(next)) return null;
     batch(() => {
       setItems(nextItems);
       setIndex(newIndex);
@@ -138,6 +158,7 @@ export function createHistory<T extends object>(): History<T> {
       return index();
     },
     back,
+    backTo,
     push,
     merge,
     replaceCurrent,

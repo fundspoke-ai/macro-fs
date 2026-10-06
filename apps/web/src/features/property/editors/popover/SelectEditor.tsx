@@ -1,8 +1,10 @@
 import { usePropertyEditor } from '@property/hooks/usePropertyEditor';
+import { selectablePropertyOptions } from '@property/utils/select-options';
 import {
   useAddPropertyOptionMutation,
   usePropertyOptionsQuery,
 } from '@queries/properties/options';
+import { usablePropertyOptions } from '@queries/properties/options-data';
 import { onMount, Show } from 'solid-js';
 import { useProperty } from '../../core/context';
 import type { PropertyApiValues, SelectProperty } from '../../types';
@@ -35,9 +37,10 @@ function SelectEditorBody() {
   const addOptionMutation = useAddPropertyOptionMutation({});
 
   const options = () =>
-    optionsQuery.isLoading || optionsQuery.isError || !optionsQuery.data
-      ? []
-      : optionsQuery.data;
+    selectablePropertyOptions(
+      property,
+      usablePropertyOptions(optionsQuery, property.options)
+    );
 
   const isLoading = () => optionsQuery.isLoading || addOptionMutation.isPending;
 
@@ -49,30 +52,26 @@ function SelectEditorBody() {
 
   onMount(() => {
     editor.initializeSelectedOptions();
-    optionsQuery.refetch();
   });
 
   const closeAndSave = async () => {
-    if (editor.hasChanges()) {
-      const arr = Array.from(editor.selectedOptions());
-      const apiValues: PropertyApiValues =
-        property.valueType === 'SELECT_NUMBER'
-          ? {
-              valueType: 'SELECT_NUMBER',
-              values: arr.length > 0 ? arr : null,
-            }
-          : {
-              valueType: 'SELECT_STRING',
-              values: arr.length > 0 ? arr : null,
-            };
-      try {
-        await ctx.onSave?.(property, apiValues);
-        ctx.onRefresh?.();
-      } catch {
-        // mutation onError owns toast
-      }
-    }
+    // Snapshot the selection before closing unmounts this editor. Dismissal
+    // must not wait for the network or close a newer editor after a slow save.
+    const hasChanges = editor.hasChanges();
+    const arr = Array.from(editor.selectedOptions());
     ctx.closeEditor();
+    if (!hasChanges) return;
+
+    const apiValues: PropertyApiValues = {
+      valueType: property.valueType,
+      values: arr.length > 0 ? arr : null,
+    };
+    try {
+      await ctx.onSave?.(property, apiValues);
+      ctx.onRefresh?.();
+    } catch {
+      // mutation onError owns toast
+    }
   };
 
   const canAddOption = (query: string) => {

@@ -20,7 +20,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ai_tool", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub enum NotificationItemType {
+pub enum NotificationCategory {
     Email,
     Message,
     Channel,
@@ -32,41 +32,7 @@ pub enum NotificationItemType {
     Github,
     Reminder,
     Calendar,
-}
-
-impl NotificationItemType {
-    pub(crate) fn filter_token(self) -> &'static str {
-        match self {
-            Self::Email => "email",
-            Self::Message => "message",
-            Self::Channel => "channel",
-            Self::Document => "document",
-            Self::Project => "project",
-            Self::Chat => "chat",
-            Self::Call => "call",
-            Self::Task => "task",
-            Self::Github => "github",
-            Self::Reminder => "reminder",
-            Self::Calendar => "calendar",
-        }
-    }
-}
-
-/// User-facing reference to one specific entity to filter notifications by.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ai_tool", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub struct NotificationEntityRef {
-    /// Entity type for the provided id.
-    pub entity_type: NotificationItemType,
-    /// Entity id. For `email`, this is the email thread id. For `message`, this is the channel message id.
-    pub id: String,
-}
-
-impl NotificationEntityRef {
-    pub(crate) fn filter_token(&self) -> String {
-        format!("{}:{}", self.entity_type.filter_token(), self.id)
-    }
+    Agent,
 }
 
 /// Request to send a notification.
@@ -93,6 +59,14 @@ where
 {
     /// Convert this builder into a full request with optional delivery customizers.
     pub fn into_request(self) -> SendNotificationRequest<'a, T, ()> {
+        self.into_request_with_id(Uuid::now_v7())
+    }
+
+    /// As [`Self::into_request`], with the notification id chosen by the
+    /// caller. Creating a notification is idempotent on its id, so a producer
+    /// that derives the id from its own event can be redelivered that event
+    /// without notifying twice.
+    pub fn into_request_with_id(self, notification_id: Uuid) -> SendNotificationRequest<'a, T, ()> {
         let SendNotificationRequestBuilder {
             notification_entity,
             secondary_notification_entity,
@@ -101,7 +75,7 @@ where
             recipient_ids,
         } = self;
         SendNotificationRequest {
-            uuid_to_write: Uuid::now_v7(),
+            uuid_to_write: notification_id,
             req: SendNotificationRequestBuilder {
                 notification_entity,
                 secondary_notification_entity,
@@ -299,12 +273,30 @@ pub enum NotificationStatus {
 }
 
 impl NotificationStatus {
+    /// States needing an entity-scoped update, plus whether to include rows missing a view time.
+    /// ID-scoped writes still return every requested owned row to reconcile retries.
+    pub(crate) fn entity_update_filter(&self) -> (&'static [super::NotificationState], bool) {
+        use super::NotificationState;
+        match self {
+            Self::Seen => (&[NotificationState::Unseen], true),
+            Self::Done(true) => (&NotificationState::ACTIVE, false),
+            Self::Done(false) => (&[NotificationState::Done], false),
+        }
+    }
+
     /// returns true if we should be clearing the relevant push notifications
     /// for this notification
     pub(crate) fn should_clear_push_notifs(&self) -> bool {
-        match self {
-            NotificationStatus::Seen => true,
-            NotificationStatus::Done(x) => *x,
+        if cfg!(feature = "clear_ios_push") {
+            use super::NotificationAction;
+            let action = match self {
+                NotificationStatus::Seen => NotificationAction::MarkSeen,
+                NotificationStatus::Done(true) => NotificationAction::MarkDone,
+                NotificationStatus::Done(false) => NotificationAction::Reopen,
+            };
+            action.should_clear_push_notifications()
+        } else {
+            false
         }
     }
 }
@@ -320,42 +312,36 @@ pub struct UpdateNotificationsRequest<'a> {
     pub status: NotificationStatus,
 }
 
+/// Request to update every notification associated with any of several entities for a user.
+#[derive(Debug)]
+pub struct UpdateNotificationsForEntitiesRequest<'a> {
+    /// The user whose notifications are being updated.
+    pub user_id: MacroUserIdStr<'a>,
+    /// The primary or secondary entities whose notifications should be updated.
+    pub entities: Vec<Entity<'a>>,
+    /// The status to set on matching notifications.
+    pub status: NotificationStatus,
+}
+
 /// Optional filters for listing user notifications.
 #[derive(Debug, Clone)]
 pub struct NotificationListFilters {
-    /// Filter by done status. `None` means include both done and not-done notifications.
-    pub done: Option<bool>,
-    /// Filter by seen status. `None` means include both seen and unseen notifications.
-    pub seen: Option<bool>,
+    /// Exact states to include. Empty means no state restriction.
+    pub states: Vec<super::NotificationState>,
     /// Optional user-facing notification categories to include. Empty means include all types.
-    pub include_types: Vec<NotificationItemType>,
+    pub include_types: Vec<NotificationCategory>,
     /// Optional specific entities to include. Empty means include all entities.
-    pub entities: Vec<NotificationEntityRef>,
+    pub entities: Vec<Entity<'static>>,
 }
 
 impl NotificationListFilters {
     /// Default product behavior: list active notifications, which excludes done notifications.
     pub fn active() -> Self {
         Self {
-            done: Some(false),
-            seen: None,
+            states: super::NotificationState::ACTIVE.to_vec(),
             include_types: Vec::new(),
             entities: Vec::new(),
         }
-    }
-
-    pub(crate) fn include_type_tokens(&self) -> Vec<String> {
-        self.include_types
-            .iter()
-            .map(|item_type| item_type.filter_token().to_string())
-            .collect()
-    }
-
-    pub(crate) fn entity_tokens(&self) -> Vec<String> {
-        self.entities
-            .iter()
-            .map(NotificationEntityRef::filter_token)
-            .collect()
     }
 }
 

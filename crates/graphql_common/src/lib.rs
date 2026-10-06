@@ -15,6 +15,10 @@ mod entity_type;
 mod extract;
 /// GraphQL filter-input conversion helpers.
 mod filter_input;
+/// Shared page-size argument validation.
+mod limit;
+/// Shared GraphQL owner-type mapping.
+mod owner_type;
 /// Property-filter GraphQL input types.
 mod property_filter;
 /// Request-scoped context used by GraphQL resolvers.
@@ -26,6 +30,8 @@ pub use entity_type::{
 };
 pub use extract::extract_part;
 pub use filter_input::{IntoFilterExpr, optional_tree, parse_id, parse_macro_user_id, parse_uuid};
+pub use limit::parse_limit;
+pub use owner_type::GraphqlOwnerType;
 pub use property_filter::{
     GraphqlPropertiesBinaryExpr, GraphqlPropertiesExpr, GraphqlPropertiesLiteral,
     GraphqlPropertyEntityType, GraphqlPropertyMatchValue,

@@ -1,20 +1,15 @@
 import {
-  activeCommentThreadSignal,
-  commentsStore,
-  commentWidthSignal,
-  highlightedCommentIdSignal,
-  highlightedCommentThreadsSignal,
-  threadStore,
-} from '@block-md/comments/commentStore';
-import { useBlockId } from '@core/block';
+  isDraftThreadId,
+  type Root,
+  type ThreadId,
+} from '@core/comments/commentType';
 import { MinimizedThread } from '@core/comments/MinimizedThreads';
 import {
   CommentsContext,
   type CommentsContextType,
   Thread,
 } from '@core/comments/Thread';
-import { useUserId } from '@core/context/user';
-import { useCanComment, useIsDocumentOwner } from '@core/signal/permissions';
+import { isTouchDevice } from '@core/mobile/isTouchDevice';
 import { autoUpdate, computePosition } from '@floating-ui/dom';
 import {
   createEffect,
@@ -24,107 +19,87 @@ import {
   onCleanup,
   Show,
 } from 'solid-js';
-import {
-  notebookHeight,
-  threadHeightStore,
-  threadsPositionStore,
-} from './commentLayout';
-import {
-  useCreateComment,
-  useDeleteComment,
-  useUpdateComment,
-} from './commentOperations';
+import { useMarkdownDocument } from '../context/markdown-document-context';
+import { CommentThreadDrawer } from './CommentThreadDrawer';
+import { createCommentLayout } from './commentLayout';
+import { useCreateMessageComment } from './messageCommentOperations';
 
-const useCommentsContext = (): CommentsContextType => {
-  const comments = commentsStore.get;
-  const setActiveThread = activeCommentThreadSignal.set;
-  const setThreadHeight = threadHeightStore.set;
-  const ownedCommentIds = createMemo(() => {
-    const userId = useUserId()();
-    if (!userId) {
-      console.error('User ID not found, cannot get owned comment placeables');
-      return [];
-    }
-    const owned = Object.values(commentsStore.get)
-      .filter((c) => !!c)
-      .filter((c) => c.owner === userId)
-      .map((c) => c.id);
-    return owned;
-  });
-  const ownedCommentSelector = createSelector(
-    ownedCommentIds,
-    (id: number, owned) => (owned ?? []).includes(id)
-  );
-
-  const createComment = useCreateComment();
-  const updateComment = useUpdateComment();
-  const deleteComment = useDeleteComment();
-
-  const documentId = useBlockId();
-  const isDocumentOwner = useIsDocumentOwner();
-  const canComment = useCanComment();
-
-  const getCommentById = (id: number) => comments[id];
+const useCommentsContext = (
+  setThreadHeight: CommentsContextType['setThreadHeight']
+): CommentsContextType => {
+  const { documentId, kind, permissions, state } = useMarkdownDocument();
+  const documentKind = kind();
+  const { comments: commentState, setCommentState } = state;
+  const createComment = useCreateMessageComment();
 
   const commentsContext: CommentsContextType = {
-    setActiveThread,
+    setActiveThread: (threadId) =>
+      setCommentState('activeCommentThread', threadId),
     setThreadHeight,
-    canComment,
-    isDocumentOwner,
-    getCommentById,
-    documentId,
-    ownedComment: ownedCommentSelector,
-    commentOperations: {
-      createComment,
-      deleteComment,
-      updateComment,
-    },
-    inComment: true,
-    highlightedCommentId: highlightedCommentIdSignal.get,
+    canComment: permissions.canComment,
+    isDocumentOwner: permissions.isOwner,
+    documentId: documentId(),
+    documentType: documentKind === 'document' ? 'md' : documentKind,
+    messageOperations: { createComment },
+    highlightedCommentId: () => commentState.highlightedCommentId,
+    clearHighlightedComment: () =>
+      setCommentState('highlightedCommentId', null),
   };
   return commentsContext;
 };
 
-export const CommentMargin = () => {
-  const threads = threadStore.get;
-  const positions = threadsPositionStore.get;
-  const maxHeight = createMemo(() => notebookHeight());
-
-  const wideEnoughForComments = commentWidthSignal.get;
+export const CommentMargin = (props: { wideEnough: boolean }) => {
+  const { state } = useMarkdownDocument();
+  const commentState = state.comments;
+  const { notebookHeight, setThreadHeights, threadPositions } =
+    createCommentLayout();
+  const maxHeight = createMemo(() => notebookHeight() ?? undefined);
 
   // NOTE: this is a big of a hack because you can select
   // multiple threads at once from the editor but only one thread in the margin
   const activeThreads = createMemo(() => {
-    const highlighted = highlightedCommentThreadsSignal();
+    const highlighted = commentState.highlightedCommentThreads;
     const set = new Set(highlighted);
-    const active = activeCommentThreadSignal();
+    const active = commentState.activeCommentThread;
     if (active != null) {
       set.add(active);
     }
 
     // new threads will take priority
-    if (set.has(-1)) {
-      return new Set([-1]);
+    const draft = [...set].find(isDraftThreadId);
+    if (draft !== undefined) {
+      return new Set([draft]);
     }
 
     return set;
   });
-  const isActiveSelector = createSelector(activeThreads, (id: number, ids) => {
-    return ids.has(id);
-  });
+  const isActiveSelector = createSelector(
+    activeThreads,
+    (id: ThreadId, ids) => {
+      return ids.has(id);
+    }
+  );
 
-  const commentsContext = useCommentsContext();
+  // A caret inside resolved text does not unfold its thread; only opening it
+  // from the margin or a link does.
+  const isThreadActive = (thread: Root) =>
+    isActiveSelector(thread.threadId) &&
+    (!thread.resolved || commentState.activeCommentThread === thread.threadId);
 
-  const isMinimized = createMemo(() => !wideEnoughForComments());
+  const commentsContext = useCommentsContext(setThreadHeights);
+
+  // Touch devices never expand floating thread cards; the active thread is
+  // presented in the CommentThreadDrawer instead.
+  const isMinimized = createMemo(() => isTouchDevice() || !props.wideEnough);
 
   return (
     <CommentsContext.Provider value={commentsContext}>
       <div class="relative h-full">
-        <For each={Object.values(threads)}>
+        <For each={Object.values(commentState.threads)}>
           {(thread) => (
             <Show when={thread}>
               {(thread) => {
-                const layout = () => positions[thread().anchorId]?.layout;
+                const layout = () => threadPositions[thread().anchorId]?.layout;
                 return (
                   <Show when={layout()}>
                     {(layout) => (
@@ -135,15 +110,16 @@ export const CommentMargin = () => {
                             <MinimizedThread
                               comment={thread()}
                               layout={layout()}
-                              isActive={isActiveSelector(thread().threadId)}
+                              isActive={isThreadActive(thread())}
                               maxHeight={maxHeight()}
+                              expandable={!isTouchDevice()}
                             />
                           }
                         >
                           <Thread
                             comment={thread()}
                             layout={layout()}
-                            isActive={isActiveSelector(thread().threadId)}
+                            isActive={isThreadActive(thread())}
                             maxHeight={maxHeight()}
                           />
                         </Show>
@@ -156,6 +132,9 @@ export const CommentMargin = () => {
           )}
         </For>
       </div>
+      <Show when={isTouchDevice()}>
+        <CommentThreadDrawer />
+      </Show>
     </CommentsContext.Provider>
   );
 };

@@ -3,6 +3,7 @@ use crate::types::request::WEB_FETCH_TOOL;
 use crate::types::response::ResponseContentKind;
 use crate::types::response::web_fetch::WebFetchResponse;
 use ai_toolset::{AsyncTool, RequestContext, ServiceContext, ToolCallError, ToolResult};
+use ai_toolset::{ToolAnnotated, ToolAnnotations};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -18,6 +19,12 @@ pub struct WebFetch {
     pub input: String,
 }
 
+impl ToolAnnotated for WebFetch {
+    const ANNOTATIONS: ToolAnnotations = ToolAnnotations::read_only("Fetch a web page")
+        .with_open_world()
+        .without_idempotent();
+}
+
 #[async_trait]
 impl AsyncTool<AnthropicToolContext> for WebFetch {
     type Output = WebFetchResponse;
@@ -26,11 +33,11 @@ impl AsyncTool<AnthropicToolContext> for WebFetch {
     async fn call(
         &self,
         service_context: ServiceContext<AnthropicToolContext>,
-        _request_context: RequestContext,
+        request_context: RequestContext,
     ) -> ToolResult<Self::Output> {
         let ctx = &*service_context;
         let blocks =
-            super::invoke_server_tool(&ctx.client, &ctx.model, WEB_FETCH_TOOL.clone(), &self.input)
+            super::invoke_server_tool(ctx, &request_context, WEB_FETCH_TOOL.clone(), &self.input)
                 .await?;
 
         blocks

@@ -7,19 +7,20 @@ import { useAllProperties } from '@app/features/property/editor/hooks/useAllProp
 import { openPropertyEditor } from '@app/features/property/editor/state/propertyEditor';
 import { useGlobalNotificationSource } from '@components/app/GlobalAppState';
 import { useSplitPanel } from '@components/app/split-layout/layoutUtils';
-import { useBlockId } from '@core/block';
+import { useMaybeBlockId } from '@core/block';
 import { useQuickAccess } from '@core/context/quickAccess';
 import { useUserId } from '@core/context/user';
 import { HotkeyTags } from '@core/hotkey/constants';
 import { createHotkeyGroup, registerHotkey } from '@core/hotkey/hotkeys';
 import { TOKENS } from '@core/hotkey/tokens';
 import { blockHotkeyScopeSignal } from '@core/signal/blockElement';
-import { type EntityData, isDocumentEntity, isTaskEntity } from '@entity';
+import { type EntityData, isEmailEntity, isTaskEntity } from '@entity';
 import { SYSTEM_PROPERTY_IDS } from '@property/constants';
 import type { Property, PropertyDefinitionDomain } from '@property/types';
-import { macroEntityToPropertyEntityType } from '@property/utils';
 import { createEffect, onCleanup } from 'solid-js';
+import type { EntityActionNavigationEvent } from './entity-action-context';
 import {
+  makeAddTagAction,
   makeCopyAction,
   makeCopyBranchNameAction,
   makeCopyEntityIdAction,
@@ -29,6 +30,7 @@ import {
   makeFavoriteAction,
   makeMarkDoneAction,
   makeMoveToProjectAction,
+  makeMuteAction,
   makeRenameAction,
 } from './index';
 
@@ -46,10 +48,25 @@ import {
  * source: `condition()` runs inside command-menu evaluation, where a pending
  * query must not suspend.
  */
+export type UseBlockEntityCommandsOptions = {
+  id?: string;
+  scopeId?: string;
+  resolveEntity?: () => EntityData | undefined;
+  onDeleted?: () => void;
+  onEmailReminderSaved?: () => void | Promise<void>;
+};
+
 export const useBlockEntityCommands = (
-  resolveEntity?: () => EntityData | undefined
+  options: UseBlockEntityCommandsOptions = {}
 ) => {
-  const blockId = useBlockId();
+  const blockId = options.id ?? useMaybeBlockId();
+
+  if (!blockId) {
+    throw new Error(
+      'useBlockEntityCommands requires an explicit id or an enclosing block'
+    );
+  }
+
   const quickAccess = useQuickAccess();
   const userId = useUserId();
   const notificationSource = useGlobalNotificationSource();
@@ -61,7 +78,10 @@ export const useBlockEntityCommands = (
     notificationSource: () => notificationSource,
   });
 
-  const deleteAction = makeDeleteAction({ userId: () => userId() });
+  const deleteAction = makeDeleteAction({
+    userId: () => userId(),
+    onDeleted: options.onDeleted,
+  });
   const renameAction = makeRenameAction({ userId: () => userId() });
   const copyAction = makeCopyAction();
   const moveToProjectAction = makeMoveToProjectAction();
@@ -69,7 +89,10 @@ export const useBlockEntityCommands = (
   const copyBranchNameAction = makeCopyBranchNameAction();
   const copyEntityIdAction = makeCopyEntityIdAction();
   const favoriteAction = makeFavoriteAction();
-  const createReminderAction = makeCreateReminderAction();
+  const muteAction = makeMuteAction({
+    notificationSource: () => notificationSource,
+  });
+  const addTagAction = makeAddTagAction();
 
   const allProperties = useAllProperties();
 
@@ -81,7 +104,7 @@ export const useBlockEntityCommands = (
   const assignees = () => propertyById(SYSTEM_PROPERTY_IDS.ASSIGNEES);
 
   const getEntity = (): EntityData | undefined => {
-    const provided = resolveEntity?.();
+    const provided = options.resolveEntity?.();
     if (provided) return provided;
     const item = quickAccess.getById(blockId);
     if (item?.kind === 'entity') return item.data;
@@ -101,41 +124,74 @@ export const useBlockEntityCommands = (
       });
     }
   };
-  const canAssignTags = (entity: EntityData) => {
-    try {
-      macroEntityToPropertyEntityType(entity);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
   // The 'e' hotkey from inside a block is reserved for entities opened from
   // the inbox/mail lists, mirroring the j/k gating in
   // use-soup-navigation-hotkeys.
   const canUseMarkDoneHotkey = () => {
     const referredFrom = splitPanel?.handle.referredFrom();
-    return referredFrom === 'inbox' || referredFrom === 'mail';
+    return referredFrom === 'home' || referredFrom === 'mail';
   };
 
-  // The canvas block binds 'h' to its hand tool in this same scope
-  // (CanvasController). Canvas keeps the key; the reminder falls back to its
-  // command-menu-only registration there so no shortcut is advertised that the
-  // hand tool would swallow.
-  const canUseReminderHotkey = () => {
+  /** Follows the list's next row into this split, as the triage flow does. */
+  const advanceSplitTo = ({
+    entity: nextEntity,
+  }: EntityActionNavigationEvent) => {
+    const splitHandle = splitPanel?.handle;
+    if (!splitHandle) return;
+    if (!nextEntity) {
+      return;
+    }
+
+    void openEntityInSplitFromUnifiedList(nextEntity, {
+      splitHandle,
+      mergeHistory: true,
+      referredFrom: splitHandle.referredFrom(),
+      notificationSource,
+    });
+  };
+
+  // Advance the invoking email view after a confirmed snooze.
+  const createReminderAction = makeCreateReminderAction({
+    onEmailSaved: options.onEmailReminderSaved,
+  });
+
+  /**
+   * The soup row for the entity when this block is being triaged out of a list,
+   * which is what decides between advancing the split and leaving it be.
+   */
+  const triageRow = () => {
     const entity = getEntity();
-    return !(
-      entity &&
-      isDocumentEntity(entity) &&
-      entity.fileType === 'canvas'
-    );
+    if (!entity || !canUseMarkDoneHotkey() || !soup) return undefined;
+    return soup.items.get(entity.id);
   };
 
   const runCreateReminder = () => {
     const entity = getEntity();
     if (!entity) return false;
     if (!createReminderAction.canExecute(entity)) return false;
+
+    // Driven through soup when the block is being triaged out of a list. Having
+    // a `triageRow` is the same condition 'e' advances on, so the mark-done
+    // that follows moves to the next row exactly as Mark done does rather than
+    // leaving the split on one the list has dropped.
+    const selectedRow = triageRow();
+    if (soup && selectedRow) {
+      void createReminderAction.executeWithSoup([selectedRow.original], soup, {
+        advances: true,
+        onNavigate: advanceSplitTo,
+      });
+      return true;
+    }
+
     createReminderAction.execute([entity]);
+    return true;
+  };
+
+  const runDelete = () => {
+    const entity = getEntity();
+    if (!entity) return false;
+    if (!deleteAction.canExecute(entity)) return false;
+    deleteAction.execute([entity]);
     return true;
   };
 
@@ -146,28 +202,20 @@ export const useBlockEntityCommands = (
 
     // Plain mark done, no advance: the command-menu registration outside the
     // triage flow, or the entity is no longer in the surviving soup list.
-    const selectedRow = soup?.items.get(entity.id);
-    if (!canUseMarkDoneHotkey() || !soup || !selectedRow) {
+    const selectedRow = triageRow();
+    if (!soup || !selectedRow) {
       markDone.execute([entity]);
       return true;
     }
 
     // Triage flow: mark done and advance to the next item in the list.
-    markDone.executeWithSoup([selectedRow.original], soup, (nextEntity) => {
-      const splitHandle = splitPanel?.handle;
-      if (!splitHandle) return;
-      void openEntityInSplitFromUnifiedList(nextEntity, {
-        splitHandle,
-        mergeHistory: true,
-        referredFrom: splitHandle.referredFrom(),
-      });
-    });
+    markDone.executeWithSoup([selectedRow.original], soup, advanceSplitTo);
 
     return true;
   };
 
   createEffect(() => {
-    const scopeId = blockHotkeyScopeSignal.get();
+    const scopeId = options.scopeId ?? blockHotkeyScopeSignal.get();
     if (!scopeId) return;
 
     const group = createHotkeyGroup();
@@ -203,19 +251,41 @@ export const useBlockEntityCommands = (
       tags: [HotkeyTags.SelectionModification],
     }).withGroup(group);
 
+    // Delete without a keybinding: Backspace belongs to whatever editor the
+    // block hosts, so the command menu is the only way in.
     registerHotkey({
       scopeId,
       description: 'Delete item',
-      keyDownHandler: () => {
-        const entity = getEntity();
-        if (!entity) return false;
-        if (!deleteAction.canExecute(entity)) return false;
-        deleteAction.execute([entity]);
-        return true;
-      },
+      keyDownHandler: runDelete,
       condition: () => {
         const entity = getEntity();
-        return entity !== undefined && deleteAction.canExecute(entity);
+        return (
+          entity !== undefined &&
+          !isEmailEntity(entity) &&
+          deleteAction.canExecute(entity)
+        );
+      },
+      displayPriority: 10,
+      tags: [HotkeyTags.SelectionModification],
+    }).withGroup(group);
+
+    // An open email thread answers to '#' as its list does, so Trash is one
+    // keystroke whether the thread is a row or the thing being read. Unlike
+    // Backspace above, '#' costs an editor nothing: the reply composer is an
+    // editable input, where no hotkey runs.
+    registerHotkey({
+      hotkey: ['shift+3'],
+      hotkeyToken: TOKENS.email.trash,
+      scopeId,
+      description: 'Delete item',
+      keyDownHandler: runDelete,
+      condition: () => {
+        const entity = getEntity();
+        return (
+          entity !== undefined &&
+          isEmailEntity(entity) &&
+          deleteAction.canExecute(entity)
+        );
       },
       displayPriority: 10,
       tags: [HotkeyTags.SelectionModification],
@@ -262,6 +332,49 @@ export const useBlockEntityCommands = (
       condition: () => {
         const entity = getEntity();
         return entity !== undefined && favoriteAction.canExecute(entity);
+      },
+      displayPriority: 10,
+      tags: [HotkeyTags.SelectionModification],
+    }).withGroup(group);
+
+    // Mute notifications (command menu only, no keybinding)
+    registerHotkey({
+      scopeId,
+      description: 'Snooze notifications…',
+      keywords: ['pause', 'morning', 'weekend', 'notifications'],
+      keyDownHandler: () => {
+        const entity = getEntity();
+        if (!entity || !muteAction.canExecute(entity)) return false;
+        muteAction.snooze([entity]);
+        return true;
+      },
+      condition: () => {
+        const entity = getEntity();
+        return entity !== undefined && muteAction.canExecute(entity);
+      },
+      displayPriority: 10,
+      tags: [HotkeyTags.SelectionModification],
+    }).withGroup(group);
+
+    registerHotkey({
+      hotkeyToken: TOKENS.entity.action.mute,
+      scopeId,
+      description: () => {
+        const entity = getEntity();
+        return entity && muteAction.isMuted(entity)
+          ? 'Unmute notifications'
+          : 'Mute notifications';
+      },
+      keyDownHandler: () => {
+        const entity = getEntity();
+        if (!entity) return false;
+        if (!muteAction.canExecute(entity)) return false;
+        void muteAction.execute([entity]);
+        return true;
+      },
+      condition: () => {
+        const entity = getEntity();
+        return entity !== undefined && muteAction.canExecute(entity);
       },
       displayPriority: 10,
       tags: [HotkeyTags.SelectionModification],
@@ -369,9 +482,7 @@ export const useBlockEntityCommands = (
       tags: [HotkeyTags.SelectionModification],
     }).withGroup(group);
 
-    // Set a reminder - 'h'. 'add' rather than the default 'override', so this
-    // and the canvas hand tool coexist in the scope instead of whichever
-    // registered last evicting the other.
+    // Snooze the current email with H.
     registerHotkey({
       hotkey: ['h'],
       hotkeyToken: TOKENS.entity.action.createReminder,
@@ -379,26 +490,10 @@ export const useBlockEntityCommands = (
       description: 'Remind me',
       keyDownHandler: runCreateReminder,
       condition: () => {
-        if (!canUseReminderHotkey()) return false;
         const entity = getEntity();
         return entity !== undefined && createReminderAction.canExecute(entity);
       },
       registrationType: 'add',
-      displayPriority: 10,
-      tags: [HotkeyTags.SelectionModification],
-    }).withGroup(group);
-
-    // Set a reminder without a keybinding on canvas, so it stays reachable
-    // from the command menu
-    registerHotkey({
-      scopeId,
-      description: 'Remind me',
-      keyDownHandler: runCreateReminder,
-      condition: () => {
-        if (canUseReminderHotkey()) return false;
-        const entity = getEntity();
-        return entity !== undefined && createReminderAction.canExecute(entity);
-      },
       displayPriority: 10,
       tags: [HotkeyTags.SelectionModification],
     }).withGroup(group);
@@ -430,7 +525,7 @@ export const useBlockEntityCommands = (
       keyDownHandler: () => {
         const entity = getEntity();
         if (!entity) return false;
-        openPropertyEditor([entity], 'tag', undefined, {
+        addTagAction.execute([entity], {
           restoreFocus: () => {
             if (soup) return restoreSoupFocus(entity.id);
           },
@@ -439,7 +534,7 @@ export const useBlockEntityCommands = (
       },
       condition: () => {
         const entity = getEntity();
-        return entity !== undefined && canAssignTags(entity);
+        return entity !== undefined && addTagAction.canExecute(entity);
       },
       displayPriority: 10,
       tags: [HotkeyTags.SelectionModification],

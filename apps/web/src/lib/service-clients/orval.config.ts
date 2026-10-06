@@ -14,6 +14,19 @@ export default defineConfig({
       target: './service-auth/openapi.json',
     },
   },
+  calendarService: {
+    output: {
+      client: 'fetch',
+      target: './service-calendar/generated/client.ts',
+      schemas: './service-calendar/generated/schemas',
+      override: {
+        useDates: false,
+      },
+    },
+    input: {
+      target: './service-calendar/openapi.json',
+    },
+  },
   cognitionService: {
     output: {
       client: 'fetch',
@@ -177,28 +190,14 @@ export default defineConfig({
           /^Document(Created|Updated|Deleted|Copied)Metadata$/,
           /^Channel(Created|Updated|Deleted)Metadata$/,
           /^ChannelParticipant(Added|Removed)Metadata$/,
-          /^ChannelMessage(Posted|Patched|Deleted)Metadata$/,
-          /^ChannelMessageAttachment(Created|Removed)Metadata$/,
-          /^ChannelMentionedMetadata$/,
+          /^MessageTopicEvent$/,
+          /^Message(Posted|Patched|Deleted|Mentioned)Metadata$/,
+          /^MessageAttachment(Created|Removed)Metadata$/,
+          /^MessageEventAttachment$/,
           /^ChannelEventAttachment$/,
           /^ChannelSender$/,
         ],
       },
-    },
-  },
-  syncService: {
-    output: {
-      client: 'fetch',
-      // Kept under `generated/http` so it doesn't collide with the bebop
-      // websocket schema in `generated/schema.ts`.
-      target: './service-sync/generated/http/client.ts',
-      schemas: './service-sync/generated/http/schemas',
-      override: {
-        useDates: false,
-      },
-    },
-    input: {
-      target: './service-sync/openapi.json',
     },
   },
   unfurlService: {
@@ -212,6 +211,19 @@ export default defineConfig({
     },
     input: {
       target: './service-unfurl/openapi.json',
+    },
+  },
+  agentHarnessService: {
+    output: {
+      client: 'fetch',
+      target: './service-agent-harness/generated/client.ts',
+      schemas: './service-agent-harness/generated/schemas',
+      override: {
+        useDates: false,
+      },
+    },
+    input: {
+      target: './service-agent-harness/openapi.json',
     },
   },
 });

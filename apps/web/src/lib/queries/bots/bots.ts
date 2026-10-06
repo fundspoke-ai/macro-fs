@@ -2,14 +2,15 @@ import { throwOnErr } from '@core/util/result';
 import { queryClient } from '@queries/client';
 import { storageServiceClient } from '@service-storage/client';
 import type { Bot } from '@service-storage/generated/schemas/bot';
-import { useMutation, useQuery } from '@tanstack/solid-query';
+import { queryOptions, useMutation, useQuery } from '@tanstack/solid-query';
 import { channelKeys } from '../channel/keys';
-import { botKeys } from './keys';
+import { botKeys, botProfileKeys } from './keys';
 
 type CreateBotParams = {
   avatarUrl?: string;
   description?: string;
   handle: string;
+  hasAgent?: boolean;
   name: string;
   teamId?: string;
 };
@@ -20,7 +21,8 @@ type CreateBotTokenParams = {
   expiresAt?: string;
 };
 
-type UpdateBotParams = Omit<CreateBotParams, 'teamId'> & {
+/** PATCH /bots/{bot_id} leaves every omitted field unchanged. */
+type UpdateBotParams = Partial<Omit<CreateBotParams, 'teamId'>> & {
   botId: string;
 };
 
@@ -29,12 +31,16 @@ type DeleteBotParams = {
   channelIds: string[];
 };
 
-export function useBotsQuery() {
-  return useQuery(() => ({
+export function botsQueryOptions() {
+  return queryOptions({
     queryKey: botKeys.list.queryKey,
     queryFn: async (): Promise<Bot[]> =>
       await throwOnErr(() => storageServiceClient.getBots()),
-  }));
+  });
+}
+
+export function useBotsQuery(enabled: () => boolean = () => true) {
+  return useQuery(() => ({ ...botsQueryOptions(), enabled: enabled() }));
 }
 
 export function useBotQuery(botId: () => string) {
@@ -58,6 +64,7 @@ export function useCreateBotMutation() {
           avatar_url: vars.avatarUrl,
           description: vars.description,
           handle: vars.handle,
+          has_agent: vars.hasAgent,
           name: vars.name,
           team_id: vars.teamId,
         })
@@ -77,12 +84,18 @@ export function useUpdateBotMutation() {
           avatar_url: vars.avatarUrl,
           description: vars.description,
           handle: vars.handle,
+          has_agent: vars.hasAgent,
           name: vars.name,
         })
       ),
     onSuccess: async (bot) => {
       queryClient.setQueryData(botKeys.detail(bot.id).queryKey, bot);
-      await invalidateBots();
+      await Promise.all([
+        invalidateBots(),
+        queryClient.invalidateQueries({
+          queryKey: botProfileKeys.detail(bot.id).queryKey,
+        }),
+      ]);
     },
     onError: (error) => console.error('failed to update bot', error),
   }));
@@ -108,6 +121,9 @@ export function useDeleteBotMutation() {
 
       await Promise.all([
         invalidateBots(),
+        queryClient.invalidateQueries({
+          queryKey: botProfileKeys.detail(vars.botId).queryKey,
+        }),
         ...vars.channelIds.flatMap((channelId) => [
           queryClient.invalidateQueries({
             queryKey: channelKeys.channelBots(channelId).queryKey,

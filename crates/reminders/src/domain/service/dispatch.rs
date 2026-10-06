@@ -1,14 +1,4 @@
-//! Dispatch service: delivers reminders that have come due.
-//!
-//! Kept apart from [`RemindersServiceImpl`](super::RemindersServiceImpl) — that
-//! is the caller-facing CRUD use case, scoped to one user; this one sweeps
-//! every user's reminders on a schedule and needs no authorization, because a
-//! reminder only ever notifies the owner who was authorized to create it.
-//!
-//! Two use cases, arriving as two different queue messages. A sweep finds what
-//! is due and fans out one message per firing; each of those delivers a single
-//! firing. Splitting them is what lets a pool of workers deliver in parallel
-//! instead of one process walking a list.
+//! Deliver due email snoozes through idempotent occurrence claims.
 
 #[cfg(test)]
 mod test;
@@ -79,14 +69,14 @@ where
     ///
     /// Claiming first is what stops two workers double-sending; completing last
     /// is what makes a failed delivery retryable rather than lost.
+    ///
     async fn deliver_claimed(
         &self,
         due: &DueReminder,
         now: DateTime<Utc>,
     ) -> Result<DeliveryOutcome, ReminderError> {
-        let reminder_id = due.reminder.id;
+        let reminder_id = due.reminder_id;
         let scheduled_for = due.scheduled_for;
-
         let claimed = self
             .repo
             .claim_occurrence(reminder_id, scheduled_for, now - RETRY_AFTER)
@@ -127,8 +117,7 @@ where
         self.repo
             .complete_occurrence(reminder_id, scheduled_for)
             .await
-            .map_err(|e| rootcause::Report::new(e).into_dynamic())?;
-
+            .map_err(|error| rootcause::Report::new(error).into_dynamic())?;
         Ok(DeliveryOutcome::Delivered)
     }
 }
@@ -188,17 +177,6 @@ where
         else {
             return Ok(DeliveryOutcome::Gone);
         };
-
-        // Recurring reminders are modelled but not dispatched yet. Guarded here
-        // rather than in the query because this is the only place that could
-        // actually send one — and completing it would retire the series.
-        if due.reminder.schedule.repeats() {
-            tracing::warn!(
-                reminder_id = %due.reminder.id,
-                "skipped a due recurring reminder; recurring dispatch is not implemented",
-            );
-            return Ok(DeliveryOutcome::SkippedRecurring);
-        }
 
         self.deliver_claimed(&due, now).await
     }

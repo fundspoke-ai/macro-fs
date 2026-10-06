@@ -37,6 +37,15 @@ export const snippetRawKeys = createQueryKeys('snippetRaw', {
   }),
 });
 
+export const githubPullRequestRefreshKeys = createQueryKeys(
+  'githubPullRequestRefresh',
+  {
+    refresh: (githubKey: string) => ({
+      queryKey: [githubKey],
+    }),
+  }
+);
+
 export const documentGithubPullRequestsKeys = createQueryKeys(
   'documentGithubPullRequests',
   {
@@ -46,9 +55,24 @@ export const documentGithubPullRequestsKeys = createQueryKeys(
   }
 );
 
+export const githubPullRequestChangesKeys = createQueryKeys(
+  'githubPullRequestChanges',
+  {
+    summary: (foreignEntityId: string) => ({
+      queryKey: [foreignEntityId],
+    }),
+    patch: (foreignEntityId: string, changesetId: string) => ({
+      queryKey: [foreignEntityId, changesetId],
+    }),
+  }
+);
+
 export const pullRequestMentionKeys = createQueryKeys('pullRequestMention', {
   foreignEntity: (id: string) => ({
     queryKey: [id],
+  }),
+  byGithubKey: (githubKey: string) => ({
+    queryKey: ['byGithubKey', githubKey],
   }),
 });
 
@@ -66,6 +90,9 @@ export const attachmentReferencesKeys = createQueryKeys(
 export const entityKeys = createQueryKeys('entity', {
   documentMetadata: (documentId: string) => ({
     queryKey: [documentId],
+  }),
+  documentAccessLevel: (documentId: string) => ({
+    queryKey: [documentId, 'accessLevel'],
   }),
   projectData: (projectId: string) => ({
     queryKey: [projectId],
@@ -91,6 +118,18 @@ export const teamTaskKeys = createQueryKeys('teamTask', {
   bySlug: (slug: string) => ({
     queryKey: [slug],
   }),
+});
+
+export const databasesKeys = createQueryKeys('databases', {
+  list: null,
+  starter: (userId: string) => ({ queryKey: [userId] }),
+  detail: (databaseId: string) => ({
+    queryKey: [databaseId],
+  }),
+});
+
+export const savedDatabaseQueryKeys = createQueryKeys('saved-database-query', {
+  definition: (queryId: string) => ({ queryKey: [queryId] }),
 });
 
 export const instructionsMdKeys = createQueryKeys('instructionsMd', {

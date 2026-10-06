@@ -1,8 +1,26 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { openExternalUrl, registerExternalUrlInterceptor } from './url';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type MockInstance,
+  vi,
+} from 'vitest';
+import {
+  buildSimpleEntityUrl,
+  openExternalUrl,
+  registerExternalUrlInterceptor,
+} from './url';
+
+it('copies routine links using the canonical route', () => {
+  expect(
+    new URL(buildSimpleEntityUrl({ type: 'routine', id: 'routine-1' })).pathname
+  ).toBe('/app/routines/routine-1');
+});
 
 describe('openExternalUrl', () => {
-  let openSpy: ReturnType<typeof vi.spyOn>;
+  let openSpy: MockInstance<typeof window.open>;
   const disposers: Array<() => void> = [];
 
   // Register + track the disposer so afterEach can tear it down; interceptors
