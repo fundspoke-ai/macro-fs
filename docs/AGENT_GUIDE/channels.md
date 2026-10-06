@@ -260,6 +260,8 @@ A late webhook does not require reloading the page.
 When the agent requests permission or input, the Magic Chip displays the waiting
 status for its anchored turn. Open the session to answer; editors and owners can
 respond there. The chip follows the agent's next activity after the answer.
+A tool call held for the owner's approval (a turn somebody other than the owner
+prompted) reads `Waiting for approval`; only the owner approves it, in the session.
 
 Coding agents use `macro_internal.set_pull_request` to register an existing or
 new GitHub PR with their session. Macro Internal MCP is hosted by the harness
@@ -900,7 +902,10 @@ Bubble tabs sit in their own row below the channel header:
 `Messages` / `Attachments` / `Calls` / `Participants`.
 `Ask Macro`, `Invite`, and `Call` actions remain in the header. On narrow desktop
 panes, the tab row scrolls horizontally and keeps its text labels. Standalone
-mobile channels keep view selection in the title menu. The `Calls` tab lists
+mobile channels keep view selection in the title menu. The tab row consumes
+space above the active pane: in both a single channel and an adjacent channel
+split, the message composer stays fully visible at the bottom instead of being
+pushed down by the row. The `Calls` tab lists
 recordings for that channel
 (same rows as the Calls soup view, filtered to this channel). The live `Call` tab
 appears while a call is in progress. `Ask Macro` opens a new chat pane with the channel
