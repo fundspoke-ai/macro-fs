@@ -20,7 +20,7 @@ vi.mock('@core/constant/servers', () => ({
   SYNC_SERVICE_HOSTS: { ws: 'wss://sync.test' },
 }));
 vi.mock('@core/constant/featureFlags', () => ({ SYNC_VIA_GATEWAY: false }));
-vi.mock('@service-connection/websocket', () => ({
+vi.mock('@service-connection/websocket-url', () => ({
   resolveWsUrl: () => 'ws://gateway.test',
 }));
 vi.mock('@service-storage/client', () => ({ storageServiceClient: {} }));

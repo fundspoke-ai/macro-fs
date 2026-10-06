@@ -19,7 +19,7 @@ import {
 } from '@macro-inc/collaboration/sync-service/source';
 import type { UrlResolver } from '@macro-inc/collaboration/websocket';
 import { createWebsocketStateSignal } from '@macro-inc/collaboration/websocket/solid/state-signal';
-import { resolveWsUrl as resolveGatewayWsUrl } from '@service-connection/websocket';
+import { resolveWsUrl as resolveGatewayWsUrl } from '@service-connection/websocket-url';
 import { storageServiceClient } from '@service-storage/client';
 import type { ResultAsync } from 'neverthrow';
 import type { DocumentSyncAuthorization } from './authorization';
