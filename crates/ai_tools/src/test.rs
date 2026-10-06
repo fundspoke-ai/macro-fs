@@ -429,6 +429,39 @@ fn every_eager_tool_exists() {
 }
 
 #[test]
+fn forms_are_discoverable_and_access_review_matches_host_capabilities() {
+    for host in [
+        AiHost::Chat,
+        AiHost::AgentSession,
+        AiHost::ChannelBot,
+        AiHost::Mcp,
+    ] {
+        let tools = tools_for(host);
+        for name in [
+            "CreateForm",
+            "ReadForm",
+            "EditForm",
+            "ListForms",
+            "SetFormAccess",
+        ] {
+            assert!(tools.toolset.tools.contains_key(name), "{host:?}: {name}");
+            if !matches!(host, AiHost::Mcp) {
+                assert!(tools.prompt.to_string().contains(name), "{host:?}: {name}");
+            }
+        }
+        assert_eq!(
+            tools.toolset.user_tools.contains_key("SetFormAccess"),
+            matches!(host, AiHost::Chat | AiHost::AgentSession)
+        );
+    }
+    let delegated = subagent_toolset();
+    for name in ["CreateForm", "ReadForm", "EditForm", "ListForms"] {
+        assert!(delegated.tools.contains_key(name));
+    }
+    assert!(!delegated.tools.contains_key("SetFormAccess"));
+}
+
+#[test]
 fn booking_link_mutations_only_defer_on_hosts_that_finish_reviews() {
     for host in [
         AiHost::Chat,
