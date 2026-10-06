@@ -424,7 +424,7 @@ export type Section =
       /**
        * Ordered questions.
        */
-      questions: Question[];
+      questions: Question2Question[];
       kind: 'questions';
     }
   | {
@@ -6426,7 +6426,7 @@ export interface Draft {
 /**
  * A question placement. Requiredness is presence, not qualification.
  */
-export interface Question {
+export interface Question2Question {
   /**
    * Unique key across this draft.
    */
